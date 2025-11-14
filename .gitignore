@@ -18,3 +18,7 @@ dist/
 build/
 *.egg
 *.log
+*/__pycache__/
+*.pyc
+
+

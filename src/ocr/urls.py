@@ -3,5 +3,5 @@ from ocr import views
 
 
 urlpatterns = [
-    path('files/', views.FileSourceListCreateView.as_view(), name='source-files'),
+    path('files/', views.file_source_list_create, name='source-files'),
 ]

@@ -75,6 +75,7 @@ DATABASES['default']['OPTIONS'] = {
     'connect_timeout': 10,
     'sslmode': 'require',
 }
+
 # Augmenter aussi le timeout des sessions
 DATABASES['default']['CONN_MAX_AGE'] = 0
 # Modèle User personnalisé
@@ -134,3 +135,9 @@ STATIC_URL = 'static/'
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# OPENAI Configuration
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+

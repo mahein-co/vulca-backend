@@ -1,0 +1,20 @@
+
+
+# Environnements virtuels
+venv/
+env/
+.venv/
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Caches
+*.egg-info/
+dist/
+build/
+*.egg
+*.log

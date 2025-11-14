@@ -3,13 +3,13 @@ from django.shortcuts import render
 from rest_framework import generics
 from rest_framework.permissions import AllowAny
 
-from ocr.models import SourceFile
-from ocr.serializers import SourceFileSerializer
+from ocr.models import FileSource
+from ocr.serializers import FileSourceSerializer
 
 
-class SourceFileListCreateView(generics.ListCreateAPIView):
-    queryset = SourceFile.objects.all().order_by('-uploaded_at')
-    serializer_class = SourceFileSerializer
+class FileSourceListCreateView(generics.ListCreateAPIView):
+    queryset = FileSource.objects.all().order_by('-uploaded_at')
+    serializer_class = FileSourceSerializer
     permission_classes = [AllowAny]
  
  

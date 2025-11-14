@@ -1,11 +1,11 @@
 from rest_framework import serializers
 
-from ocr.models import SourceFile
+from ocr.models import FileSource
 
 
-class SourceFileSerializer(serializers.ModelSerializer):
+class FileSourceSerializer(serializers.ModelSerializer):
     class Meta:
-        model = SourceFile
+        model = FileSource
         fields = ['id', 'file', 'file_name', 'uploaded_at']
         read_only_fields = ['id', 'file_name', 'uploaded_at']
 

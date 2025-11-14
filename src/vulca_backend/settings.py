@@ -27,6 +27,8 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'app',  # ← GARDEZ SEULEMENT CELUI-CI (supprimez 'app.apps.AppConfig')
+
+    "ocr.apps.OcrConfig",  # APPLICATION OCR
 ]
 
 MIDDLEWARE = [

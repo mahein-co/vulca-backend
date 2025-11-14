@@ -1,24 +1,90 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
 
-
-# Environnements virtuels
+# Virtual environments
 venv/
+ENV/
 env/
-.venv/
-.env
+.venv
 
-# IDEs
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+/media
+/staticfiles
+.env
+.env.local
+
+# IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+.DS_Store
 *.sublime-project
 *.sublime-workspace
 
-# Caches
-*.egg-info/
+# Node/React
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.eslintcache
+.node_repl_history
 dist/
 build/
-*.egg
-*.log
-*/__pycache__/
-*.pyc
+.next/
+out/
 
+# Frontend specific
+/vulca-frontend/build
+/vulca-frontend/dist
+/vulca-frontend/.env.local
+/vulca-frontend/.env.*.local
 
+# OS
+.DS_Store
+Thumbs.db
+.directory
+
+# Testing
+.coverage
+.pytest_cache/
+.tox/
+htmlcov/
+
+# Package managers
+package-lock.json
+yarn.lock
+
+# Misc
+.cache/
+.tmp/
+*.bak
+*.backup

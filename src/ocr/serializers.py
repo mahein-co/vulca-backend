@@ -6,7 +6,7 @@ from ocr.models import FileSource
 class FileSourceSerializer(serializers.ModelSerializer):
     class Meta:
         model = FileSource
-        fields = ['id', 'file', 'file_name', 'uploaded_at']
+        fields = '__all__'
         read_only_fields = ['id', 'file_name', 'uploaded_at']
 
         

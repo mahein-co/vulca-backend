@@ -10,16 +10,16 @@ router.register(r'tasks', views.TaskViewSet, basename='task')
 
 urlpatterns = [
     # Authentication
-    path('auth/signup/', views.SignupAPI.as_view(), name='signup'),
-    path('auth/login/', views.LoginAPI.as_view(), name='login'),
-    path('auth/logout/', views.LogoutAPI.as_view(), name='logout'),
-    path('auth/me/', views.MeAPI.as_view(), name='me'),
-    path('auth/check-approval/', views.CheckApprovalAPI.as_view(), name='check_approval'),
-    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('signup/', views.SignupAPI.as_view(), name='signup'),
+    path('login/', views.LoginAPI.as_view(), name='login'),
+    path('logout/', views.LogoutAPI.as_view(), name='logout'),
+    path('me/', views.MeAPI.as_view(), name='me'),
+    path('check-approval/', views.CheckApprovalAPI.as_view(), name='check_approval'),
+    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     
     # Page d'attente
     path('pending/', views.pending_approval_view, name='pending_approval'),
     
     # REST API
-    path('api/', include(router.urls)),
+    path('', include(router.urls)),
 ]

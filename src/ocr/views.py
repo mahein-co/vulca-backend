@@ -44,7 +44,6 @@ def file_source_list_create(request):
                 {"error": "Type de fichier non supporté."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        print(f"Detected file type: {file_type}")
         # Content extraction
         content = extract_content(file, file_type)
         if not content:

@@ -29,6 +29,9 @@ ENV/
 env/
 .venv
 
+# source file
+*/source_files/
+
 # Django
 *.log
 local_settings.py

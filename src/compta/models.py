@@ -1,11 +1,13 @@
 from django.db import models
 from django.core.validators import MinValueValidator
+from django.core.exceptions import ValidationError
 from decimal import Decimal
+from ocr.models import FileSource
 
-
+# --------------------------------------------------------
+# JOURNAL COMPTABLE (Source de vérité)
+# --------------------------------------------------------
 class Journal(models.Model):
-    """Journal comptable"""
-    
     TYPE_JOURNAL_CHOICES = [
         ('ACHAT', 'Journal des achats'),
         ('VENTE', 'Journal des ventes'),
@@ -15,173 +17,178 @@ class Journal(models.Model):
         ('AN', 'Journal des à-nouveaux'),
     ]
     
+    file_source = models.ForeignKey(
+        'ocr.FileSource',  
+        on_delete=models.CASCADE,
+        related_name='journals',
+        null=True,
+    )
+    
     date = models.DateField(db_index=True)
     numero_piece = models.CharField(max_length=50)
     type_journal = models.CharField(max_length=20, choices=TYPE_JOURNAL_CHOICES)
     numero_compte = models.CharField(max_length=20, db_index=True)
     libelle = models.CharField(max_length=255)
     debit_ar = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[MinValueValidator(Decimal('0.00'))],
-        verbose_name='Débit (Ar)'
+        max_digits=15, decimal_places=2, default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))]
     )
     credit_ar = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[MinValueValidator(Decimal('0.00'))],
-        verbose_name='Crédit (Ar)'
+        max_digits=15, decimal_places=2, default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))]
     )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'journal'
         ordering = ['date', 'numero_piece']
-        verbose_name = 'Journal'
-        verbose_name_plural = 'Journaux'
         indexes = [
             models.Index(fields=['date', 'type_journal']),
             models.Index(fields=['numero_compte', 'date']),
         ]
-    
+
+    def clean(self):
+        if self.debit_ar == 0 and self.credit_ar == 0:
+            raise ValidationError("Une écriture comptable doit avoir un débit ou un crédit non nul")
+
     def __str__(self):
         return f"{self.date} - {self.numero_piece} - {self.libelle}"
 
 
+
+# GRAND LIVRE (Dérivé du Journal)
+
 class GrandLivre(models.Model):
-    """Grand livre - Historique des mouvements par compte"""
-    
+    journal = models.ForeignKey(
+        Journal, on_delete=models.CASCADE,
+        related_name='grand_livre_entries', verbose_name='Écriture journal',
+        null=True, blank=True
+    )
+    numero_compte = models.CharField(max_length=20, db_index=True, null=True, blank=True)
     date = models.DateField(db_index=True)
     numero_piece = models.CharField(max_length=50)
     libelle = models.CharField(max_length=255)
-    debit = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[MinValueValidator(Decimal('0.00'))]
-    )
-    credit = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[MinValueValidator(Decimal('0.00'))]
-    )
-    solde = models.DecimalField(max_digits=15, decimal_places=2, null=True)
+    debit = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'),
+                                validators=[MinValueValidator(Decimal('0.00'))])
+    credit = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'),
+                                 validators=[MinValueValidator(Decimal('0.00'))])
+    solde = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'))
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'grand_livre'
-        ordering = ['date', 'numero_piece']
-        verbose_name = 'Grand Livre'
-        verbose_name_plural = 'Grand Livre'
+        ordering = ['numero_compte', 'date', 'numero_piece']
         indexes = [
+            models.Index(fields=['numero_compte', 'date']),
             models.Index(fields=['date']),
-            models.Index(fields=['numero_piece']),
         ]
-    
-    def __str__(self):
-        return f"{self.date} - {self.numero_piece} - {self.libelle}"
 
+    def save(self, *args, **kwargs):
+        # Remplir automatiquement depuis le Journal
+        if self.journal_id:
+            self.numero_compte = self.journal.numero_compte
+            self.date = self.journal.date
+            self.numero_piece = self.journal.numero_piece
+            self.libelle = self.journal.libelle
+            self.debit = self.journal.debit_ar
+            self.credit = self.journal.credit_ar
+
+        # Calcul du solde cumulatif
+        super().save(*args, **kwargs)
+
+
+    def __str__(self):
+        return f"{self.numero_compte} - {self.date} - {self.libelle}"
+
+
+
+# BALANCE (Synthèse par compte depuis Grand Livre)
 
 class Balance(models.Model):
-    """Balance comptable - Soldes des comptes"""
-    
-    numero_compte = models.CharField(max_length=20, db_index=True)
+    numero_compte = models.CharField(max_length=20, unique=True, db_index=True)
     intitule_du_compte = models.CharField(max_length=255)
-    total_debit = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[MinValueValidator(Decimal('0.00'))]
-    )
-    total_credit = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[MinValueValidator(Decimal('0.00'))]
-    )
-    solde_debit = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[MinValueValidator(Decimal('0.00'))]
-    )
-    solde_credit = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        default=Decimal('0.00'),
-        validators=[MinValueValidator(Decimal('0.00'))]
-    )
+    total_debit = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'),
+                                      validators=[MinValueValidator(Decimal('0.00'))])
+    total_credit = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'),
+                                       validators=[MinValueValidator(Decimal('0.00'))])
+    solde_debit = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'))
+    solde_credit = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'))
     date = models.DateField(db_index=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'balance'
-        ordering = ['numero_compte', 'date']
-        verbose_name = 'Balance'
-        verbose_name_plural = 'Balances'
+        ordering = ['numero_compte']
         indexes = [
             models.Index(fields=['date']),
             models.Index(fields=['numero_compte', 'date']),
         ]
-        constraints = [
-            models.UniqueConstraint(
-                fields=['numero_compte', 'date'],
-                name='unique_balance_compte_date'
-            )
-        ]
-    
+
+    def calculate_from_grand_livre(self):
+        """Calculer la Balance à partir du Grand Livre"""
+        data = GrandLivre.objects.filter(numero_compte=self.numero_compte).aggregate(
+            total_debit=models.Sum('debit'),
+            total_credit=models.Sum('credit')
+        )
+        self.total_debit = data['total_debit'] or Decimal('0.00')
+        self.total_credit = data['total_credit'] or Decimal('0.00')
+        diff = self.total_debit - self.total_credit
+        self.solde_debit = max(diff, Decimal('0.00'))
+        self.solde_credit = max(-diff, Decimal('0.00'))
+        self.save()
+
     def __str__(self):
         return f"{self.numero_compte} - {self.intitule_du_compte} au {self.date}"
 
 
+
+# COMPTE DE RESULTAT (Dérivé de la Balance)
+
 class CompteResultat(models.Model):
-    """Compte de résultat - Charges et Produits"""
-    
-    NATURE_CHOICES = [
-        ('CHARGE', 'Charge'),
-        ('PRODUIT', 'Produit'),
-    ]
-    
+    NATURE_CHOICES = [('CHARGE', 'Charge'), ('PRODUIT', 'Produit')]
+
+    balance = models.ForeignKey(Balance, on_delete=models.CASCADE,
+                                related_name='comptes_resultat', verbose_name='Balance source',
+                                null=True, blank=True)
+
     numero_compte = models.CharField(max_length=20, db_index=True)
     libelle = models.CharField(max_length=255)
-    montant_ar = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        verbose_name='Montant (Ar)'
-    )
+    montant_ar = models.DecimalField(max_digits=15, decimal_places=2)
     nature = models.CharField(max_length=10, choices=NATURE_CHOICES, db_index=True)
     date = models.DateField(db_index=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'compte_resultat'
         ordering = ['date', 'nature', 'numero_compte']
-        verbose_name = 'Compte de Résultat'
-        verbose_name_plural = 'Comptes de Résultat'
         indexes = [
             models.Index(fields=['date', 'nature']),
             models.Index(fields=['numero_compte']),
         ]
-    
+
+    def save(self, *args, **kwargs):
+        if self.balance_id:
+            self.numero_compte = self.balance.numero_compte
+            self.libelle = self.balance.intitule_du_compte
+            self.date = self.balance.date
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.numero_compte} - {self.libelle} - {self.nature}"
 
 
+# BILAN (Dérivé de la Balance)
+
 class Bilan(models.Model):
-    """Bilan comptable - Actif et Passif"""
-    
-    TYPE_CHOICES = [
-        ('ACTIF', 'Actif'),
-        ('PASSIF', 'Passif'),
-    ]
-    
+    TYPE_CHOICES = [('ACTIF', 'Actif'), ('PASSIF', 'Passif')]
     CATEGORIE_CHOICES = [
         ('ACTIF_IMMOBILISE', 'Actif immobilisé'),
         ('ACTIF_CIRCULANT', 'Actif circulant'),
@@ -191,53 +198,63 @@ class Bilan(models.Model):
         ('DETTES', 'Dettes'),
         ('TRESORERIE_PASSIF', 'Trésorerie - Passif'),
     ]
-    
+
+    balance = models.ForeignKey(Balance, on_delete=models.CASCADE,
+                                related_name='bilans', verbose_name='Balance source',
+                                null=True, blank=True)
+
     numero_compte = models.CharField(max_length=20, db_index=True)
     libelle = models.CharField(max_length=255)
-    montant_ar = models.DecimalField(
-        max_digits=15,
-        decimal_places=2,
-        verbose_name='Montant (Ar)'
-    )
+    montant_ar = models.DecimalField(max_digits=15, decimal_places=2)
     nature = models.CharField(max_length=50, blank=True, null=True)
     date = models.DateField(db_index=True)
     type_bilan = models.CharField(max_length=10, choices=TYPE_CHOICES, db_index=True)
     categorie = models.CharField(max_length=30, choices=CATEGORIE_CHOICES)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'bilan'
         ordering = ['date', 'type_bilan', 'categorie', 'numero_compte']
-        verbose_name = 'Bilan'
-        verbose_name_plural = 'Bilans'
         indexes = [
             models.Index(fields=['date', 'type_bilan']),
             models.Index(fields=['type_bilan', 'categorie']),
         ]
-    
+
+    def save(self, *args, **kwargs):
+        if self.balance_id:
+            self.numero_compte = self.balance.numero_compte
+            self.libelle = self.balance.intitule_du_compte
+            self.date = self.balance.date
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.numero_compte} - {self.libelle} - {self.type_bilan}"
 
 
+
+# ANNEXE COMPTABLE (Lié au Bilan)
+
 class AnnexeComptable(models.Model):
-    """Annexe comptable - Informations complémentaires"""
-    
+    bilan = models.ForeignKey(Bilan, on_delete=models.SET_NULL,
+                              null=True, blank=True, related_name='annexes',
+                              verbose_name='Bilan associé')
+
     date = models.DateField(db_index=True)
     section = models.CharField(max_length=100)
     rubrique = models.CharField(max_length=200)
-    commentaire_donnee = models.TextField(verbose_name='Commentaire / Donnée')
+    commentaire_donnee = models.TextField()
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'annexe_comptable'
         ordering = ['date', 'section', 'rubrique']
-        verbose_name = 'Annexe Comptable'
-        verbose_name_plural = 'Annexes Comptables'
         indexes = [
             models.Index(fields=['date', 'section']),
         ]
-    
+
     def __str__(self):
         return f"{self.date} - {self.section} - {self.rubrique}"

@@ -212,4 +212,69 @@ def extract_content_file_view(request):
         return Response(context, status=status.HTTP_201_CREATED)
 
 
+def classify_accounting(document_json: dict, pcg_mapping: dict):
+    """
+    document_json : dict contenant les champs extraits (facture, banque, reçu…)
+    pcg_mapping   : dict extrait automatiquement du PDF du Plan Comptable Général 2005
+    """
+
+    # Convert mapping PCG → string compact
+    pcg_text = "\n".join([f"{k}: {v}" for k, v in pcg_mapping.items()])
+
+    prompt = f"""
+    Tu es un expert-comptable malgache utilisant le Plan Comptable Général de Madagascar 2005.
+
+    Voici un extrait du mapping PCG à utiliser impérativement :
+    {pcg_text}
+
+    Voici un document extrait (converti en JSON) :
+    {json.dumps(document_json, indent=2)}
+
+    OBJECTIF :
+    1. Déterminer le type de document (facture fournisseur, facture client, relevé bancaire, reçu, etc.)
+    2. Classer l’opération comptable selon le PCG Madagascar.
+    3. Déduire tous les comptes comptables correspondants.
+    4. Produire les écritures comptables (débit/crédit) sous forme JSON.
+
+    RÈGLES :
+    - Utilise **uniquement** les comptes présents dans le mapping PCG fourni.
+    - Si nécessaire, choisis le compte le plus approprié.
+    - Donne le journal sous forme strictement JSON.
+
+    FORMAT DE SORTIE OBLIGATOIRE :
+
+    {
+        "type_document": "...",
+        "classement_pcg": {
+            "compte_debit": "xxx",
+            "compte_credit": "xxx",
+            "libelle_ecriture": "..."
+        },
+        "journal": [
+            {
+            "compte": "xxx",
+            "libelle": "...",
+            "debit": montant,
+            "credit": 0
+            },
+            {
+            "compte": "xxx",
+            "libelle": "...",
+            "debit": 0,
+            "credit": montant
+            }
+        ]
+    }
+    """
+
+    response = client.chat.completions.create(
+        model=settings.OPENAI_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    return json.loads(response.choices[0].message["content"])
+
+
+
 

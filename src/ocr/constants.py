@@ -23,3 +23,47 @@ On te fournit un JSON issu d'un document (facture, paiement, virement, etc.).
 
 Input JSON : {json_in}
 """
+
+
+PCG_MAPPING = {
+    # Achats
+    "601": "Achats stockés - matières premières",
+    "602": "Achats stockés - autres approvisionnements",
+    "606": "Achats non stockés (fournitures)",
+    "607": "Achats de marchandises",
+
+    # Charges externes
+    "615": "Entretien et réparations",
+    "616": "Primes d’assurance",
+    "622": "Honoraires",
+    "623": "Publicité",
+    "625": "Déplacements, missions, réceptions",
+    "626": "Frais postaux et télécommunications",
+    "627": "Services bancaires",
+
+    # Personnel
+    "641": "Rémunérations du personnel",
+    "645": "Charges sociales",
+
+    # Impôts et taxes
+    "635": "Autres impôts, taxes et versements assimilés",
+
+    # Produits
+    "706": "Prestations de services",
+    "707": "Ventes de marchandises",
+
+    # TVA
+    "4456": "TVA déductible",
+    "44562": "TVA sur immobilisations",
+    "44566": "TVA sur autres biens et services",
+    "4457": "TVA collectée",
+
+    # Trésorerie
+    "512": "Banque",
+    "531": "Caisse",
+
+    # Tiers
+    "401": "Fournisseurs",
+    "411": "Clients"
+}
+

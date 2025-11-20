@@ -1,6 +1,9 @@
 FROM python:3.11-slim
 
+# Installer les dépendances PostgreSQL et Tesseract
 RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
     tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 

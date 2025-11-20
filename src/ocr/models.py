@@ -6,9 +6,12 @@ class FileSource(models.Model):
     file = models.FileField(upload_to='source_files/')
     file_name = models.CharField(max_length=255, blank=True, null=True)
     is_ocr_processed = models.BooleanField(default=False)
+    description = models.TextField(blank=True, null=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     def save(self, *args, **kwargs):
+        if self.description:
+            self.is_ocr_processed = True
         if not self.file_name and self.file:
             self.file_name = self.file.name
         return super().save(*args, **kwargs)

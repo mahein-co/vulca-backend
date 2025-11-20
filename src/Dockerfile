@@ -12,4 +12,4 @@ COPY . /app
 
 RUN pip install --no-cache-dir -r requirement.txt
 
-CMD ["gunicorn", "vulca_backend.wsgi"]
+CMD ["gunicorn", "vulca_backend.wsgi:application", "-w", "2", "-k", "gthread", "--threads", "4", "--timeout", "120", "--bind", "0.0.0.0:8000"]

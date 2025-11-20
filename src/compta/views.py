@@ -163,7 +163,7 @@ def generate_journal_view(request):
 
     # Lien avec FileSource si fourni
     file_source = None
-    file_source_id = request.query_params.get("file_source")
+    file_source_id = request.data["file_source"]
     if file_source_id:
         try:
             file_source = FileSource.objects.get(id=file_source_id)

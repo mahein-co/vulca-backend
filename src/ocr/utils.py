@@ -74,7 +74,7 @@ def detect_file_type(file_name):
     else:
         return "unknown"
 
-
+# FORMAT DATE ======================
 def convertir_dates_longues(data):
     """
     Transforme automatiquement toute date au format dd/mm/yyyy en date longue.
@@ -84,7 +84,6 @@ def convertir_dates_longues(data):
         "janvier", "février", "mars", "avril", "mai", "juin",
         "juillet", "août", "septembre", "octobre", "novembre", "décembre"
     ]
-    print("DATA : ", data)
 
     for key, value in data.items():
         if isinstance(value, str) and re.match(r"^\d{2}/\d{2}/\d{4}$", value):
@@ -94,7 +93,7 @@ def convertir_dates_longues(data):
 
     return data
 
-
+# GENERATE DESCRIPTION FILE SOURCE =====================
 def generate_description(data, json, client, model):
 
     # Convertit automatiquement les dates

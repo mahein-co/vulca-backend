@@ -1,5 +1,6 @@
 import PyPDF2, pytesseract, re, pandas as pd
 from PIL import Image
+from datetime import datetime
 
 
 def clean_ai_json(raw: str) -> str:
@@ -74,21 +75,46 @@ def detect_file_type(file_name):
         return "unknown"
 
 
-# charger pcg 2005 
-# def charger_classes_1_a_7_pdf(pdf_path):
-#     doc = fitz.open(pdf_path)
-#     texte_total = ""
-#     for page in doc:
-#         texte_total += page.get_text()
-#     lignes = texte_total.split('\n')
-#     paragraphe_classe = []
-#     garder = False
-#     for ligne in lignes:
-#         texte = ligne.strip()
-#         if re.match(r"^CLASSE\s+1", texte, re.IGNORECASE):
-#             garder = True
-#         elif re.match(r"^CLASSE\s+8", texte, re.IGNORECASE):
-#             garder = False
-#         if garder and texte:
-#             paragraphe_classe.append(texte)
-#     return "\n".join(paragraphe_classe)  
+def convertir_dates_longues(data):
+    """
+    Transforme automatiquement toute date au format dd/mm/yyyy en date longue.
+    Ex : 06/09/2024 → 6 septembre 2024
+    """
+    fr_months = [
+        "janvier", "février", "mars", "avril", "mai", "juin",
+        "juillet", "août", "septembre", "octobre", "novembre", "décembre"
+    ]
+    print("DATA : ", data)
+
+    for key, value in data.items():
+        if isinstance(value, str) and re.match(r"^\d{2}/\d{2}/\d{4}$", value):
+            # transformation
+            d = datetime.strptime(value, "%d/%m/%Y")
+            data[key] = f"{d.day} {fr_months[d.month-1]} {d.year}"
+
+    return data
+
+
+def generate_description(data, json, client, model):
+
+    # Convertit automatiquement les dates
+    processed_data = convertir_dates_longues(data)
+
+    # GPT va analyser tout le JSON automatiquement
+    prompt = f"""
+    Voici un objet JSON contenant des informations diverses :
+
+    {json.dumps(processed_data, indent=2, ensure_ascii=False)}
+
+    Génère une description claire, professionnelle et fluide en français,
+    sans lister les clés, mais en interprétant intelligemment le contenu.
+    """
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5,
+    )
+
+    return completion.choices[0].message.content
+

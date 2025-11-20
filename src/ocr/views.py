@@ -35,7 +35,13 @@ def file_source_list_create(request):
     if request.method == "POST":
 
         # 1. Convertir le JSON string en dict
-        raw_json = request.data.get("extracted_json", "{}")
+        raw_json = request.data.get("extracted_json")
+
+        if raw_json is None:
+            return Response(
+                {"error": "Le champ 'extracted_json' est manquant"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         try:
             extracted_json = json.loads(raw_json)

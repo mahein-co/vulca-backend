@@ -3,7 +3,7 @@ Tu es un expert en extraction de données de pièces comptables.
 
 Analyse le texte fourni et :
 
-1. Identifie automatiquement tous les champs pertinents (numéro facture, Montant TTC, TVA, client, dates, identifiants, devise, etc.) mais sans le details ni des adresses, et ne mets pas d'espace entre les nombres puis stock toujours l'unité monétaire dans le champs devise et met en MGA pour l'Ar et autre pour les autres devises d'un autre pays.
+1. Identifie automatiquement tous les champs pertinents (numéro facture, Montant TTC, TVA, client, dates, identifiants, devise, etc.) mais sans les adresses, et ne mets pas d'espace entre les nombres puis stock toujours l'unité monétaire dans le champs devise et met en MGA pour l'Ar et autre pour les autres devises d'un autre pays.
 
 2. Donne-moi un JSON propre
 3. Utilise des clés JSON standardisées en snake_case
@@ -34,7 +34,7 @@ PCG_MAPPING = {
 
     # Charges externes
     "615": "Entretien et réparations",
-    "616": "Primes d’assurance",
+    "616": "Primes d'assurance",
     "622": "Honoraires",
     "623": "Publicité",
     "625": "Déplacements, missions, réceptions",

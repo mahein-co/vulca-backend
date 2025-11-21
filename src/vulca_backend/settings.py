@@ -65,10 +65,16 @@ WSGI_APPLICATION = 'vulca_backend.wsgi.application'
 
 # Configuration PostgreSQL Supabase
 DATABASES = {
-    'default': dj_database_url.config(
-        default=os.getenv('DATABASE_URL'),
+    # 'default': dj_database_url.config(
+    #     default=os.getenv('DATABASE_URL'),
+    #     conn_max_age=600,
+    #     conn_health_checks=True,
+    # ),
+
+    # RENDER DATABASE CONNEXION
+     "default": dj_database_url.parse(
+        os.getenv("RENDER_DATABASE_URL"),
         conn_max_age=600,
-        conn_health_checks=True,
     )
 }
 DATABASES['default']['OPTIONS'] = {

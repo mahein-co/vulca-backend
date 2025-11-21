@@ -108,27 +108,27 @@ def extract_content_file_view(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Verification - piece comptable via OpenAI
-        try:
-            response = client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": "Tu es un expert en comptabilité. Réponds uniquement par OUI ou NON."},
-                    {"role": "user",
-                     "content": f"Voici le contenu d'un fichier : {content[:5000]}\n"
-                                "Dis-moi si c'est une pièce comptable (facture, reçu, devis, note de frais, bon de commande, etc.)."}
-                ],
-                temperature=0
-            )
-            decision = response.choices[0].message.content.strip().lower()
-        except Exception as e:
-            return Response({"error": f"Erreur OpenAI : {str(e)}"},
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        # # Verification - piece comptable via OpenAI
+        # try:
+        #     response = client.chat.completions.create(
+        #         model=settings.OPENAI_MODEL,
+        #         messages=[
+        #             {"role": "system", "content": "Tu es un expert en comptabilité. Réponds uniquement par OUI ou NON."},
+        #             {"role": "user",
+        #              "content": f"Voici le contenu d'un fichier : {content[:5000]}\n"
+        #                         "Dis-moi si c'est une pièce comptable (facture, reçu, devis, note de frais, bon de commande, etc.)."}
+        #         ],
+        #         temperature=0
+        #     )
+        #     decision = response.choices[0].message.content.strip().lower()
+        # except Exception as e:
+        #     return Response({"error": f"Erreur OpenAI : {str(e)}"},
+        #                     status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        if decision not in ["oui", "yes"]:
-            return Response({"error": "Le fichier n'est pas reconnu comme une pièce comptable.",
-                             "ai_decision": decision},
-                            status=status.HTTP_400_BAD_REQUEST)
+        # if decision not in ["oui", "yes"]:
+        #     return Response({"error": "Le fichier n'est pas reconnu comme une pièce comptable.",
+        #                      "ai_decision": decision},
+        #                     status=status.HTTP_400_BAD_REQUEST)
 
         # Extraction JSON structuré du document
         try:
@@ -168,7 +168,6 @@ def extract_content_file_view(request):
                 "extracted_json": extracted_json,
             }
         return Response(context, status=status.HTTP_201_CREATED)
-
 
 
 

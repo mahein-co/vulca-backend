@@ -1,10 +1,12 @@
-from .pcg_loader import load_pcg_mapping_from_pdf
-EXTRACTION_FIELDS_PROMPT = f"""
+from ocr.pcg_loader import load_pcg_mapping_from_pdf
+
+
+EXTRACTION_FIELDS_PROMPT = """
 Tu es un expert en extraction de données de pièces comptables.
 
 Analyse le texte fourni et :
 
-1. Identifie automatiquement tous les champs pertinents (numéro facture, Montant TTC, TVA, client, dates, identifiants, devise, etc.) mais sans les adresses, et ne mets pas d'espace entre les nombres puis stock toujours l'unité monétaire dans le champs devise et met en MGA pour l'Ar et autre pour les autres devises d'un autre pays.
+1. Identifie automatiquement tous les champs pertinents (numéro facture, Montant TTC, TVA, client, dates, identifiants, devise, etc.). Ne mets pas d'espace entre les nombres puis stock toujours l'unité monétaire dans le champs devise et mets en MGA pour l'Ar et autre pour les autres devises d'un autre pays.
 
 2. Donne-moi un JSON propre
 3. Utilise des clés JSON standardisées en snake_case

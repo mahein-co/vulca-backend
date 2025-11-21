@@ -126,7 +126,18 @@ def extract_content_file_view(request):
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         if decision not in ["oui", "yes"]:
-            return Response({"error": "Le fichier n'est pas reconnu comme une pièce comptable.",
+            response = client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": "Tu es un expert en comptabilité. Donnes la raison en une seule phrase courte et simple pourquoi le contenu fourni n'est pas consideré comme une pièce comptable."},
+                    {"role": "user",
+                     "content": f"Voici le contenu d'un fichier : {content[:5000]}\n"
+                                "Dis-moi la raison que ce n'est pas une pièce comptable (facture, reçu, devis, note de frais, bon de commande, etc.)."}
+                ],
+                temperature=0
+            )
+            reason = response.choices[0].message.content.strip()
+            return Response({"error": f"Le fichier n'est pas reconnu comme une pièce comptable. {reason}",
                              "ai_decision": decision},
                             status=status.HTTP_400_BAD_REQUEST)
 

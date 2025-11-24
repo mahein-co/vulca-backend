@@ -2,9 +2,10 @@ import PyPDF2, pytesseract, re, pandas as pd
 from PIL import Image
 from datetime import datetime
 from pdf2image import convert_from_path
+import io
 import tempfile
 import os
-import io
+
 
 def clean_ai_json(raw: str) -> str:
     """
@@ -40,9 +41,9 @@ def clean_ai_json(raw: str) -> str:
         return candidate.strip()
     else:
         return raw  
-
-
 def extract_content(file, file_type):
+    import platform
+
     text = ""
 
     # Lire tout le fichier en bytes pour ne PAS perdre le curseur
@@ -52,37 +53,64 @@ def extract_content(file, file_type):
     if file_type == "pdf":
 
         # ---- 1) Lecture texte normal avec PyPDF2 ----
-        reader = PyPDF2.PdfReader(file_stream)
-        extracted_text = ""
+        try:
+            reader = PyPDF2.PdfReader(file_stream)
+            extracted_text = ""
 
-        for page in reader.pages:
-            try:
-                page_text = page.extract_text()
-                if page_text:
-                    extracted_text += page_text + "\n"
-            except:
-                pass
+            for page in reader.pages:
+                try:
+                    page_text = page.extract_text()
+                    if page_text:
+                        extracted_text += page_text + "\n"
+                except:
+                    pass
 
-        if extracted_text.strip():
-            return extracted_text   # PDF normal → OK
+            if extracted_text.strip():
+                return extracted_text
+        except:
+            pass
 
         # ---- 2) PDF scanné → OCR ----
-        # IMPORTANT : remettre un nouveau stream pour pdf2image
         file_stream.seek(0)
 
-        # Sauver le fichier dans un tmp, car pdf2image lit un chemin
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(file_stream.read())
             tmp_path = tmp.name
 
         try:
+
+            # -------------------------
+            # 🔍 Auto-détection POPPLER
+            # -------------------------
+            system = platform.system()
+            poppler_path = None
+
+            if system == "Windows":
+                # essai automatique dans le répertoire utilisateur
+                base = os.path.expanduser("~")
+                possible_poppler = os.path.join(base, "poppler", "Library", "bin")
+
+                if os.path.isdir(possible_poppler):
+                    poppler_path = possible_poppler
+                else:
+                    # si poppler n'existe pas → avertissement
+                   # print("⚠️ Poppler n'est pas installé localement dans ~/poppler/")
+                    poppler_path = None  # laisser None → tentera sans chemin
+
+            # Linux / Render → poppler_path = None (pdftoppm dans PATH)
+            # -------------------------
+
             images = convert_from_path(
                 tmp_path,
-                poppler_path=r"C:\poppler-25.11.0\Library\bin"  # ← ton chemin Poppler Windows
+                poppler_path=poppler_path
             )
 
             for img in images:
                 text += pytesseract.image_to_string(img)
+
+        except Exception as e:
+            print("❌ OCR PDF ERROR :", e)
+            raise e
 
         finally:
             os.remove(tmp_path)
@@ -105,6 +133,7 @@ def extract_content(file, file_type):
         return df.astype(str).agg(' '.join, axis=1).str.cat(sep='\n')
 
     return text
+
 
 # Detect file type based on extension
 def detect_file_type(file_name):

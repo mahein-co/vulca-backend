@@ -6,6 +6,7 @@ ENV PORT=8000
 RUN apt-get update && apt-get install -y \
     build-essential \
     libpq-dev \
+    poppler-utils \
     tesseract-ocr \
     tesseract-ocr-eng \
     libtesseract-dev \

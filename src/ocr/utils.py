@@ -1,7 +1,10 @@
 import PyPDF2, pytesseract, re, pandas as pd
 from PIL import Image
 from datetime import datetime
-
+from pdf2image import convert_from_path
+import tempfile
+import os
+import io
 
 def clean_ai_json(raw: str) -> str:
     """
@@ -38,25 +41,68 @@ def clean_ai_json(raw: str) -> str:
     else:
         return raw  
 
-# Extract content from various file types for OCR processing
+
 def extract_content(file, file_type):
     text = ""
+
+    # Lire tout le fichier en bytes pour ne PAS perdre le curseur
+    file_bytes = file.read()
+    file_stream = io.BytesIO(file_bytes)
+
     if file_type == "pdf":
-        reader = PyPDF2.PdfReader(file)
+
+        # ---- 1) Lecture texte normal avec PyPDF2 ----
+        reader = PyPDF2.PdfReader(file_stream)
+        extracted_text = ""
+
         for page in reader.pages:
-            text += page.extract_text() + "\n"
+            try:
+                page_text = page.extract_text()
+                if page_text:
+                    extracted_text += page_text + "\n"
+            except:
+                pass
 
+        if extracted_text.strip():
+            return extracted_text   # PDF normal → OK
+
+        # ---- 2) PDF scanné → OCR ----
+        # IMPORTANT : remettre un nouveau stream pour pdf2image
+        file_stream.seek(0)
+
+        # Sauver le fichier dans un tmp, car pdf2image lit un chemin
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(file_stream.read())
+            tmp_path = tmp.name
+
+        try:
+            images = convert_from_path(
+                tmp_path,
+                poppler_path=r"C:\poppler-25.11.0\Library\bin"  # ← ton chemin Poppler Windows
+            )
+
+            for img in images:
+                text += pytesseract.image_to_string(img)
+
+        finally:
+            os.remove(tmp_path)
+
+        return text
+
+    # ---- IMAGES ----
     elif file_type in ["png", "jpg", "jpeg"]:
-        image = Image.open(file)
-        text = pytesseract.image_to_string(image)
+        image = Image.open(io.BytesIO(file_bytes))
+        return pytesseract.image_to_string(image)
 
+    # ---- EXCEL ----
     elif file_type in ["xls", "xlsx"]:
-        df = pd.read_excel(file)
-        text = df.astype(str).agg(' '.join, axis=1).str.cat(sep='\n')
+        df = pd.read_excel(io.BytesIO(file_bytes))
+        return df.astype(str).agg(' '.join, axis=1).str.cat(sep='\n')
 
+    # ---- CSV ----
     elif file_type == "csv":
-        df = pd.read_csv(file)
-        text = df.astype(str).agg(' '.join, axis=1).str.cat(sep='\n')
+        df = pd.read_csv(io.BytesIO(file_bytes))
+        return df.astype(str).agg(' '.join, axis=1).str.cat(sep='\n')
 
     return text
 

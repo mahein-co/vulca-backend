@@ -16,9 +16,22 @@ from openai import OpenAI
 from vulca_backend import settings
 from ocr.constants import PCG_MAPPING
 from ocr.utils import clean_ai_json
-from ocr.models import FileSource
+from ocr.models import FileSource, FormSource
 from .serializers import JournalSerializer
-from .models import Journal
+from compta.models import Journal
+from collections import defaultdict
+
+from datetime import date 
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+from openai import OpenAI
+from rest_framework.pagination import PageNumberPagination
 
 # Initialisation OpenAI
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
@@ -149,12 +162,12 @@ def generate_journal_view(request):
         except FileSource.DoesNotExist:
             file_source = None
 
-    # Sauvegarde des lignes du journal
+    # Sauvegarde chaque ligne dans Journal
     saved_lines = []
     for line in ecritures:
         entry = Journal(
             file_source=file_source,
-            date=date_str,
+            date=date,
             numero_piece=numero_piece,
             type_journal=type_journal,
             numero_compte=line["numero_compte"],
@@ -162,23 +175,18 @@ def generate_journal_view(request):
             debit_ar=line["debit_ar"],
             credit_ar=line["credit_ar"],
         )
-
         try:
             entry.clean()
             entry.save()
+            saved_lines.append({
+                "id": entry.id,
+                "compte": entry.numero_compte,
+                "debit": float(entry.debit_ar),
+                "credit": float(entry.credit_ar),
+                "libelle": entry.libelle
+            })
         except ValidationError as e:
-            return Response(
-                {"error": "Erreur validation", "details": str(e)},
-                status=400,
-            )
-
-        saved_lines.append({
-            "id": entry.id,
-            "compte": entry.numero_compte,
-            "libelle": entry.libelle,
-            "debit": float(entry.debit_ar),
-            "credit": float(entry.credit_ar)
-        })
+            return Response({"error": "Erreur de validation", "details": str(e)}, status=400)
 
     return Response({
         "message": "Journal enregistré avec succès",

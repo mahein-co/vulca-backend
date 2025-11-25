@@ -41,6 +41,8 @@ def clean_ai_json(raw: str) -> str:
         return candidate.strip()
     else:
         return raw  
+    
+    
 def extract_content(file, file_type):
     import platform
 

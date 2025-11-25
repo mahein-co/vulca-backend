@@ -7,17 +7,53 @@ from vulca_backend import settings
 from ocr.constants import PCG_MAPPING
 from ocr.utils import clean_ai_json
 from ocr.models import FileSource
+from .serializers import JournalSerializer
 from compta.models import Journal
-from compta.serializers import JournalSerializer
+from collections import defaultdict
 
+from datetime import date 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
-
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+from .models import Journal
 from openai import OpenAI
+from rest_framework.pagination import PageNumberPagination
+
+
 client = OpenAI(api_key=settings.OPENAI_API_KEY) 
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def list_journals_view(request):
+    """
+    Retourne les journaux filtrés par type et par date (aujourd'hui)
+    Avec possibilité pagination pour toutes les écritures
+    """
+
+    journal_type = request.GET.get("type")  # ex: VENTE, ACHAT...
+    show_all = request.GET.get("all", "false").lower() == "true"  # si true => toutes les dates
+
+    # Filtre de base
+    queryset = Journal.objects.all().order_by("date", "numero_piece")
+
+    if journal_type:
+        queryset = queryset.filter(type_journal=journal_type)
+
+    if not show_all:
+        queryset = queryset.filter(date=date.today())
+
+    # Pagination
+    paginator = PageNumberPagination()
+    paginator.page_size = 4
+    paginated_qs = paginator.paginate_queryset(queryset, request)
+    serializer = JournalSerializer(paginated_qs, many=True)
+
+    return paginator.get_paginated_response(serializer.data)
 
 # CLASSIFICATION 
 def classify_accounting(document_json: dict, pcg_mapping: dict):

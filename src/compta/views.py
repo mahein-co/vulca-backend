@@ -7,7 +7,7 @@ from vulca_backend import settings
 from ocr.constants import PCG_MAPPING
 from ocr.utils import clean_ai_json
 from ocr.models import FileSource, FormSource
-from .serializers import JournalSerializer
+from compta.serializers import JournalSerializer
 from compta.models import Journal
 from collections import defaultdict
 

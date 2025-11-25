@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from compta.serializers import JournalSerializer
-from ocr.models import FileSource
+from ocr.models import FileSource, FormSource
 
 
 class FileSourceSerializer(serializers.ModelSerializer):
@@ -13,4 +13,10 @@ class FileSourceSerializer(serializers.ModelSerializer):
 
         
 
+
+class FormSourceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = FormSource
+        fields = '__all__'
+        read_only_fields = ["id", "created_at"]
 

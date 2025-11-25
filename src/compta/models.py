@@ -2,8 +2,6 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
 from decimal import Decimal
-from ocr.models import FileSource
-
 # --------------------------------------------------------
 # JOURNAL COMPTABLE (Source de vérité)
 # --------------------------------------------------------
@@ -16,13 +14,6 @@ class Journal(models.Model):
         ('OD', 'Journal des opérations diverses'),
         ('AN', 'Journal des à-nouveaux'),
     ]
-    
-    file_source = models.ForeignKey(
-        'ocr.FileSource',  
-        on_delete=models.CASCADE,
-        related_name='journals',
-        null=True,
-    )
     
     date = models.DateField(db_index=True)
     numero_piece = models.CharField(max_length=50)

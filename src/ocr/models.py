@@ -2,7 +2,6 @@ from django.db import models
 
 # SOURCE FILE MODEL =====================================
 class FileSource(models.Model):
-    journal = models.ForeignKey("compta.Journal", on_delete=models.SET_NULL, null=True, blank=True, related_name="file_source_journals")
     file = models.FileField(upload_to='source_files/')
     file_name = models.CharField(max_length=255, blank=True, null=True)
     is_ocr_processed = models.BooleanField(default=False)
@@ -24,7 +23,6 @@ class FileSource(models.Model):
 
 
 class FormSource(models.Model):
-    journal = models.ForeignKey("compta.Journal", on_delete=models.SET_NULL, null=True, blank=True, related_name="form_source_journals")
     piece_type = models.CharField(max_length=225, null=False, blank=False)
     description = models.TextField()
 

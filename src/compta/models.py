@@ -29,6 +29,19 @@ class Journal(models.Model):
         validators=[MinValueValidator(Decimal('0.00'))]
     )
 
+    form_source = models.ManyToManyField(
+        'ocr.FormSource',
+        blank=True,
+        null=True,
+        related_name='form_source_journals'
+    )
+    file_source = models.ManyToManyField(
+        'ocr.FileSource',
+        blank=True,
+        null=True,
+        related_name='file_source_journals'
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

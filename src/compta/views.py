@@ -6,7 +6,7 @@ from django.core.exceptions import ValidationError
 from vulca_backend import settings
 from ocr.constants import PCG_MAPPING
 from ocr.utils import clean_ai_json
-from ocr.models import FileSource
+from ocr.models import FileSource, FormSource
 from .serializers import JournalSerializer
 from compta.models import Journal
 from collections import defaultdict
@@ -20,7 +20,6 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
-from .models import Journal
 from openai import OpenAI
 from rest_framework.pagination import PageNumberPagination
 
@@ -206,11 +205,20 @@ def generate_journal_view(request):
         except FileSource.DoesNotExist:
             pass
 
+     # Récupération du FormSource si fourni
+    form_source = None
+    form_source_id = request.data.get("form_source")
+    if form_source_id:
+        try:
+            form_source = FormSource.objects.get(id=form_source_id)
+        except FormSource.DoesNotExist:
+            return Response({"error": f"FormSource {form_source_id} introuvable"}, status=404)
+
+
     # Sauvegarde chaque ligne dans Journal
     saved_lines = []
     for line in ecritures:
         entry = Journal(
-            file_source=file_source,
             date=date,
             numero_piece=numero_piece,
             type_journal=type_journal,
@@ -219,10 +227,19 @@ def generate_journal_view(request):
             debit_ar=line["debit_ar"],
             credit_ar=line["credit_ar"],
         )
-
         try:
             entry.clean()
             entry.save()
+
+            # Lier FileSource / FormSource via ForeignKey
+            if file_source:
+                file_source.journal = entry
+                file_source.save()
+
+            if form_source:
+                form_source.journal = entry
+                form_source.save()
+
             saved_lines.append({
                 "id": entry.id,
                 "compte": entry.numero_compte,
@@ -230,6 +247,7 @@ def generate_journal_view(request):
                 "credit": float(entry.credit_ar),
                 "libelle": entry.libelle
             })
+
         except ValidationError as e:
             return Response({"error": "Erreur de validation", "details": str(e)}, status=400)
 

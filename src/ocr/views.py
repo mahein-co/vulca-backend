@@ -55,7 +55,7 @@ def file_source_list_create(request):
         description = generate_description(
             client=client,
             data=extracted_json,
-            json_obj=json,
+            json=json,
             model=settings.OPENAI_MODEL
         )
 

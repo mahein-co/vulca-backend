@@ -172,7 +172,7 @@ def convertir_dates_longues(data):
 
 
 # -------------------- Génération description --------------------
-def generate_description(data, json_obj, client, model):
+def generate_description(data, json, client, model):
     processed_data = convertir_dates_longues(data)
 
     prompt = f"""

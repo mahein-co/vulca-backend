@@ -22,37 +22,46 @@ from rest_framework.response import Response
 from rest_framework import status
 from openai import OpenAI
 from rest_framework.pagination import PageNumberPagination
-
+from django.db.models import Sum
+from datetime import date
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY) 
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def list_journals_view(request):
-    """
-    Retourne les journaux filtrés par type et par date (aujourd'hui)
-    Avec possibilité pagination pour toutes les écritures
-    """
+    journal_type = request.GET.get("type")
+    show_all = request.GET.get("all", "false").lower() == "true"
 
-    journal_type = request.GET.get("type")  # ex: VENTE, ACHAT...
-    show_all = request.GET.get("all", "false").lower() == "true"  # si true => toutes les dates
-
-    # Filtre de base
-    queryset = Journal.objects.all().order_by("date", "numero_piece")
+    queryset = Journal.objects.all().order_by("-created_at", "numero_piece")
 
     if journal_type:
         queryset = queryset.filter(type_journal=journal_type)
 
     if not show_all:
-        queryset = queryset.filter(date=date.today())
+        queryset = queryset.filter(created_at__date=date.today())
 
-    # Pagination
+    totals = queryset.aggregate(
+        total_debit=Sum("debit_ar"),
+        total_credit=Sum("credit_ar"),
+        total_count=Sum(1)
+    )
+
     paginator = PageNumberPagination()
-    paginator.page_size = 4
+    paginator.page_size = 3
     paginated_qs = paginator.paginate_queryset(queryset, request)
     serializer = JournalSerializer(paginated_qs, many=True)
 
-    return paginator.get_paginated_response(serializer.data)
+    response = paginator.get_paginated_response(serializer.data)
+
+    response.data["totals"] = {
+        "debit": totals["total_debit"] or 0,
+        "credit": totals["total_credit"] or 0,
+        "count": queryset.count()
+    }
+
+    return response
 
 # CLASSIFICATION 
 def classify_accounting(document_json: dict, pcg_mapping: dict):
@@ -122,47 +131,59 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
 def classify_document_with_openai(document_json, pcg_mapping):
     pcg_text = "\n".join([f"{k}: {v}" for k, v in pcg_mapping.items()])
 
+    # Le prompt est renforcé pour obliger l'IA à analyser la nature du document
+    # (qui est le client/fournisseur) avant de comptabiliser.
     prompt = f"""
-    Tu es un expert-comptable malgache.
-    Tu dois classifier et générer les écritures comptables selon le PCG 2005.
+    Tu es un expert-comptable malgache, spécialisé dans le Plan Comptable Général de Madagascar 2005. Ton rôle est de classifier le document ci-dessous et de générer l'écriture comptable correspondante.
 
-    Voici un extrait du PCG :
+    CONTEXTE ET RÈGLES DE CLASSIFICATION :
+    1.  **ACHAT** : Nous sommes le client, le document est une facture fournisseur. Utilise la **TVA DÉDUCTIBLE** (Débit) et le compte **401 Fournisseurs** (Crédit).
+    2.  **VENTE** : Nous sommes le fournisseur, le document est une facture client. Utilise la **TVA COLLECTÉE** (Crédit) et le compte **411 Clients** (Débit).
+    3.  **BANQUE/CAISSE** : Mouvement de trésorerie (512 ou 53X).
+    4.  **OD/AN** : Opération diverse ou à-nouveaux.
+
+    Voici un extrait du PCG (Comptes disponibles) :
     {pcg_text}
 
-    Voici le contenu extrait du document :
+    Voici le contenu extrait du document (à analyser pour la classification) :
     {json.dumps(document_json, ensure_ascii=False, indent=2)}
 
-    Retourne STRICTEMENT ce JSON :
+    CONSIGNES STRICTES DE SORTIE :
+    - Utilise **uniquement** les comptes présents dans le mapping PCG fourni.
+    - Le champ "type_journal" doit être l'une des valeurs suivantes : ACHAT, VENTE, BANQUE, CAISSE, OD, AN.
+    - Le total Débit doit toujours égaler le total Crédit.
+    - Retourne STRICTEMENT ce JSON (sans aucun texte d'explication ou de markdown) :
+
     {{
       "type_journal": "ACHAT | VENTE | BANQUE | CAISSE | OD | AN",
       "numero_piece": "<référence du document>",
       "date": "YYYY-MM-DD",
       "ecritures": [
-         {{
-            "numero_compte": "401",
-            "libelle": "Achat fournitures",
-            "debit_ar": 800000,
-            "credit_ar": 0
-         }},
-         {{
-            "numero_compte": "512",
-            "libelle": "Paiement banque",
+          {{
+            "numero_compte": "XXX",
+            "libelle": "Description",
             "debit_ar": 0,
-            "credit_ar": 800000
-         }}
+            "credit_ar": 0
+          }}
       ]
     }}
     """
 
     response = client.chat.completions.create(
         model=settings.OPENAI_MODEL,
-        messages=[{"role": "user", "content": prompt}],
+        # Ajout d'un System Prompt pour renforcer l'adhésion au format JSON.
+        messages=[
+            {
+                "role": "system",
+                "content": "Tu es expert-comptable malgache (PCG 2005). Ton unique sortie doit être le JSON de l'écriture comptable demandée. Ne réponds rien d'autre."
+            },
+            {"role": "user", "content": prompt}
+        ],
         temperature=0
     )
 
     cleaned = clean_ai_json(response.choices[0].message.content)
     return json.loads(cleaned)
-
 # GENERATE JOURNAL.
 @api_view(["POST"])
 @permission_classes([AllowAny])

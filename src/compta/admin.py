@@ -5,5 +5,5 @@ from compta import models
 
 @admin.register(models.Journal)
 class JournalAdmin(admin.ModelAdmin):
-    list_display = ['libelle', 'numero_piece', 'numero_compte', 'debit_ar', 'credit_ar', 'type_journal', "date"]
+    list_display = ['libelle', 'numero_piece', 'numero_compte', 'debit_ar', 'credit_ar', 'type_journal', "date", "created_at"]
     search_fields = ['id']

@@ -6,18 +6,53 @@ from django.core.exceptions import ValidationError
 from vulca_backend import settings
 from ocr.constants import PCG_MAPPING
 from ocr.utils import clean_ai_json
-from ocr.models import FileSource
+from ocr.models import FileSource, FormSource
+from compta.serializers import JournalSerializer
 from compta.models import Journal
 from compta.serializers import JournalSerializer
 
+from datetime import date 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
-
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
 from openai import OpenAI
+from rest_framework.pagination import PageNumberPagination
+
+
 client = OpenAI(api_key=settings.OPENAI_API_KEY) 
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def list_journals_view(request):
+    """
+    Retourne les journaux filtrés par type et par date (aujourd'hui)
+    Avec possibilité pagination pour toutes les écritures
+    """
+
+    journal_type = request.GET.get("type")  # ex: VENTE, ACHAT...
+    show_all = request.GET.get("all", "false").lower() == "true"  # si true => toutes les dates
+
+    # Filtre de base
+    queryset = Journal.objects.all().order_by("date", "numero_piece")
+
+    if journal_type:
+        queryset = queryset.filter(type_journal=journal_type)
+
+    if not show_all:
+        queryset = queryset.filter(date=date.today())
+
+    # Pagination
+    paginator = PageNumberPagination()
+    paginator.page_size = 4
+    paginated_qs = paginator.paginate_queryset(queryset, request)
+    serializer = JournalSerializer(paginated_qs, many=True)
+
+    return paginator.get_paginated_response(serializer.data)
 
 # CLASSIFICATION 
 def classify_accounting(document_json: dict, pcg_mapping: dict):
@@ -170,11 +205,20 @@ def generate_journal_view(request):
         except FileSource.DoesNotExist:
             pass
 
+     # Récupération du FormSource si fourni
+    form_source = None
+    form_source_id = request.data.get("form_source")
+    if form_source_id:
+        try:
+            form_source = FormSource.objects.get(id=form_source_id)
+        except FormSource.DoesNotExist:
+            return Response({"error": f"FormSource {form_source_id} introuvable"}, status=404)
+
+
     # Sauvegarde chaque ligne dans Journal
     saved_lines = []
     for line in ecritures:
         entry = Journal(
-            file_source=file_source,
             date=date,
             numero_piece=numero_piece,
             type_journal=type_journal,
@@ -183,10 +227,19 @@ def generate_journal_view(request):
             debit_ar=line["debit_ar"],
             credit_ar=line["credit_ar"],
         )
-
         try:
             entry.clean()
             entry.save()
+
+            # Lier FileSource / FormSource via ForeignKey
+            if file_source:
+                file_source.journal = entry
+                file_source.save()
+
+            if form_source:
+                form_source.journal = entry
+                form_source.save()
+
             saved_lines.append({
                 "id": entry.id,
                 "compte": entry.numero_compte,
@@ -194,6 +247,7 @@ def generate_journal_view(request):
                 "credit": float(entry.credit_ar),
                 "libelle": entry.libelle
             })
+
         except ValidationError as e:
             return Response({"error": "Erreur de validation", "details": str(e)}, status=400)
 
@@ -204,5 +258,4 @@ def generate_journal_view(request):
         "date": date,
         "lignes": saved_lines
     }, status=201)
-
 

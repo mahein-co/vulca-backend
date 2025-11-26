@@ -9,8 +9,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 
-from ocr.models import FileSource
-from ocr.serializers import FileSourceSerializer
+from ocr.models import FileSource, FormSource
+from ocr.serializers import FileSourceSerializer, FormSourceSerializer
 from ocr.utils import detect_file_type, extract_content, clean_ai_json, generate_description
 from ocr.constants import EXTRACTION_FIELDS_PROMPT
 
@@ -181,4 +181,60 @@ def extract_content_file_view(request):
         return Response(context, status=status.HTTP_201_CREATED)
 
 
+@api_view(["GET", "POST"])
+@permission_classes([AllowAny])
+def form_source_list_create(request):
+    if request.method == "GET":
+        form_sources = FormSource.objects.all().order_by("-updated_at")
+        serializer = FormSourceSerializer(form_sources, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    if request.method == "POST":
+        # 1. Convertir le JSON string en dict
+        raw_json = request.data.get("description_json")
+
+        if raw_json is None:
+            return Response(
+                {"error": "Le champ 'description_json' est manquant"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Si c'est déjà un dict => pas besoin de json.loads
+        if isinstance(raw_json, dict):
+            description_json = raw_json
+        else:
+            try:
+                description_json = json.loads(raw_json)
+            except json.JSONDecodeError:
+                return Response(
+                    {"error": "description_json doit être un JSON valide"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # 2. Générer description GPT
+        description = generate_description(
+            client=client,
+            data=description_json,
+            json=json,
+            model=settings.OPENAI_MODEL
+        )
+
+        # 3. Ajouter la description dans request.data **avant serializer**
+        data = dict(request.data) 
+        data["description"] = description
+
+        # 4. Sérialisation
+        serializer =  FormSourceSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                {
+                    "status": "success",
+                    "message": "Sauvegarde avec succès.",
+                    "form_source": serializer.data,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

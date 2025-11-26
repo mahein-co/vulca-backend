@@ -226,14 +226,14 @@ def generate_journal_view(request):
         except FileSource.DoesNotExist:
             pass
 
-     # Récupération du FormSource si fourni
+    # Récupération du FormSource si fourni
     form_source = None
-    form_source_id = request.data.get("form_source")
+    form_source_id = request.data["form_source"]
     if form_source_id:
         try:
             form_source = FormSource.objects.get(id=form_source_id)
         except FormSource.DoesNotExist:
-            return Response({"error": f"FormSource {form_source_id} introuvable"}, status=404)
+            pass
 
 
     # Sauvegarde chaque ligne dans Journal

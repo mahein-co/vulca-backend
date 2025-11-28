@@ -7,6 +7,7 @@ import tempfile
 import os
 import json
 import platform
+
 # -------------------- Nettoyage texte OCR --------------------
 def clean_text(text: str) -> str:
     """
@@ -123,7 +124,7 @@ def extract_content(file, file_type):
 
         return extracted_text
 
-    elif file_type in ["png", "jpg", "jpeg"]:
+    elif file_type in ["png", "jpg", "jpeg", "webp"]:
         image = Image.open(io.BytesIO(file_bytes))
         text = pytesseract.image_to_string(image, config="--psm 6")
         return clean_text(text)
@@ -146,7 +147,7 @@ def detect_file_type(file_name):
     ext = file_name.split(".")[-1].lower()
     if ext in ["pdf"]:
         return ext
-    elif ext in ["png", "jpg", "jpeg"]:
+    elif ext in ["png", "jpg", "jpeg", "webp"]:
         return ext
     elif ext in ["xls", "xlsx"]:
         return ext

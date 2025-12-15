@@ -41,7 +41,7 @@ def generate_grand_livre(sender, instance, created, **kwargs):
         debit=debit_ar,
         credit=credit_ar,
         solde=new_solde,
-        description=instance.libelle,
+        # description=instance.libelle,
     )
 
 

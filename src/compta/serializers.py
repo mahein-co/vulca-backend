@@ -1,9 +1,6 @@
 from rest_framework import serializers
-<<<<<<< HEAD
 from .models import Journal, Bilan,CompteResultat
-=======
 from .models import Balance, Bilan, GrandLivre, Journal, CompteResultat
->>>>>>> 44de8f3eb985abde8934825a07faff29e0781211
 
 class JournalSerializer(serializers.ModelSerializer):
     class Meta:
@@ -22,7 +19,6 @@ class JournalSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
-<<<<<<< HEAD
 class BilanSerializer(serializers.ModelSerializer):
     categorie = serializers.CharField()
 
@@ -35,7 +31,6 @@ class BilanSerializer(serializers.ModelSerializer):
         # Supprime espaces invisibles
         return value.strip()
     
-=======
 class GrandLivreSerializer(serializers.ModelSerializer):
     journal_source = serializers.CharField(source='journal.type_journal', read_only=True)
     solde_cumule = serializers.DecimalField(source='solde', max_digits=15, decimal_places=2, read_only=True)
@@ -68,12 +63,10 @@ class BilanSerializer(serializers.ModelSerializer):
         model = Bilan
         fields = '__all__'
 
->>>>>>> 44de8f3eb985abde8934825a07faff29e0781211
 
 class CompteResultatSerializer(serializers.ModelSerializer):
     class Meta:
         model = CompteResultat
-<<<<<<< HEAD
         fields = "__all__"
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -156,6 +149,4 @@ class MargeEndettementSerializer(serializers.Serializer):
     fonds_propres = serializers.DecimalField(max_digits=15, decimal_places=2)
     ratio = serializers.DecimalField(max_digits=5, decimal_places=2)
     alerte = serializers.BooleanField()
-=======
-        fields = '__all__'
->>>>>>> 44de8f3eb985abde8934825a07faff29e0781211
+    fields = '__all__'

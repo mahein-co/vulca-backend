@@ -1,5 +1,7 @@
 import json
 from decimal import Decimal
+from rest_framework import generics
+
 
 from django.core.exceptions import ValidationError
 
@@ -8,9 +10,9 @@ from ocr.constants import PCG_MAPPING
 from ocr.utils import clean_ai_json
 from ocr.models import FileSource, FormSource
 from compta.serializers import JournalSerializer
-from compta.models import Journal
-from compta.serializers import JournalSerializer
-
+from compta.models import Journal, Bilan,CompteResultat,GrandLivre
+from compta.serializers import EbeSerializer,ResultatNetSerializer,BfrSerializer,CafSerializer,LeverageSerializer,AnnuiteCafSerializer,MargeNetteSerializer,ChargeCaSerializer
+from compta.serializers import JournalSerializer, BilanSerializer,CompteResultatSerializer,ChiffreAffaireSerializer,DetteLmtCafSerializer,ChargeEbeSerializer,MargeEndettementSerializer
 from datetime import date 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -24,6 +26,8 @@ from openai import OpenAI
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Sum
 from datetime import date
+from decimal import Decimal
+
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY) 
 
@@ -280,3 +284,604 @@ def generate_journal_view(request):
         "lignes": saved_lines
     }, status=201)
 
+
+
+class BilanListCreateView(generics.ListCreateAPIView):
+    queryset = Bilan.objects.all()
+    serializer_class = BilanSerializer
+    permission_classes = [AllowAny]
+
+class CompteResultatListCreateView(generics.ListCreateAPIView):
+    queryset = CompteResultat.objects.all()
+    serializer_class = CompteResultatSerializer
+    permission_classes = [AllowAny]
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def chiffre_affaire_view(request):
+    """
+    GET /api/chiffre-affaire/?compte=701&date_debut=2025-01-01&date_fin=2025-12-31
+    """
+
+    compte = request.GET.get("compte")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    # Comptes de CA = classe 7
+    queryset = GrandLivre.objects.filter(numero_compte__startswith="7")
+
+    if compte:
+        queryset = queryset.filter(numero_compte=compte)
+
+    if date_debut and date_fin:
+        queryset = queryset.filter(date__range=[date_debut, date_fin])
+
+    data = (
+        queryset
+        .values("numero_compte")
+        .annotate(
+            total_credit=Sum("credit"),
+            total_debit=Sum("debit"),
+        )
+        .order_by("numero_compte")
+    )
+
+    result = []
+    for row in data:
+        credit = row["total_credit"] or Decimal("0.00")
+        debit = row["total_debit"] or Decimal("0.00")
+
+        result.append({
+            "numero_compte": row["numero_compte"],
+            "total_credit": credit,
+            "total_debit": debit,
+            "chiffre_affaire": credit - debit
+        })
+
+    serializer = ChiffreAffaireSerializer(result, many=True)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def ebe_view(request):
+    """
+    Calcul automatique de l'EBE depuis le Grand Livre
+    """
+
+    def solde_classe(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            total_credit=Sum("credit"),
+            total_debit=Sum("debit")
+        )
+        return (data["total_credit"] or Decimal("0.00")) - (data["total_debit"] or Decimal("0.00"))
+
+    chiffre_affaires = solde_classe("7")
+    subventions = solde_classe("74")
+    achats = solde_classe("60")
+    charges_externes = solde_classe("61") + solde_classe("62")
+    impots_taxes = solde_classe("63")
+    charges_personnel = solde_classe("64")
+
+    ebe = (
+        chiffre_affaires
+        + subventions
+        - achats
+        - charges_externes
+        - impots_taxes
+        - charges_personnel
+    )
+
+    payload = {
+        "chiffre_affaires": chiffre_affaires,
+        "subventions": subventions,
+        "achats": achats,
+        "charges_externes": charges_externes,
+        "impots_taxes": impots_taxes,
+        "charges_personnel": charges_personnel,
+        "ebe": ebe,
+    }
+
+    serializer = EbeSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def resultat_net_view(request):
+    """
+    Calcul du Résultat Net depuis le Grand Livre
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            credit=Sum("credit"),
+            debit=Sum("debit")
+        )
+        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+
+    produits = solde("7")
+    charges_exploitation = sum(
+        solde(str(c)) for c in range(60, 66)
+    )
+    charges_financieres = solde("66")
+    produits_financiers = solde("76")
+    charges_exceptionnelles = solde("67")
+    produits_exceptionnels = solde("77")
+    impots_benefices = solde("69")
+
+    resultat_net = (
+        produits
+        - charges_exploitation
+        - charges_financieres
+        + produits_financiers
+        - charges_exceptionnelles
+        + produits_exceptionnels
+        - impots_benefices
+    )
+
+    payload = {
+        "produits": produits,
+        "charges_exploitation": charges_exploitation,
+        "charges_financieres": charges_financieres,
+        "produits_financiers": produits_financiers,
+        "charges_exceptionnelles": charges_exceptionnelles,
+        "produits_exceptionnels": produits_exceptionnels,
+        "impots_benefices": impots_benefices,
+        "resultat_net": resultat_net,
+    }
+
+    serializer = ResultatNetSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def bfr_view(request):
+    """
+    Calcul du BFR depuis le Grand Livre
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            credit=Sum("credit"),
+            debit=Sum("debit")
+        )
+        return (data["debit"] or Decimal("0.00")) - (data["credit"] or Decimal("0.00"))
+
+    stocks = solde("3")
+    creances_clients = solde("411")
+    autres_creances = solde("409") + solde("418")
+    dettes_fournisseurs = solde("401")
+    autres_dettes = solde("408") + solde("419")
+
+    bfr = (
+        stocks
+        + creances_clients
+        + autres_creances
+        - dettes_fournisseurs
+        - autres_dettes
+    )
+
+    payload = {
+        "stocks": stocks,
+        "creances_clients": creances_clients,
+        "autres_creances": autres_creances,
+        "dettes_fournisseurs": dettes_fournisseurs,
+        "autres_dettes": autres_dettes,
+        "bfr": bfr,
+    }
+
+    serializer = BfrSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def caf_view(request):
+    """
+    Calcul de la CAF depuis le Grand Livre
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            credit=Sum("credit"),
+            debit=Sum("debit")
+        )
+        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+
+    # Résultat Net
+    produits = solde("7")
+    charges_exploitation = sum(solde(str(c)) for c in range(60, 66))
+    charges_financieres = solde("66")
+    produits_financiers = solde("76")
+    charges_exceptionnelles = solde("67")
+    produits_exceptionnels = solde("77")
+    impots_benefices = solde("69")
+    resultat_net = (
+        produits
+        - charges_exploitation
+        - charges_financieres
+        + produits_financiers
+        - charges_exceptionnelles
+        + produits_exceptionnels
+        - impots_benefices
+    )
+
+    # Dotations / Reprises
+    dotations = solde("68")
+    reprises = solde("78")
+
+    caf = resultat_net + dotations - reprises
+
+    payload = {
+        "resultat_net": resultat_net,
+        "dotations_amort_provisions": dotations,
+        "reprises_amort_provisions": reprises,
+        "caf": caf
+    }
+
+    serializer = CafSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def leverage_brut_view(request):
+    """
+    Calcul du Leverage brut = Total endettement / EBE
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            credit=Sum("credit"),
+            debit=Sum("debit")
+        )
+        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+
+    # Total endettement (exemple : comptes 16, 17, 19)
+    total_endettement = solde("16") + solde("17") + solde("19")
+
+    # Calcul EBE (même méthode que pour l'EBE API)
+    ca = solde("7")
+    subventions = solde("74")
+    achats = solde("60")
+    charges_ext = solde("61") + solde("62")
+    impots = solde("63")
+    personnel = solde("64")
+    ebe = ca + subventions - achats - charges_ext - impots - personnel
+
+    leverage_brut = Decimal("0.00")
+    if ebe != 0:
+        leverage_brut = total_endettement / ebe
+
+    payload = {
+        "total_endettement": total_endettement,
+        "ebe": ebe,
+        "leverage_brut": leverage_brut.quantize(Decimal("0.01"))
+    }
+
+    serializer = LeverageSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def annuite_caf_view(request):
+    """
+    Ratio : Annuité d'emprunt / CAF
+    """
+
+    def solde(prefix, sens="debit"):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            debit=Sum("debit"),
+            credit=Sum("credit")
+        )
+        if sens == "debit":
+            return data["debit"] or Decimal("0.00")
+        return data["credit"] or Decimal("0.00")
+
+    # 🔹 Annuité d'emprunt
+    remboursement_capital = solde("164") + solde("168")
+    interets = solde("661")
+    annuite_emprunt = remboursement_capital + interets
+
+    # 🔹 CAF
+    def solde_net(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            credit=Sum("credit"),
+            debit=Sum("debit")
+        )
+        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+
+    produits = solde_net("7")
+    charges_exploitation = sum(solde_net(str(c)) for c in range(60, 66))
+    charges_financieres = solde_net("66")
+    produits_financiers = solde_net("76")
+    charges_exceptionnelles = solde_net("67")
+    produits_exceptionnels = solde_net("77")
+    impots_benefices = solde_net("69")
+
+    resultat_net = (
+        produits
+        - charges_exploitation
+        - charges_financieres
+        + produits_financiers
+        - charges_exceptionnelles
+        + produits_exceptionnels
+        - impots_benefices
+    )
+
+    dotations = solde_net("68")
+    reprises = solde_net("78")
+
+    caf = resultat_net + dotations - reprises
+
+    ratio = Decimal("0.00")
+    if caf != 0:
+        ratio = annuite_emprunt / caf
+
+    alerte = ratio > Decimal("0.50")
+
+    payload = {
+        "annuite_emprunt": annuite_emprunt,
+        "caf": caf,
+        "ratio": ratio.quantize(Decimal("0.01")),
+        "alerte": alerte
+    }
+
+    serializer = AnnuiteCafSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def dette_lmt_caf_view(request):
+    """
+    Ratio : Dette LMT / CAF
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            credit=Sum("credit"),
+            debit=Sum("debit")
+        )
+        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+
+    # 🔹 Dette LMT (comptes 16x)
+    dette_lmt = solde("16")
+
+    # 🔹 CAF
+    def solde_net(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            credit=Sum("credit"),
+            debit=Sum("debit")
+        )
+        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+
+    produits = solde_net("7")
+    charges_exploitation = sum(solde_net(str(c)) for c in range(60, 66))
+    charges_financieres = solde_net("66")
+    produits_financiers = solde_net("76")
+    charges_exceptionnelles = solde_net("67")
+    produits_exceptionnels = solde_net("77")
+    impots_benefices = solde_net("69")
+
+    resultat_net = (
+        produits
+        - charges_exploitation
+        - charges_financieres
+        + produits_financiers
+        - charges_exceptionnelles
+        + produits_exceptionnels
+        - impots_benefices
+    )
+
+    dotations = solde_net("68")
+    reprises = solde_net("78")
+
+    caf = resultat_net + dotations - reprises
+
+    ratio = Decimal("0.00")
+    if caf != 0:
+        ratio = dette_lmt / caf
+
+    alerte = ratio >= Decimal("3.50")
+
+    payload = {
+        "dette_lmt": dette_lmt,
+        "caf": caf,
+        "ratio": ratio.quantize(Decimal("0.01")),
+        "alerte": alerte
+    }
+
+    serializer = DetteLmtCafSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def resultat_net_ca_view(request):
+    """
+    Ratio : Résultat net / Chiffre d'affaires
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            debit=Sum("debit"),
+            credit=Sum("credit")
+        )
+        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
+
+    # 🔹 Chiffre d'affaires (70x)
+    chiffre_affaire = solde("70")
+
+    # 🔹 Résultat net
+    produits = solde("7")
+    charges_exploitation = sum(solde(str(c)) for c in range(60, 66))
+    charges_financieres = solde("66")
+    produits_financiers = solde("76")
+    charges_exceptionnelles = solde("67")
+    produits_exceptionnels = solde("77")
+    impots = solde("69")
+
+    resultat_net = (
+        produits
+        - charges_exploitation
+        - charges_financieres
+        + produits_financiers
+        - charges_exceptionnelles
+        + produits_exceptionnels
+        - impots
+    )
+
+    ratio = Decimal("0.00")
+    ratio_pourcent = Decimal("0.00")
+
+    if chiffre_affaire != 0:
+        ratio = resultat_net / chiffre_affaire
+        ratio_pourcent = ratio * Decimal("100")
+
+    payload = {
+        "resultat_net": resultat_net,
+        "chiffre_affaire": chiffre_affaire,
+        "ratio": ratio.quantize(Decimal("0.0001")),
+        "ratio_pourcent": ratio_pourcent.quantize(Decimal("0.01")),
+    }
+
+    serializer = MargeNetteSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def charge_ebe_view(request):
+    """
+    Ratio : Charge financière / EBE
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            debit=Sum("debit"),
+            credit=Sum("credit")
+        )
+        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
+
+    # 🔹 Charge financière (661)
+    charge_financiere = solde("661")
+
+    # 🔹 EBE
+    ca = solde("7")
+    subventions = solde("74")
+    achats = solde("60")
+    charges_ext = solde("61") + solde("62")
+    impots = solde("63")
+    personnel = solde("64")
+
+    ebe = ca + subventions - achats - charges_ext - impots - personnel
+
+    ratio = Decimal("0.00")
+    if ebe != 0:
+        ratio = charge_financiere / ebe
+
+    alerte = ratio >= Decimal("0.30")
+
+    payload = {
+        "charge_financiere": charge_financiere,
+        "ebe": ebe,
+        "ratio": ratio.quantize(Decimal("0.01")),
+        "alerte": alerte
+    }
+
+    serializer = ChargeEbeSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def charge_ca_view(request):
+    """
+    Ratio : Charge financière / Chiffre d'affaires
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            debit=Sum("debit"),
+            credit=Sum("credit")
+        )
+        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
+
+    # 🔹 Charge financière
+    charge_financiere = solde("661")
+
+    # 🔹 Chiffre d'affaires
+    chiffre_affaire = solde("70")
+
+    ratio = Decimal("0.00")
+    if chiffre_affaire != 0:
+        ratio = charge_financiere / chiffre_affaire
+
+    alerte = ratio >= Decimal("0.05")  # 5%
+
+    payload = {
+        "charge_financiere": charge_financiere,
+        "chiffre_affaire": chiffre_affaire,
+        "ratio": ratio.quantize(Decimal("0.02")),
+        "alerte": alerte
+    }
+
+    serializer = ChargeCaSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def marge_endettement_view(request):
+    """
+    Ratio : Dette CMLT / Fonds Propres
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            debit=Sum("debit"),
+            credit=Sum("credit")
+        )
+        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
+
+    # 🔹 Dette CMLT (16x)
+    dette_cmlt = solde("16")
+
+    # 🔹 Fonds Propres (101–106)
+    fonds_propres = sum(solde(str(c)) for c in range(101, 107))
+
+    ratio = Decimal("0.00")
+    if fonds_propres != 0:
+        ratio = dette_cmlt / fonds_propres
+
+    alerte = ratio >= Decimal("1.3")
+
+    payload = {
+        "dette_cmlt": dette_cmlt,
+        "fonds_propres": fonds_propres,
+        "ratio": ratio.quantize(Decimal("0.01")),
+        "alerte": alerte
+    }
+
+    serializer = MargeEndettementSerializer(payload)
+    return Response(serializer.data)

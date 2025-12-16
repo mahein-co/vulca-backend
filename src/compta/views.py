@@ -1,41 +1,35 @@
 import json
 from decimal import Decimal
-from rest_framework import generics
-
+from datetime import datetime, date
 
 from django.core.exceptions import ValidationError
+from django.db.models import Sum
+
+from rest_framework import generics, status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
+
+from openai import OpenAI
+
 from ocr.pcg_loader import get_pcg_label
-from compta.serializers import BilanSerializer, BalanceSerializer, JournalSerializer, CompteResultatSerializer
-from vulca_backend import settings
 from ocr.constants import PCG_MAPPING
 from ocr.utils import clean_ai_json
 from ocr.models import FileSource, FormSource
-<<<<<<< HEAD
-from compta.serializers import JournalSerializer
-from compta.models import Journal, Bilan,CompteResultat,GrandLivre
-from compta.serializers import EbeSerializer,ResultatNetSerializer,BfrSerializer,CafSerializer,LeverageSerializer,AnnuiteCafSerializer,MargeNetteSerializer,ChargeCaSerializer
-from compta.serializers import JournalSerializer, BilanSerializer,CompteResultatSerializer,ChiffreAffaireSerializer,DetteLmtCafSerializer,ChargeEbeSerializer,MargeEndettementSerializer
-=======
+
 from compta.models import Journal, GrandLivre, Bilan, CompteResultat
-from datetime import datetime
->>>>>>> 44de8f3eb985abde8934825a07faff29e0781211
-from datetime import date 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
-from rest_framework import status
-from openai import OpenAI
-from rest_framework.pagination import PageNumberPagination
-from django.db.models import Sum
-from datetime import date
-from decimal import Decimal
+from compta.serializers import (
+    JournalSerializer, BilanSerializer, BalanceSerializer, CompteResultatSerializer,
+    ChiffreAffaireSerializer, EbeSerializer, ResultatNetSerializer, BfrSerializer,
+    CafSerializer, LeverageSerializer, AnnuiteCafSerializer, MargeNetteSerializer,
+    DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer
+)
+
+from vulca_backend import settings
 
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY) 
+client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 @api_view(["GET"])

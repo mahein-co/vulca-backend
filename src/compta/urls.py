@@ -19,3 +19,9 @@ urlpatterns = [
     path("charge-ca/", views.charge_ca_view, name="charge-ca"),
     path("marge-endettement/", views.marge_endettement_view, name="marge-endettement"),
 ]
+    #path("journals/", views.list_journals_view, name="list-journals"),
+    # path("comptes/", views.list_comptes, name="list-comptes"),
+    # path("grand-livre/", views.grand_livre, name="grand-livre"),
+    # path("bilans/", views.bilans_view, name="bilans"),
+    # path("CompteResultats/", views.CompteResultat_view, name="compte-resultat"),
+

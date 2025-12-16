@@ -6,13 +6,14 @@ Tu es un expert en extraction de données de pièces comptables.
 
 Analyse le texte fourni et :
 
-1. Identifie automatiquement tous les champs pertinents (numéro facture, Montant TTC, TVA, client, dates, identifiants, devise, etc.) ainsi que les details possible. Ne mets pas d'espace entre les nombres puis stock toujours l'unité monétaire dans le champs devise et mets en MGA pour l'Ar et autre pour les autres devises d'un autre pays.
+1. Identifie automatiquement tous les champs pertinents (numéro facture, Montant TTC, Montant HT (Hors Taxe), TVA, client, dates, identifiants, devise, Objet/Description, etc.) ainsi que les details possible. Ne mets pas d'espace entre les nombres puis stock toujours l'unité monétaire dans le champs devise et mets en MGA pour l'Ar et autre pour les autres devises d'un autre pays.
 
 2. Donne-moi un JSON propre
-3. Utilise des clés JSON standardisées en snake_case
+3. Utilise des clés JSON standardisées en snake_case (ex: montant_ht, montant_tva, montant_ttc)
 4. Inclus uniquement les champs réellement présents dans le texte
 5. N'invente pas de valeurs
 6. Ne renvoie que du JSON, sans ``` ni texte autour
+7. IMPORTANT : Pour les montants, remplace la VIRGULE par un POINT (ex: "190101,00" -> 190101.00). Ne renvoie JAMAIS d'entiers si le montant a des décimales.
 """
 
 CLASSE_PROMPT_TEMPLATE = """

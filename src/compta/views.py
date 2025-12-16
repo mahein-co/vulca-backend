@@ -489,12 +489,6 @@ def chiffre_affaire_view(request):
             total_credit=Sum("credit"),
             total_debit=Sum("debit"),
         )
-def list_comptes(request):
-    comptes = (
-        GrandLivre.objects
-        .values("numero_compte")
-        .distinct()
-        .order_by("numero_compte")
     )
 
     result = []

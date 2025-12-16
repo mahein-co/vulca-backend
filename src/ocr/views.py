@@ -157,13 +157,33 @@ def has_evidence_in_ocr(value, ocr_text: str) -> bool:
     if norm_val and norm_val in norm_text:
         return True
 
-    # Special handling: dates like YYYY-MM-DD vs DD/MM/YYYY
+    # Special handling: dates like YYYY-MM-DD vs DD/MM/YYYY and French text dates
     m_iso = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", norm_val)
     if m_iso:
         y, m, d = m_iso.groups()
+        # Try DD/MM/YYYY format
         alt = f"{d}/{m}/{y}"
         if alt in norm_text:
             return True
+        # Try DD-MM-YYYY format
+        alt2 = f"{d}-{m}-{y}"
+        if alt2 in norm_text:
+            return True
+        # Try French text format (e.g., "14 avril 2019")
+        french_months = ['janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin',
+                        'juillet', 'aout', 'septembre', 'octobre', 'novembre', 'decembre']
+        month_idx = int(m) - 1
+        if 0 <= month_idx < len(french_months):
+            month_name = french_months[month_idx]
+            # Try with and without leading zero on day
+            for day_format in [d, str(int(d))]:
+                french_date = f"{day_format} {month_name} {y}"
+                if normalize_for_search(french_date) in norm_text:
+                    return True
+                # Try without spaces (OCR might concatenate)
+                french_date_compact = f"{day_format}{month_name}{y}"
+                if normalize_for_search(french_date_compact) in norm_text:
+                    return True
 
     # Fallback: no evidence
     return False
@@ -448,11 +468,21 @@ def file_source_list_create(request):
             )
             
             # Appel direct de la vue avec la requête simulée
-            generate_journal_view(internal_request)
-            print("✅ Journal généré avec succès via generate_journal_view.")
+            response = generate_journal_view(internal_request)
+            
+            # ✅ VÉRIFICATION DU STATUT DE LA RÉPONSE
+            if response.status_code in [200, 201]:
+                print("✅ Journal généré avec succès via generate_journal_view.")
+            else:
+                error_detail = response.data.get("error", "Erreur inconnue") if hasattr(response, 'data') else "Erreur inconnue"
+                print(f"❌ ÉCHEC de la génération du journal (status {response.status_code}): {error_detail}")
+                print(f"   📋 Détails complets: {response.data if hasattr(response, 'data') else 'N/A'}")
 
         except Exception as e:
             print(f"❌ Erreur lors de la génération automatique du journal : {e}")
+            import traceback
+            print(f"   📋 Traceback complet:")
+            traceback.print_exc()
             # On ne bloque pas la réponse, le fichier est bien sauvegardé.
 
         return Response({
@@ -687,8 +717,18 @@ def extract_content_file_view(request):
         "currency": "devise",
         "supplier": "fournisseur",
         "supplier_name": "nom_fournisseur",
-        "invoice_date": "date",
+        # Date field mappings - all variations map to date_facture
+        "date": "date_facture",
+        "date_facture": "date_facture",
+        "date_document": "date_facture",
+        "invoice_date": "date_facture",
+        "document_date": "date_facture",
+        "emission_date": "date_facture",
+        "date_emission": "date_facture",
+        "issue_date": "date_facture",
         "due_date": "date_echeance",
+        "date_echeance": "date_echeance",
+        "payment_date": "date_echeance",
         "description": "description",
         "type_document": "type_document",
         "items": "details",
@@ -729,6 +769,55 @@ def extract_content_file_view(request):
             val = re.sub(r"(\d)([A-Za-z])", r"\1 \2", val)
             val = val.strip()
             extracted_json_fr["banque"] = val
+
+    # Helper pour normaliser les dates vers le format ISO (YYYY-MM-DD)
+    def normalize_date_to_iso(date_str: str) -> str:
+        """Normalize various date formats to ISO format (YYYY-MM-DD).
+        Handles:
+        - French text dates: "14 Avril 2019" -> "2019-04-14"
+        - DD/MM/YYYY: "14/04/2019" -> "2019-04-14"
+        - DD-MM-YYYY: "14-04-2019" -> "2019-04-14"
+        - Already ISO: "2019-04-14" -> "2019-04-14"
+        """
+        if not date_str:
+            return date_str
+        
+        date_str = str(date_str).strip()
+        
+        # French month names mapping
+        french_months = {
+            'janvier': '01', 'février': '02', 'fevrier': '02', 'mars': '03',
+            'avril': '04', 'mai': '05', 'juin': '06', 'juillet': '07',
+            'août': '08', 'aout': '08', 'septembre': '09', 'octobre': '10',
+            'novembre': '11', 'décembre': '12', 'decembre': '12',
+            # Abbreviated forms
+            'janv': '01', 'févr': '02', 'fevr': '02', 'avr': '04',
+            'juil': '07', 'sept': '09', 'oct': '10', 'nov': '11', 'déc': '12', 'dec': '12'
+        }
+        
+        # Try French text format: "14 Avril 2019" or "14Avril2019"
+        match = re.search(r'(\d{1,2})\s*([a-zéèêàâû]+)\s*(\d{4})', date_str, re.I)
+        if match:
+            day, month_name, year = match.groups()
+            month_name_lower = normalize_for_search(month_name)
+            for fr_month, num in french_months.items():
+                if fr_month in month_name_lower or month_name_lower in fr_month:
+                    return f"{year}-{num}-{day.zfill(2)}"
+        
+        # Try DD/MM/YYYY or DD-MM-YYYY
+        match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})', date_str)
+        if match:
+            day, month, year = match.groups()
+            return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+        
+        # Try YYYY-MM-DD (already ISO)
+        match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', date_str)
+        if match:
+            year, month, day = match.groups()
+            return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+        
+        # Return original if no pattern matched
+        return date_str
 
     # Helper pour nettoyer les collages OCR (ex: BNIMadagascarMontant -> BNI Madagascar)
     def clean_collated_value(val: str) -> str:

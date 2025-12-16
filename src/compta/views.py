@@ -72,55 +72,85 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
     """
     document_json : dict contenant les champs extraits (facture, banque, reçu…)
     pcg_mapping   : dict extrait automatiquement du PDF du Plan Comptable Général 2005
+    
+    L'IA agit comme expert-comptable et choisit les comptes UNIQUEMENT depuis le PCG.
     """
-
-    # Convert mapping PCG → string compact
-    pcg_text = "\n".join([f"{k}: {v}" for k, v in pcg_mapping.items()])
+    
+    # ✅ CHARGER LE PCG COMPLET DEPUIS LE PDF
+    from ocr.pcg_loader import load_pcg_mapping_from_pdf
+    pcg_complet = load_pcg_mapping_from_pdf()
+    
+    # Convertir le PCG en texte lisible pour l'IA
+    pcg_text = "\n".join([f"{code}: {label}" for code, label in sorted(pcg_complet.items())])
 
     prompt = f"""
-    Tu es un expert-comptable malgache utilisant le Plan Comptable Général de Madagascar 2005.
-
-    Voici un extrait du mapping PCG à utiliser impérativement :
+    Tu es un expert-comptable malgache certifié, spécialiste du Plan Comptable Général de Madagascar 2005.
+    
+    PLAN COMPTABLE GÉNÉRAL 2005 (COMPLET) :
     {pcg_text}
-
-    Voici un document extrait (converti en JSON) :
-    {json.dumps(document_json, indent=2)}
-
-    OBJECTIF :
-    1. Déterminer le type de document (facture fournisseur, facture client, relevé bancaire, reçu, etc.)
-    2. Classer l'opération comptable selon le PCG Madagascar.
-    3. Déduire tous les comptes comptables correspondants.
-    4. Produire les écritures comptables (débit/crédit) sous forme JSON.
-
-    RÈGLES :
-    - Utilise **uniquement** les comptes présents dans le mapping PCG fourni.
-    - Si nécessaire, choisis le compte le plus approprié.
-    - Donne le journal sous forme strictement JSON.
-
-    FORMAT DE SORTIE OBLIGATOIRE :
-
-    {
-        "type_document": "...",
-        "classement_pcg": {
-            "compte_debit": "xxx",
-            "compte_credit": "xxx",
-            "libelle_ecriture": "..."
-        },
+    
+    DOCUMENT À ANALYSER :
+    {json.dumps(document_json, indent=2, ensure_ascii=False)}
+    
+    MISSION :
+    1. Identifier le type de document comptable
+    2. Déterminer les écritures comptables selon les règles du PCG Madagascar 2005
+    3. Choisir les numéros de compte UNIQUEMENT parmi ceux listés dans le PCG ci-dessus
+    4. Générer les écritures en respectant le principe de la partie double (débit = crédit)
+    
+    DÉTECTION DU TYPE DE DOCUMENT :
+    - Si le document contient "facture" ET un client/nom_client → type_document = "VENTE"
+    - Si le document contient "facture" ET un fournisseur/nom_fournisseur → type_document = "ACHAT"
+    - Si le document contient "banque", "virement", "relevé bancaire" → type_document = "BANQUE"
+    - Si le document contient "caisse", "espèces", "cash" → type_document = "CAISSE"
+    - Si le document contient "opération diverse", "OD" → type_document = "OD"
+    - Si le document contient "à-nouveau", "AN", "report" → type_document = "AN"
+    - Par défaut, si c'est une facture émise par l'entreprise → type_document = "VENTE"
+    - Par défaut, si c'est une facture reçue → type_document = "ACHAT"
+    
+    RÈGLES STRICTES :
+    - Tu DOIS toujours spécifier un type_document valide (VENTE, ACHAT, BANQUE, CAISSE, OD, ou AN)
+    - Tu DOIS utiliser UNIQUEMENT les numéros de compte présents dans le PCG fourni
+    - NE PAS inventer de numéros de compte
+    - Respecter les règles comptables malgaches (PCG 2005)
+    - Assurer l'équilibre comptable (total débit = total crédit)
+    - Pour la TVA : utilise 4456 (TVA déductible) et 4457 (TVA collectée)
+    
+    EXEMPLES DE RÈGLES COMPTABLES :
+    - VENTE : Débit 411 (Clients), Crédit 707 (Ventes), Crédit 4457 (TVA collectée si applicable)
+    - ACHAT : Débit 602/607 (Achats), Débit 4456 (TVA déductible si applicable), Crédit 401 (Fournisseurs)
+    - BANQUE : Utilise 512 (Banques) avec contrepartie appropriée (411 pour encaissement client, 401 pour paiement fournisseur)
+    - CAISSE : Utilise 531 (Caisse) avec contrepartie appropriée
+    
+    FORMAT DE SORTIE OBLIGATOIRE (JSON pur, sans markdown) :
+    {{
+        "type_document": "VENTE",
         "journal": [
-            {
-            "compte": "xxx",
-            "libelle": "...",
-            "debit": montant,
-            "credit": 0
-            },
-            {
-            "compte": "xxx",
-            "libelle": "...",
-            "debit": 0,
-            "credit": montant
-            }
+            {{
+                "compte": "411",
+                "libelle": "Clients",
+                "debit": 120000,
+                "credit": 0
+            }},
+            {{
+                "compte": "707",
+                "libelle": "Ventes de marchandises",
+                "debit": 0,
+                "credit": 100000
+            }},
+            {{
+                "compte": "4457",
+                "libelle": "TVA collectée",
+                "debit": 0,
+                "credit": 20000
+            }}
         ]
-    }
+    }}
+    
+    IMPORTANT : 
+    - Retourne UNIQUEMENT le JSON, sans texte explicatif ni balises markdown
+    - Le champ "type_document" est OBLIGATOIRE et ne doit JAMAIS être vide
+    - Utilise les montants exacts du document (montant_ttc, montant_ht, montant_tva)
     """
 
     response = client.chat.completions.create(
@@ -128,168 +158,91 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
         messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
+    
+    ai_response = response.choices[0].message.content
+    
+    # ✅ Nettoyage de la réponse AI (enlève les ```json ... ``` si présents)
+    cleaned_response = clean_ai_json(ai_response)
+    
+    result = json.loads(cleaned_response)
+    
+    # ✅ VALIDATION : type_document ne doit jamais être vide
+    if not result.get("type_document") or result.get("type_document").strip() == "":
+        # Fallback : essayer de détecter depuis le document_json
+        if "client" in str(document_json).lower() or "nom_client" in document_json:
+            result["type_document"] = "VENTE"
+        elif "fournisseur" in str(document_json).lower() or "nom_fournisseur" in document_json:
+            result["type_document"] = "ACHAT"
+        elif "banque" in str(document_json).lower() or "virement" in str(document_json).lower() or "relevé" in str(document_json).lower():
+            result["type_document"] = "BANQUE"
+        elif "caisse" in str(document_json).lower():
+            result["type_document"] = "CAISSE"
+        else:
+            result["type_document"] = "OD"  # Par défaut
+    
+    return result
 
-    return json.loads(response.choices[0].message["content"])
 
 
 def generate_journal_from_pcg(document_json):
     """
-    Génère automatiquement le journal comptable selon les règles PCG
-    SANS demander à l'IA de choisir les comptes.
-    Les comptes sont déterminés par les règles comptables strictes.
+    Génère automatiquement le journal comptable selon les règles PCG.
+    Utilise l'IA expert-comptable qui choisit les comptes depuis le PCG PDF.
+    AUCUN numéro de compte n'est codé en dur.
     """
     from dateutil import parser as date_parser
     from datetime import date as dt_date
     
-    type_doc = document_json.get("type_document", "").upper()
+    # ✅ EXTRACTION DES DONNÉES DE BASE
     numero_piece = document_json.get("numero_facture") or document_json.get("numero_piece") or document_json.get("reference") or "N/A"
     date_facture_raw = document_json.get("date") or document_json.get("date_facture") or str(dt_date.today())
     
     # ✅ CONVERSION DE DATE : "5 septembre 2024" → "2024-09-05"
     try:
-        # Nettoyer les espaces insécables
         date_facture_raw = date_facture_raw.replace('\xa0', ' ').strip()
-        
-        # Parser la date (supporte DD/MM/YYYY, YYYY-MM-DD, "5 septembre 2024", etc.)
         parsed_date = date_parser.parse(date_facture_raw, dayfirst=True)
         date_facture = parsed_date.strftime("%Y-%m-%d")
     except:
-        # Fallback : date du jour
         date_facture = str(dt_date.today())
     
-    # Extraction des montants
-    montant_ttc = float(document_json.get("montant_ttc", 0) or 0)
-    montant_ht = float(document_json.get("montant_ht", 0) or 0)
-    montant_tva = float(document_json.get("montant_tva", 0) or 0)
+    # ✅ UTILISATION DE L'IA POUR CLASSIFIER SELON PCG
+    # L'IA expert-comptable détermine automatiquement les comptes depuis le PCG PDF
+    try:
+        ai_classification = classify_accounting(document_json, PCG_MAPPING)
+    except Exception as e:
+        raise ValidationError(f"Erreur lors de la classification PCG par IA: {str(e)}")
     
-    # Calcul automatique si manquant
-    if montant_ttc > 0 and montant_tva > 0 and montant_ht == 0:
-        montant_ht = montant_ttc - montant_tva
-    elif montant_ttc == 0 and montant_ht > 0 and montant_tva > 0:
-        montant_ttc = montant_ht + montant_tva
+    # ✅ EXTRACTION DES DONNÉES GÉNÉRÉES PAR L'IA
+    type_doc = ai_classification.get("type_document", "").upper()
+    ecritures_ai = ai_classification.get("journal", [])
     
-    # Noms pour les tiers
-    nom_client = document_json.get("nom_client") or document_json.get("client") or ""
-    nom_fournisseur = document_json.get("fournisseur") or document_json.get("nom_fournisseur") or ""
+    if not ecritures_ai:
+        raise ValidationError("L'IA n'a généré aucune écriture comptable")
     
+    # ✅ FORMATAGE DES ÉCRITURES AVEC LIBELLÉS AUTOMATIQUES VIA PCG_LOADER
     ecritures = []
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # RÈGLES PCG AUTOMATIQUES
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    if type_doc == "VENTE":
-        # Client au débit (TTC)
-        ecritures.append({
-            "numero_compte": "411",
-            "libelle": get_pcg_label("411") or "Clients",
-            "debit_ar": montant_ttc,
-            "credit_ar": 0
-        })
+    for ecriture in ecritures_ai:
+        numero_compte = str(ecriture.get("compte", "")).strip()
         
-        # Ventes au crédit (HT)
-        ecritures.append({
-            "numero_compte": "707",
-            "libelle": get_pcg_label("707") or "Ventes de marchandises",
-            "debit_ar": 0,
-            "credit_ar": montant_ht if montant_tva > 0 else montant_ttc
-        })
+        if not numero_compte:
+            continue
         
-        # TVA collectée si > 0
-        if montant_tva > 0:
-            ecritures.append({
-                "numero_compte": "4457",
-                "libelle": get_pcg_label("4457") or "TVA collectée",
-                "debit_ar": 0,
-                "credit_ar": montant_tva
-            })
-    
-    elif type_doc == "ACHAT":
-        # Fournitures ou Achats (déterminé par description)
-        description = document_json.get("objet_description", "").lower() or ""
-        if "fourniture" in description or "bureau" in description:
-            compte_charge = "602"
-        else:
-            compte_charge = "607"
+        # ✅ RÉCUPÉRATION AUTOMATIQUE DU LIBELLÉ DEPUIS PCG
+        libelle = get_pcg_label(numero_compte)
+        if not libelle or libelle == "-":
+            # Fallback: utiliser le libellé fourni par l'IA si PCG ne trouve pas
+            libelle = ecriture.get("libelle", f"Compte {numero_compte}")
+        
+        # Conversion des montants
+        debit = float(ecriture.get("debit", 0) or 0)
+        credit = float(ecriture.get("credit", 0) or 0)
         
         ecritures.append({
-            "numero_compte": compte_charge,
-            "libelle": get_pcg_label(compte_charge) or "Achats",
-            "debit_ar": montant_ht if montant_tva > 0 else montant_ttc,
-            "credit_ar": 0
+            "numero_compte": numero_compte,
+            "libelle": libelle,
+            "debit_ar": debit,
+            "credit_ar": credit
         })
-        
-        # TVA déductible si > 0
-        if montant_tva > 0:
-            ecritures.append({
-                "numero_compte": "4456",
-                "libelle": get_pcg_label("4456") or "TVA déductible",
-                "debit_ar": montant_tva,
-                "credit_ar": 0
-            })
-        
-        # Fournisseur au crédit (TTC)
-        ecritures.append({
-            "numero_compte": "401",
-            "libelle": get_pcg_label("401") or "Fournisseurs",
-            "debit_ar": 0,
-            "credit_ar": montant_ttc
-        })
-    
-    elif type_doc == "BANQUE" or type_doc == "CAISSE":
-        # Opérations bancaires ou de caisse
-        compte_tresorerie = "512" if type_doc == "BANQUE" else "531"
-        
-        # Déterminer le compte contrepartie selon l'objet
-        objet = document_json.get("objet", "").lower() or document_json.get("objet_description", "").lower() or ""
-        
-        if "encaissement" in objet or "reçu" in objet or "virement reçu" in objet:
-            # Encaissement client : Banque/Caisse au débit, Client au crédit
-            ecritures.append({
-                "numero_compte": compte_tresorerie,
-                "libelle": get_pcg_label(compte_tresorerie) or ("Banques" if type_doc == "BANQUE" else "Caisse"),
-                "debit_ar": montant_ttc,
-                "credit_ar": 0
-            })
-            ecritures.append({
-                "numero_compte": "411",
-                "libelle": get_pcg_label("411") or "Clients",
-                "debit_ar": 0,
-                "credit_ar": montant_ttc
-            })
-        elif "paiement" in objet or "décaissement" in objet or "virement émis" in objet:
-            # Paiement fournisseur : Fournisseur au débit, Banque/Caisse au crédit
-            ecritures.append({
-                "numero_compte": "401",
-                "libelle": get_pcg_label("401") or "Fournisseurs",
-                "debit_ar": montant_ttc,
-                "credit_ar": 0
-            })
-            ecritures.append({
-                "numero_compte": compte_tresorerie,
-                "libelle": get_pcg_label(compte_tresorerie) or ("Banques" if type_doc == "BANQUE" else "Caisse"),
-                "debit_ar": 0,
-                "credit_ar": montant_ttc
-            })
-        else:
-            # Opération bancaire générique : on enregistre juste le mouvement
-            ecritures.append({
-                "numero_compte": compte_tresorerie,
-                "libelle": get_pcg_label(compte_tresorerie) or ("Banques" if type_doc == "BANQUE" else "Caisse"),
-                "debit_ar": montant_ttc,
-                "credit_ar": 0
-            })
-            # Contrepartie générique (à préciser manuellement)
-            ecritures.append({
-                "numero_compte": "471",  # Compte d'attente
-                "libelle": get_pcg_label("471") or "Comptes d'attente",
-                "debit_ar": 0,
-                "credit_ar": montant_ttc
-            })
-    
-    else:
-        # Pour OD, AN, etc. - non supporté pour le moment
-        raise ValidationError(f"Type de document '{type_doc}' non supporté par la génération automatique PCG")
     
     return {
         "type_journal": type_doc,
@@ -297,6 +250,7 @@ def generate_journal_from_pcg(document_json):
         "date": date_facture,
         "ecritures": ecritures
     }
+
 
 
 # REFACTORED LOGIC FOR REUSE

@@ -42,7 +42,7 @@ class FormSource(models.Model):
     )
     piece_type = models.CharField(max_length=225, null=False, blank=False)
     description = models.TextField()
-
+    #  ref_file = models.CharField(max_length=225, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     

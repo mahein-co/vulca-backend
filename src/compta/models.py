@@ -6,6 +6,20 @@ from decimal import Decimal
 # JOURNAL COMPTABLE (Source de vérité)
 # --------------------------------------------------------
 class Journal(models.Model):
+    # file_source = models.ForeignKey(
+        # 'ocr.FileSource',
+        # on_delete=models.SET_NULL,
+        # null=True,
+        # blank=True,
+        # related_name='journal_entries'
+    # )
+    # form_source = models.ForeignKey(
+        # 'ocr.FormSource',
+        # on_delete=models.SET_NULL,
+        # null=True,
+        # blank=True,
+        # related_name='journal_entries'
+    # )
     TYPE_JOURNAL_CHOICES = [
         ('ACHAT', 'Journal des achats'),
         ('VENTE', 'Journal des ventes'),
@@ -68,7 +82,7 @@ class GrandLivre(models.Model):
     credit = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'),
                                  validators=[MinValueValidator(Decimal('0.00'))])
     solde = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'))
-
+    # resume_mouvement = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

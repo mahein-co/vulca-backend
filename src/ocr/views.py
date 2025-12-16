@@ -751,6 +751,18 @@ def extract_content_file_view(request):
     # Supprimer les clefs null pour ne pas renvoyer d'informations "inventées"
     extracted_json_fr = prune_none(extracted_json_fr)
 
+    # ✅ NORMALISATION DES DATES AU FORMAT ISO
+    # S'assurer que toutes les dates sont au format YYYY-MM-DD avant envoi au frontend
+    date_fields = ['date_facture', 'date_echeance', 'date_emission', 'date_document', 'date']
+    for field in date_fields:
+        if field in extracted_json_fr and extracted_json_fr[field]:
+            try:
+                normalized = normalize_date_to_iso(extracted_json_fr[field])
+                if normalized:
+                    extracted_json_fr[field] = normalized
+            except Exception as e:
+                print(f"   ⚠️ Impossible de normaliser {field}: {e}")
+
     # Fallback : si le modèle n'a pas fourni la banque, tenter d'extraire "Banque : ..." depuis le texte OCR
     if "banque" not in extracted_json_fr or not extracted_json_fr.get("banque"):
         # match banque but stop before the next label or a number (montant, chiffre)

@@ -17,7 +17,7 @@ urlpatterns = [
     path("resultat-net-ca/",views.resultat_net_ca_view,name="resultat-net-ca"),
     path("charge-ebe/", views.charge_ebe_view, name="charge-ebe"),
     path("charge-ca/", views.charge_ca_view, name="charge-ca"),
-    path("marge-endettement/", views.marge_endettement_view, name="marge-endettement"),
+    # path("marge-endettement/", views.marge_endettement_view, name="marge-endettement"),
 ]
     #path("journals/", views.list_journals_view, name="list-journals"),
     # path("comptes/", views.list_comptes, name="list-comptes"),

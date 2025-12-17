@@ -1,5 +1,6 @@
 import PyPDF2, pytesseract, re, pandas as pd
 from PIL import Image
+<<<<<<< Updated upstream
 from datetime import datetime
 from pdf2image import convert_from_path
 import io
@@ -24,6 +25,134 @@ def clean_text(text: str) -> str:
         if line and line != prev:
             cleaned_lines.append(line)
         prev = line
+=======
+import pandas as pd
+import easyocr
+from pdf2image import convert_from_bytes
+import traceback
+import io
+import tempfile
+import os
+import numpy as np # Import nécessaire pour la conversion en tableau
+
+# Crée un reader EasyOCR pour le français et l'anglais
+reader = easyocr.Reader(['fr', 'en'], gpu=False)
+
+# Extract content from various file types for OCR processing
+def extract_content(file, file_type):
+    """
+    Extrait le texte d'un fichier Django UploadedFile ou d'un chemin de fichier.
+    
+    Args:
+        file: Django UploadedFile object ou chemin de fichier (str)
+        file_type: Type du fichier ('pdf', 'png', 'jpg', etc.)
+    
+    Returns:
+        str: Texte extrait du fichier
+    """
+    text = ""
+
+    # PDF
+    if file_type == "pdf":
+        try:
+            # Tente d'abord l'extraction de texte native
+            if isinstance(file, str):
+                with open(file, 'rb') as f:
+                    reader_pdf = PyPDF2.PdfReader(f)
+                    for page in reader_pdf.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n"
+            else:
+                file.seek(0)
+                reader_pdf = PyPDF2.PdfReader(file)
+                for page in reader_pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+        except Exception as e:
+            print(f"Extraction PDF native échouée, tentative OCR... {e}")
+            
+        # Si pas de texte extrait, utilise OCR
+        if not text.strip():
+            try:
+                if isinstance(file, str):
+                    with open(file, 'rb') as f:
+                        pdf_bytes = f.read()
+                else:
+                    file.seek(0)
+                    pdf_bytes = file.read()
+                
+                # Convertit PDF en images (retourne des objets PIL Image)
+                images = convert_from_bytes(pdf_bytes)
+                
+                for img in images:
+                    # CORRECTION CLÉ PDF : Conversion de PIL Image à NumPy array
+                    img_np = np.array(img)
+                    result = reader.readtext(img_np, detail=0)
+                    text += " ".join(result) + "\n"
+            except Exception as e:
+                print("=== Erreur OCR PDF ===")
+                print(traceback.format_exc())
+
+    # Images (PNG, JPG, JPEG)
+    elif file_type in ["png", "jpg", "jpeg"]:
+        try:
+            if isinstance(file, str):
+                # Cas d'un chemin de fichier
+                img = Image.open(file)
+            else:
+                # Cas d'un objet Django UploadedFile
+                file.seek(0)
+                img_bytes = file.read()
+                img = Image.open(io.BytesIO(img_bytes))
+            
+            # Convertit en RGB si nécessaire
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            
+            # CORRECTION CLÉ IMAGE : Conversion de PIL Image à NumPy array
+            img_np = np.array(img)
+
+            # Applique l'OCR
+            result = reader.readtext(img_np, detail=0)
+            text = " ".join(result)
+            
+        except Exception as e:
+            print("=== Erreur OCR Image ===")
+            print(traceback.format_exc())
+            text = ""
+
+    # Excel (XLS, XLSX)
+    elif file_type in ["xls", "xlsx"]:
+        try:
+            if isinstance(file, str):
+                df = pd.read_excel(file)
+            else:
+                file.seek(0)
+                df = pd.read_excel(file)
+            
+            text = df.astype(str).agg(' '.join, axis=1).str.cat(sep='\n')
+        except Exception as e:
+            print("=== Erreur Excel ===")
+            print(traceback.format_exc())
+            text = ""
+
+    # CSV
+    elif file_type == "csv":
+        try:
+            if isinstance(file, str):
+                df = pd.read_csv(file)
+            else:
+                file.seek(0)
+                df = pd.read_csv(file)
+            
+            text = df.astype(str).agg(' '.join, axis=1).str.cat(sep='\n')
+        except Exception as e:
+            print("=== Erreur CSV ===")
+            print(traceback.format_exc())
+            text = ""
+>>>>>>> Stashed changes
 
     text = "\n".join(cleaned_lines)
     text = re.sub(r'(?<=\w)\s(?=\w)', '', text)  
@@ -31,6 +160,7 @@ def clean_text(text: str) -> str:
     return text
 
 
+<<<<<<< Updated upstream
 def clean_ai_json(raw: str) -> str:
     """
     Nettoie une réponse OpenAI susceptible de contenir des fences ```json``` ou du texte autour.
@@ -143,16 +273,35 @@ def extract_content(file, file_type):
 
 
 # -------------------- Détection type fichier --------------------
+=======
+# Detect file type based on extension
+>>>>>>> Stashed changes
 def detect_file_type(file_name):
+    """
+    Détecte le type de fichier à partir de son nom.
+    
+    Args:
+        file_name: Nom du fichier avec extension
+    
+    Returns:
+        str: Type du fichier ('pdf', 'png', 'jpg', 'xlsx', 'csv', 'unknown')
+    """
     ext = file_name.split(".")[-1].lower()
+<<<<<<< Updated upstream
     if ext in ["pdf"]:
         return ext
     elif ext in ["png", "jpg", "jpeg", "webp"]:
+=======
+    
+    if ext == "pdf":
+        return "pdf"
+    elif ext in ["png", "jpg", "jpeg"]:
+>>>>>>> Stashed changes
         return ext
     elif ext in ["xls", "xlsx"]:
         return ext
-    elif ext in ["csv"]:
-        return ext
+    elif ext == "csv":
+        return "csv"
     else:
         return "unknown"
 

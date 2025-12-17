@@ -4,6 +4,7 @@ from datetime import datetime, date
 
 from django.core.exceptions import ValidationError
 from django.db.models import Sum
+from django.db.models.functions import TruncMonth
 
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
@@ -12,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
 from openai import OpenAI
+from django.db.utils import OperationalError as DBOperationalError
 
 from ocr.pcg_loader import get_pcg_label
 from ocr.constants import PCG_MAPPING
@@ -23,7 +25,10 @@ from compta.serializers import (
     JournalSerializer, BilanSerializer, BalanceSerializer, CompteResultatSerializer,
     ChiffreAffaireSerializer, EbeSerializer, ResultatNetSerializer, BfrSerializer,
     CafSerializer, LeverageSerializer, AnnuiteCafSerializer, MargeNetteSerializer,
-    DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer
+    DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer,
+    RoeSerializer,RoaSerializer,CurrentRatioSerializer,QuickRatioSerializer,GearingSerializer,
+    RotationStockSerializer,MargeOperationnelleSerializer,RepartitionResultatSerializer,EvolutionTresorerieSerializer,
+    TopCompteSerializer,EvolutionChiffreAffaireSerializer
 )
 
 from vulca_backend import settings
@@ -86,6 +91,30 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
     prompt = f"""
     Tu es un expert-comptable malgache certifié, spécialiste du Plan Comptable Général de Madagascar 2005.
     
+    try:
+        dotations = solde_net("68")
+        reprises = solde_net("78")
+
+        caf = resultat_net + dotations - reprises
+
+        ratio = Decimal("0.00")
+        if caf != 0:
+            ratio = annuite_emprunt / caf
+
+        alerte = ratio > Decimal("0.50")
+
+        payload = {
+            "annuite_emprunt": annuite_emprunt,
+            "caf": caf,
+            "ratio": ratio.quantize(Decimal("0.01")),
+            "alerte": alerte
+        }
+
+        serializer = AnnuiteCafSerializer(payload)
+        return Response(serializer.data)
+    except DBOperationalError as e:
+        # Database unreachable (timeout, network issue). Return 503 so frontend can handle gracefully.
+        return Response({"error": "Database unavailable", "details": str(e)}, status=503)
     PLAN COMPTABLE GÉNÉRAL 2005 (COMPLET) :
     {pcg_text}
     
@@ -420,15 +449,19 @@ def generate_journal_view(request):
 @permission_classes([AllowAny])
 def chiffre_affaire_view(request):
     """
-    GET /api/chiffre-affaire/?compte=701&date_debut=2025-01-01&date_fin=2025-12-31
+    GET /api/chiffre-affaire/
+    GET /api/chiffre-affaire/?compte=701
+    GET /api/chiffre-affaire/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
     compte = request.GET.get("compte")
     date_debut = request.GET.get("date_debut")
     date_fin = request.GET.get("date_fin")
 
-    # Comptes de CA = classe 7
-    queryset = GrandLivre.objects.filter(numero_compte__startswith="7")
+    queryset = CompteResultat.objects.filter(
+        nature="PRODUIT",
+        numero_compte__startswith="70"
+    )
 
     if compte:
         queryset = queryset.filter(numero_compte=compte)
@@ -438,71 +471,72 @@ def chiffre_affaire_view(request):
 
     data = (
         queryset
-        .values("numero_compte")
+        .values("numero_compte", "libelle")
         .annotate(
-            total_credit=Sum("credit"),
-            total_debit=Sum("debit"),
+            chiffre_affaire=Sum("montant_ar")
         )
+        .order_by("numero_compte")
     )
 
     result = []
     for row in data:
-        credit = row["total_credit"] or Decimal("0.00")
-        debit = row["total_debit"] or Decimal("0.00")
-
         result.append({
             "numero_compte": row["numero_compte"],
-            "total_credit": credit,
-            "total_debit": debit,
-            "chiffre_affaire": credit - debit
+            "libelle": row["libelle"],
+            "chiffre_affaire": row["chiffre_affaire"] or Decimal("0.00")
         })
 
     serializer = ChiffreAffaireSerializer(result, many=True)
     return Response(serializer.data)
 
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def ebe_view(request):
     """
-    Calcul automatique de l'EBE depuis le Grand Livre
+    GET /api/ebe/
+    GET /api/ebe/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
-    def solde_classe(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            total_credit=Sum("credit"),
-            total_debit=Sum("debit")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    # Produits d'exploitation (70 à 74)
+    produits = (
+        CompteResultat.objects
+        .filter(
+            nature="PRODUIT",
+            numero_compte__regex=r"^7[0-4]",
+            **base_filter
         )
-        return (data["total_credit"] or Decimal("0.00")) - (data["total_debit"] or Decimal("0.00"))
-
-    chiffre_affaires = solde_classe("7")
-    subventions = solde_classe("74")
-    achats = solde_classe("60")
-    charges_externes = solde_classe("61") + solde_classe("62")
-    impots_taxes = solde_classe("63")
-    charges_personnel = solde_classe("64")
-
-    ebe = (
-        chiffre_affaires
-        + subventions
-        - achats
-        - charges_externes
-        - impots_taxes
-        - charges_personnel
+        .aggregate(total=Sum("montant_ar"))["total"]
+        or Decimal("0.00")
     )
 
-    payload = {
-        "chiffre_affaires": chiffre_affaires,
-        "subventions": subventions,
-        "achats": achats,
-        "charges_externes": charges_externes,
-        "impots_taxes": impots_taxes,
-        "charges_personnel": charges_personnel,
-        "ebe": ebe,
-    }
+    # Charges d'exploitation (60 à 64)
+    charges = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE",
+            numero_compte__regex=r"^6[0-4]",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"]
+        or Decimal("0.00")
+    )
 
-    serializer = EbeSerializer(payload)
+    ebe = produits - charges
+
+    serializer = EbeSerializer({
+        "produits_exploitation": produits,
+        "charges_exploitation": charges,
+        "ebe": ebe
+    })
+
     return Response(serializer.data)
 
 @api_view(["GET"])
@@ -559,447 +593,1179 @@ def resultat_net_view(request):
 @permission_classes([AllowAny])
 def bfr_view(request):
     """
-    Calcul du BFR depuis le Grand Livre
+    GET /api/bfr/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
-    def solde(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            credit=Sum("credit"),
-            debit=Sum("debit")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    # Actif circulant
+    actif_circulant = (
+        Bilan.objects
+        .filter(
+            type_bilan="ACTIF",
+            categorie="ACTIF_COURANTS",
+            **base_filter
         )
-        return (data["debit"] or Decimal("0.00")) - (data["credit"] or Decimal("0.00"))
-
-    stocks = solde("3")
-    creances_clients = solde("411")
-    autres_creances = solde("409") + solde("418")
-    dettes_fournisseurs = solde("401")
-    autres_dettes = solde("408") + solde("419")
-
-    bfr = (
-        stocks
-        + creances_clients
-        + autres_creances
-        - dettes_fournisseurs
-        - autres_dettes
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
     )
 
-    payload = {
-        "stocks": stocks,
-        "creances_clients": creances_clients,
-        "autres_creances": autres_creances,
-        "dettes_fournisseurs": dettes_fournisseurs,
-        "autres_dettes": autres_dettes,
-        "bfr": bfr,
-    }
+    # Passif circulant
+    passif_circulant = (
+        Bilan.objects
+        .filter(
+            type_bilan="PASSIF",
+            categorie="PASSIFS_COURANTS",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
 
-    serializer = BfrSerializer(payload)
+    bfr = actif_circulant - passif_circulant
+
+    serializer = BfrSerializer({
+        "actif_circulant": actif_circulant,
+        "passif_circulant": passif_circulant,
+        "bfr": bfr
+    })
+
     return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def caf_view(request):
     """
-    Calcul de la CAF depuis le Grand Livre
+    GET /api/caf/
+    GET /api/caf/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
-    def solde(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            credit=Sum("credit"),
-            debit=Sum("debit")
-        )
-        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
 
-    # Résultat Net
-    produits = solde("7")
-    charges_exploitation = sum(solde(str(c)) for c in range(60, 66))
-    charges_financieres = solde("66")
-    produits_financiers = solde("76")
-    charges_exceptionnelles = solde("67")
-    produits_exceptionnels = solde("77")
-    impots_benefices = solde("69")
-    resultat_net = (
-        produits
-        - charges_exploitation
-        - charges_financieres
-        + produits_financiers
-        - charges_exceptionnelles
-        + produits_exceptionnels
-        - impots_benefices
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    # Résultat net (tous produits - toutes charges)
+    produits_total = (
+        CompteResultat.objects
+        .filter(nature="PRODUIT", **base_filter)
+        .aggregate(total=Sum("montant_ar"))["total"]
+        or Decimal("0.00")
     )
 
-    # Dotations / Reprises
-    dotations = solde("68")
-    reprises = solde("78")
+    charges_total = (
+        CompteResultat.objects
+        .filter(nature="CHARGE", **base_filter)
+        .aggregate(total=Sum("montant_ar"))["total"]
+        or Decimal("0.00")
+    )
+
+    resultat_net = produits_total - charges_total
+
+    # Dotations (681 / 687)
+    dotations = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE",
+            numero_compte__regex=r"^68[1|7]",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"]
+        or Decimal("0.00")
+    )
+
+    # Reprises (781 / 787)
+    reprises = (
+        CompteResultat.objects
+        .filter(
+            nature="PRODUIT",
+            numero_compte__regex=r"^78[1|7]",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"]
+        or Decimal("0.00")
+    )
 
     caf = resultat_net + dotations - reprises
 
-    payload = {
+    serializer = CafSerializer({
         "resultat_net": resultat_net,
-        "dotations_amort_provisions": dotations,
-        "reprises_amort_provisions": reprises,
+        "dotations": dotations,
+        "reprises": reprises,
         "caf": caf
-    }
+    })
 
-    serializer = CafSerializer(payload)
     return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def leverage_brut_view(request):
     """
-    Calcul du Leverage brut = Total endettement / EBE
+    GET /api/leverage-brut/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
-    def solde(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            credit=Sum("credit"),
-            debit=Sum("debit")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    # Total endettement = Passifs financiers (courts et longs termes)
+    total_endettement = (
+        Bilan.objects
+        .filter(
+            type_bilan="PASSIF",
+            categorie__in=["PASSIFS_COURANTS", "PASSIFS_NON_COURANTS"],
+            numero_compte__regex=r"^16|^17|^19",
+            **base_filter
         )
-        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
 
-    # Total endettement (exemple : comptes 16, 17, 19)
-    total_endettement = solde("16") + solde("17") + solde("19")
+    # Calcul EBE (réutilisation de la logique précédente)
+    produits = (
+        CompteResultat.objects
+        .filter(
+            nature="PRODUIT",
+            numero_compte__regex=r"^7[0-4]",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+    charges = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE",
+            numero_compte__regex=r"^6[0-4]",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+    ebe = produits - charges
 
-    # Calcul EBE (même méthode que pour l'EBE API)
-    ca = solde("7")
-    subventions = solde("74")
-    achats = solde("60")
-    charges_ext = solde("61") + solde("62")
-    impots = solde("63")
-    personnel = solde("64")
-    ebe = ca + subventions - achats - charges_ext - impots - personnel
+    # Sécurité division par zéro
+    leverage_brut = total_endettement / ebe if ebe != 0 else None
 
-    leverage_brut = Decimal("0.00")
-    if ebe != 0:
-        leverage_brut = total_endettement / ebe
-
-    payload = {
+    return Response({
         "total_endettement": total_endettement,
         "ebe": ebe,
-        "leverage_brut": leverage_brut.quantize(Decimal("0.01"))
-    }
-
-    serializer = LeverageSerializer(payload)
-    return Response(serializer.data)
+        "leverage_brut": leverage_brut
+    })
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def annuite_caf_view(request):
     """
-    Ratio : Annuité d'emprunt / CAF
+    GET /api/annuite-caf/?date_debut=2025-01-01&date_fin=2025-12-31
+    
+    IMPORTANT: "Annuité" ici fait référence aux Charges Financières (Compte 66)
+    car sans tableau d'amortissement, il est impossible de connaître la part du capital remboursée.
+    Le ratio devient donc un ratio de couverture des intérêts.
     """
 
-    def solde(prefix, sens="debit"):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            debit=Sum("debit"),
-            credit=Sum("credit")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    try:
+        # === Calcul du Résultat Net ===
+        # Produits (Classe 7)
+        produits_total = (
+            CompteResultat.objects
+            .filter(
+                nature="PRODUIT",
+                numero_compte__regex=r"^7",
+                **base_filter
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        if sens == "debit":
-            return data["debit"] or Decimal("0.00")
-        return data["credit"] or Decimal("0.00")
 
-    # 🔹 Annuité d'emprunt
-    remboursement_capital = solde("164") + solde("168")
-    interets = solde("661")
-    annuite_emprunt = remboursement_capital + interets
-
-    # 🔹 CAF
-    def solde_net(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            credit=Sum("credit"),
-            debit=Sum("debit")
+        # Charges exploitation (60-64)
+        charges_exploitation = (
+            CompteResultat.objects
+            .filter(
+                nature="CHARGE",
+                numero_compte__regex=r"^6[0-4]",
+                **base_filter
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
 
-    produits = solde_net("7")
-    charges_exploitation = sum(solde_net(str(c)) for c in range(60, 66))
-    charges_financieres = solde_net("66")
-    produits_financiers = solde_net("76")
-    charges_exceptionnelles = solde_net("67")
-    produits_exceptionnels = solde_net("77")
-    impots_benefices = solde_net("69")
+        # Charges financières (66)
+        charges_financieres = (
+            CompteResultat.objects
+            .filter(
+                nature="CHARGE",
+                numero_compte__startswith="66",
+                **base_filter
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-    resultat_net = (
-        produits
-        - charges_exploitation
-        - charges_financieres
-        + produits_financiers
-        - charges_exceptionnelles
-        + produits_exceptionnels
-        - impots_benefices
-    )
+        # Charges exceptionnelles (67)
+        charges_exceptionnelles = (
+            CompteResultat.objects
+            .filter(
+                nature="CHARGE",
+                numero_compte__startswith="67",
+                **base_filter
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-    dotations = solde_net("68")
-    reprises = solde_net("78")
+        # Dotations (68)
+        dotations = (
+            CompteResultat.objects
+            .filter(
+                nature="CHARGE",
+                numero_compte__startswith="68",
+                **base_filter
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-    caf = resultat_net + dotations - reprises
+        # Impôts sur bénéfices (69)
+        impots_benefices = (
+            CompteResultat.objects
+            .filter(
+                nature="CHARGE",
+                numero_compte__startswith="69",
+                **base_filter
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-    ratio = Decimal("0.00")
-    if caf != 0:
-        ratio = annuite_emprunt / caf
+        # Reprises (78)
+        reprises = (
+            CompteResultat.objects
+            .filter(
+                nature="PRODUIT",
+                numero_compte__startswith="78",
+                **base_filter
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-    alerte = ratio > Decimal("0.50")
+        # Résultat Net
+        resultat_net = (
+            produits_total
+            - charges_exploitation
+            - charges_financieres
+            - charges_exceptionnelles
+            - dotations
+            - impots_benefices
+        )
 
-    payload = {
-        "annuite_emprunt": annuite_emprunt,
-        "caf": caf,
-        "ratio": ratio.quantize(Decimal("0.01")),
-        "alerte": alerte
-    }
+        # === Calcul de la CAF (Méthode additive) ===
+        # CAF = Résultat Net + Dotations - Reprises
+        caf = resultat_net + dotations - reprises
 
-    serializer = AnnuiteCafSerializer(payload)
-    return Response(serializer.data)
+        # === "Annuité" = Charges financières (proxy) ===
+        # Note: En l'absence de tableau d'amortissement, on utilise les charges financières
+        # Ce n'est pas l'annuité réelle mais donne un ratio de couverture des intérêts
+        annuite_emprunt = charges_financieres
+
+        # Ratio Charges Financières / CAF
+        ratio_annuite_caf = annuite_emprunt / caf if caf != 0 else None
+
+        serializer = AnnuiteCafSerializer({
+            "annuite_emprunt": annuite_emprunt,
+            "caf": caf,
+            "ratio_annuite_caf": ratio_annuite_caf
+        })
+
+        return Response(serializer.data)
+    except DBOperationalError as e:
+        return Response({"error": "Database unavailable", "details": str(e)}, status=503)
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def dette_lmt_caf_view(request):
     """
-    Ratio : Dette LMT / CAF
+    GET /api/dette-lmt-caf/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
-    def solde(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            credit=Sum("credit"),
-            debit=Sum("debit")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    # Dette long terme = Passifs non courants (17x)
+    dette_lmt = (
+        Bilan.objects
+        .filter(
+            type_bilan="PASSIF",
+            categorie="PASSIFS_NON_COURANTS",
+            numero_compte__regex=r"^17",
+            **base_filter
         )
-        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
-
-    # 🔹 Dette LMT (comptes 16x)
-    dette_lmt = solde("16")
-
-    # 🔹 CAF
-    def solde_net(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            credit=Sum("credit"),
-            debit=Sum("debit")
-        )
-        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
-
-    produits = solde_net("7")
-    charges_exploitation = sum(solde_net(str(c)) for c in range(60, 66))
-    charges_financieres = solde_net("66")
-    produits_financiers = solde_net("76")
-    charges_exceptionnelles = solde_net("67")
-    produits_exceptionnels = solde_net("77")
-    impots_benefices = solde_net("69")
-
-    resultat_net = (
-        produits
-        - charges_exploitation
-        - charges_financieres
-        + produits_financiers
-        - charges_exceptionnelles
-        + produits_exceptionnels
-        - impots_benefices
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
     )
 
-    dotations = solde_net("68")
-    reprises = solde_net("78")
+    # === Calcul de la CAF (Méthode additive CORRECTE) ===
+    # Produits totaux (Classe 7)
+    produits_total = (
+        CompteResultat.objects
+        .filter(
+            nature="PRODUIT",
+            numero_compte__regex=r"^7",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
 
+    # Charges totales (Classe 6)
+    charges_total = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE",
+            numero_compte__regex=r"^6",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+
+    # Résultat Net
+    resultat_net = produits_total - charges_total
+
+    # Dotations (68)
+    dotations = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE",
+            numero_compte__startswith="68",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+
+    # Reprises (78)
+    reprises = (
+        CompteResultat.objects
+        .filter(
+            nature="PRODUIT",
+            numero_compte__startswith="78",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+
+    # CAF = Résultat Net + Dotations - Reprises
     caf = resultat_net + dotations - reprises
 
-    ratio = Decimal("0.00")
-    if caf != 0:
-        ratio = dette_lmt / caf
+    # Ratio Dette LMT / CAF
+    ratio_dette_lmt_caf = dette_lmt / caf if caf != 0 else None
 
-    alerte = ratio >= Decimal("3.50")
-
-    payload = {
+    serializer = DetteLmtCafSerializer({
         "dette_lmt": dette_lmt,
         "caf": caf,
-        "ratio": ratio.quantize(Decimal("0.01")),
-        "alerte": alerte
-    }
+        "ratio_dette_lmt_caf": ratio_dette_lmt_caf
+    })
 
-    serializer = DetteLmtCafSerializer(payload)
     return Response(serializer.data)
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def resultat_net_ca_view(request):
+def marge_net_view(request):
     """
-    Ratio : Résultat net / Chiffre d'affaires
+    GET /api/marge-net/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
-    def solde(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            debit=Sum("debit"),
-            credit=Sum("credit")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    # Chiffre d'affaires = Produits de classe 70
+    ca = (
+        CompteResultat.objects
+        .filter(
+            nature="PRODUIT",
+            numero_compte__startswith="70",
+            **base_filter
         )
-        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
-
-    # 🔹 Chiffre d'affaires (70x)
-    chiffre_affaire = solde("70")
-
-    # 🔹 Résultat net
-    produits = solde("7")
-    charges_exploitation = sum(solde(str(c)) for c in range(60, 66))
-    charges_financieres = solde("66")
-    produits_financiers = solde("76")
-    charges_exceptionnelles = solde("67")
-    produits_exceptionnels = solde("77")
-    impots = solde("69")
-
-    resultat_net = (
-        produits
-        - charges_exploitation
-        - charges_financieres
-        + produits_financiers
-        - charges_exceptionnelles
-        + produits_exceptionnels
-        - impots
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
     )
 
-    ratio = Decimal("0.00")
-    ratio_pourcent = Decimal("0.00")
+    # Résultat net = tous produits - toutes charges
+    total_produits = (
+        CompteResultat.objects
+        .filter(nature="PRODUIT", **base_filter)
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
 
-    if chiffre_affaire != 0:
-        ratio = resultat_net / chiffre_affaire
-        ratio_pourcent = ratio * Decimal("100")
+    total_charges = (
+        CompteResultat.objects
+        .filter(nature="CHARGE", **base_filter)
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
 
-    payload = {
+    resultat_net = total_produits - total_charges
+
+    # Ratio Résultat net / CA
+    ratio_resultat_ca = resultat_net / ca if ca != 0 else None
+
+    serializer = MargeNetteSerializer({
+        "chiffre_affaire": ca,
         "resultat_net": resultat_net,
-        "chiffre_affaire": chiffre_affaire,
-        "ratio": ratio.quantize(Decimal("0.0001")),
-        "ratio_pourcent": ratio_pourcent.quantize(Decimal("0.01")),
-    }
+        "ratio_resultat_ca": ratio_resultat_ca
+    })
 
-    serializer = MargeNetteSerializer(payload)
     return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def charge_ebe_view(request):
     """
-    Ratio : Charge financière / EBE
+    GET /api/charge-ebe/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
-    def solde(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            debit=Sum("debit"),
-            credit=Sum("credit")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    # Charge financière = comptes 66x
+    charge_financiere = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE",
+            numero_compte__regex=r"^66",
+            **base_filter
         )
-        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
 
-    # 🔹 Charge financière (661)
-    charge_financiere = solde("661")
+    # EBE (Excédent Brut d'Exploitation)
+    produits = (
+        CompteResultat.objects
+        .filter(
+            nature="PRODUIT",
+            numero_compte__regex=r"^7[0-4]",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+    charges_exploitation = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE",
+            numero_compte__regex=r"^6[0-4]",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+    ebe = produits - charges_exploitation
 
-    # 🔹 EBE
-    ca = solde("7")
-    subventions = solde("74")
-    achats = solde("60")
-    charges_ext = solde("61") + solde("62")
-    impots = solde("63")
-    personnel = solde("64")
+    # Ratio Charge financière / EBE
+    ratio_charge_ebe = charge_financiere / ebe if ebe != 0 else None
 
-    ebe = ca + subventions - achats - charges_ext - impots - personnel
-
-    ratio = Decimal("0.00")
-    if ebe != 0:
-        ratio = charge_financiere / ebe
-
-    alerte = ratio >= Decimal("0.30")
-
-    payload = {
+    serializer = ChargeEbeSerializer({
         "charge_financiere": charge_financiere,
         "ebe": ebe,
-        "ratio": ratio.quantize(Decimal("0.01")),
-        "alerte": alerte
-    }
+        "ratio_charge_ebe": ratio_charge_ebe
+    })
 
-    serializer = ChargeEbeSerializer(payload)
     return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def charge_ca_view(request):
     """
-    Ratio : Charge financière / Chiffre d'affaires
+    GET /api/charge-ca/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
-    def solde(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            debit=Sum("debit"),
-            credit=Sum("credit")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    try:
+        # Charge financière = comptes 66x
+        charge_financiere = (
+            CompteResultat.objects
+            .filter(
+                nature="CHARGE",
+                numero_compte__regex=r"^66",
+                **base_filter
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
 
-    # 🔹 Charge financière
-    charge_financiere = solde("661")
+        # Chiffre d'affaires = comptes 70x
+        chiffre_affaire = (
+            CompteResultat.objects
+            .filter(
+                nature="PRODUIT",
+                numero_compte__startswith="70",
+                **base_filter
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-    # 🔹 Chiffre d'affaires
-    chiffre_affaire = solde("70")
+        # Ratio Charge financière / CA
+        ratio_charge_ca = charge_financiere / chiffre_affaire if chiffre_affaire != 0 else None
 
-    ratio = Decimal("0.00")
-    if chiffre_affaire != 0:
-        ratio = charge_financiere / chiffre_affaire
+        serializer = ChargeCaSerializer({
+            "charge_financiere": charge_financiere,
+            "chiffre_affaire": chiffre_affaire,
+            "ratio_charge_ca": ratio_charge_ca
+        })
 
-    alerte = ratio >= Decimal("0.05")  # 5%
-
-    payload = {
-        "charge_financiere": charge_financiere,
-        "chiffre_affaire": chiffre_affaire,
-        "ratio": ratio.quantize(Decimal("0.02")),
-        "alerte": alerte
-    }
-
-    serializer = ChargeCaSerializer(payload)
-    return Response(serializer.data)
+        return Response(serializer.data)
+    except DBOperationalError as e:
+        return Response({"error": "Database unavailable", "details": str(e)}, status=503)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def marge_endettement_view(request):
     """
-    Ratio : Dette CMLT / Fonds Propres
+    GET /api/marge-endettement/?date_debut=2025-01-01&date_fin=2025-12-31
     """
 
-    def solde(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            debit=Sum("debit"),
-            credit=Sum("credit")
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    # Dette CMLT = Passifs financiers courants + non courants (16x + 17x)
+    dette_cmlt = (
+        Bilan.objects
+        .filter(
+            type_bilan="PASSIF",
+            categorie__in=["PASSIFS_COURANTS", "PASSIFS_NON_COURANTS"],
+            numero_compte__regex=r"^16|^17",
+            **base_filter
         )
-        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
 
-    # 🔹 Dette CMLT (16x)
-    dette_cmlt = solde("16")
+    # Fonds propres
+    fonds_propres = (
+        Bilan.objects
+        .filter(
+            type_bilan="PASSIF",
+            categorie="CAPITAUX_PROPRES",
+            **base_filter
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
 
-    # 🔹 Fonds Propres (101–106)
-    fonds_propres = sum(solde(str(c)) for c in range(101, 107))
+    # Ratio Dette CMLT / Fonds propres
+    ratio_marge_endettement = dette_cmlt / fonds_propres if fonds_propres != 0 else None
 
-    ratio = Decimal("0.00")
-    if fonds_propres != 0:
-        ratio = dette_cmlt / fonds_propres
-
-    alerte = ratio >= Decimal("1.3")
-
-    payload = {
+    serializer = MargeEndettementSerializer({
         "dette_cmlt": dette_cmlt,
         "fonds_propres": fonds_propres,
-        "ratio": ratio.quantize(Decimal("0.01")),
-        "alerte": alerte
-    }
+        "ratio_marge_endettement": ratio_marge_endettement
+    })
 
-    serializer = MargeEndettementSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def roe_view(request):
+    """
+    GET /api/roe/?date_debut=2025-01-01&date_fin=2025-12-31
+    Optionnel: date_debut_prev & date_fin_prev pour calcul variation
+    """
+
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+    date_debut_prev = request.GET.get("date_debut_prev")
+    date_fin_prev = request.GET.get("date_fin_prev")
+
+    base_filter = {}
+    if date_debut and date_fin:
+        base_filter["date__range"] = [date_debut, date_fin]
+
+    # Résultat net période courante
+    total_produits = (
+        CompteResultat.objects
+        .filter(nature="PRODUIT", **base_filter)
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+    total_charges = (
+        CompteResultat.objects
+        .filter(nature="CHARGE", **base_filter)
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+    resultat_net = total_produits - total_charges
+
+    # Fonds propres période courante
+    fonds_propres = (
+        Bilan.objects
+        .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", **base_filter)
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+    )
+
+    roe = (resultat_net / fonds_propres * 100) if fonds_propres != 0 else None
+
+    # Résultat précédent pour calcul variation
+    variation = None
+    if date_debut_prev and date_fin_prev:
+        base_filter_prev = {"date__range": [date_debut_prev, date_fin_prev]}
+        total_produits_prev = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", **base_filter_prev)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        total_charges_prev = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", **base_filter_prev)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        resultat_net_prev = total_produits_prev - total_charges_prev
+
+        fonds_propres_prev = (
+            Bilan.objects
+            .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", **base_filter_prev)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        roe_prev = (resultat_net_prev / fonds_propres_prev * 100) if fonds_propres_prev != 0 else None
+
+        if roe is not None and roe_prev is not None:
+            variation = roe - roe_prev
+
+    serializer = RoeSerializer({
+        "roe": roe,
+        "variation": variation
+    })
+
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def roa_view(request):
+    """
+    GET /api/roa/?date_debut=2025-01-01&date_fin=2025-12-31
+    Optionnel :
+    date_debut_prev=2024-01-01&date_fin_prev=2024-12-31
+    """
+
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+    date_debut_prev = request.GET.get("date_debut_prev")
+    date_fin_prev = request.GET.get("date_fin_prev")
+
+    def calcul_roa(filters):
+        # Résultat net
+        produits = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+        )
+        charges = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+        )
+        resultat_net = produits - charges
+
+        # Total Actif
+        total_actif = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+        )
+
+        if total_actif == 0:
+            return None
+
+        return (resultat_net / total_actif) * 100
+
+    filters = {}
+    if date_debut and date_fin:
+        filters["date__range"] = [date_debut, date_fin]
+
+    roa = calcul_roa(filters)
+
+    variation = None
+    if date_debut_prev and date_fin_prev:
+        roa_prev = calcul_roa({
+            "date__range": [date_debut_prev, date_fin_prev]
+        })
+        if roa is not None and roa_prev is not None:
+            variation = roa - roa_prev
+
+    serializer = RoaSerializer({
+        "roa": roa,
+        "variation": variation
+    })
+
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def current_ratio_view(request):
+    """
+    GET /api/current-ratio/?date_debut=2025-01-01&date_fin=2025-12-31
+    """
+
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    filters = {}
+    if date_debut and date_fin:
+        filters["date__range"] = [date_debut, date_fin]
+
+    actifs_courants = (
+        Bilan.objects
+        .filter(
+            type_bilan="ACTIF",
+            categorie="ACTIF_COURANTS",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    passifs_courants = (
+        Bilan.objects
+        .filter(
+            type_bilan="PASSIF",
+            categorie="PASSIFS_COURANTS",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    current_ratio = (
+        actifs_courants / passifs_courants
+        if passifs_courants != 0
+        else None
+    )
+
+    serializer = CurrentRatioSerializer({
+        "current_ratio": current_ratio
+    })
+
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def quick_ratio_view(request):
+    """
+    GET /api/quick-ratio/?date_debut=2025-01-01&date_fin=2025-12-31
+    """
+
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    filters = {}
+    if date_debut and date_fin:
+        filters["date__range"] = [date_debut, date_fin]
+
+    # Actifs courants
+    actifs_courants = (
+        Bilan.objects
+        .filter(
+            type_bilan="ACTIF",
+            categorie="ACTIF_COURANTS",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    # Stocks (classe 3)
+    stocks = (
+        Bilan.objects
+        .filter(
+            type_bilan="ACTIF",
+            numero_compte__startswith="3",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    # Passifs courants
+    passifs_courants = (
+        Bilan.objects
+        .filter(
+            type_bilan="PASSIF",
+            categorie="PASSIFS_COURANTS",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    quick_ratio = (
+        (actifs_courants - stocks) / passifs_courants
+        if passifs_courants != 0
+        else None
+    )
+
+    serializer = QuickRatioSerializer({
+        "quick_ratio": quick_ratio
+    })
+
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def gearing_view(request):
+    """
+    GET /api/gearing/?date_debut=2025-01-01&date_fin=2025-12-31
+    """
+
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    filters = {}
+    if date_debut and date_fin:
+        filters["date__range"] = [date_debut, date_fin]
+
+    # Dettes financières (classe 16)
+    dettes_financieres = (
+        Bilan.objects
+        .filter(
+            type_bilan="PASSIF",
+            numero_compte__startswith="16",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    # Fonds propres
+    fonds_propres = (
+        Bilan.objects
+        .filter(
+            type_bilan="PASSIF",
+            categorie="CAPITAUX_PROPRES",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    gearing = (
+        dettes_financieres / fonds_propres
+        if fonds_propres != 0
+        else None
+    )
+
+    serializer = GearingSerializer({
+        "gearing": gearing
+    })
+
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def rotation_stock_view(request):
+    """
+    GET /api/rotation-stock/?date_debut=2025-01-01&date_fin=2025-12-31
+    """
+
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    filters = {}
+    if date_debut and date_fin:
+        filters["date__range"] = [date_debut, date_fin]
+
+    # Coût des ventes (charges classe 6)
+    cout_ventes = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE",
+            numero_compte__startswith="6",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    # Stock moyen (simplifié : stock fin de période)
+    stocks = (
+        Bilan.objects
+        .filter(
+            type_bilan="ACTIF",
+            numero_compte__startswith="3",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    rotation_stock = (
+        cout_ventes / stocks
+        if stocks != 0
+        else None
+    )
+
+    duree_stock = (
+        Decimal("365") / rotation_stock
+        if rotation_stock and rotation_stock != 0
+        else None
+    )
+
+    serializer = RotationStockSerializer({
+        "rotation_stock": rotation_stock,
+        "duree_stock_jours": duree_stock
+    })
+
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def marge_operationnelle_view(request):
+    """
+    GET /api/marge-operationnelle/?date_debut=2025-01-01&date_fin=2025-12-31
+    """
+
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    filters = {}
+    if date_debut and date_fin:
+        filters["date__range"] = [date_debut, date_fin]
+
+    # Chiffre d'affaires
+    chiffre_affaire = (
+        CompteResultat.objects
+        .filter(
+            nature="PRODUIT",
+            numero_compte__startswith="7",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    # Charges d'exploitation
+    charges_exploitation = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE",
+            numero_compte__startswith="6",
+            **filters
+        )
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    resultat_operationnel = chiffre_affaire - charges_exploitation
+
+    marge_operationnelle = (
+        (resultat_operationnel / chiffre_affaire) * 100
+        if chiffre_affaire != 0
+        else None
+    )
+
+    serializer = MargeOperationnelleSerializer({
+        "marge_operationnelle": marge_operationnelle
+    })
+
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def repartition_produits_charges_view(request):
+    """
+    GET /api/repartition-resultat/?date_debut=2025-01-01&date_fin=2025-12-31
+    """
+
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    filters = {}
+    if date_debut and date_fin:
+        filters["date__range"] = [date_debut, date_fin]
+
+    total_produits = (
+        CompteResultat.objects
+        .filter(nature="PRODUIT", **filters)
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    total_charges = (
+        CompteResultat.objects
+        .filter(nature="CHARGE", **filters)
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
+
+    total_global = total_produits + total_charges
+
+    def pct(val):
+        return (val / total_global * 100) if total_global != 0 else Decimal("0")
+
+    data = [
+        {
+            "label": "Produits",
+            "montant": total_produits,
+            "pourcentage": pct(total_produits),
+        },
+        {
+            "label": "Charges",
+            "montant": total_charges,
+            "pourcentage": pct(total_charges),
+        }
+    ]
+
+    serializer = RepartitionResultatSerializer(data, many=True)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def evolution_tresorerie_view(request):
+    """
+    GET /api/evolution-tresorerie/?annee=2025
+    """
+    annee = request.GET.get("annee")
+
+    # User requested Bilan source
+    queryset = Bilan.objects.filter(numero_compte__startswith="5")
+
+    if annee:
+        queryset = queryset.filter(date__year=annee)
+
+    data = (
+        queryset
+        .annotate(mois=TruncMonth("date"))
+        .values("mois")
+        .annotate(total=Sum("montant_ar"))
+        .order_by("mois")
+    )
+
+    result = []
+    for row in data:
+        result.append({
+            "periode": row["mois"].strftime("%Y-%m"),
+            "tresorerie": row["total"] or Decimal("0")
+        })
+
+    serializer = EvolutionTresorerieSerializer(result, many=True)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def top_comptes_mouvementes_view(request):
+    """
+    GET /api/top-comptes-mouvementes/?date_debut=2025-01-01&date_fin=2025-12-31
+    """
+
+    date_debut = request.GET.get("date_debut")
+    date_fin = request.GET.get("date_fin")
+
+    # Filtre de date
+    filters = {}
+    if date_debut and date_fin:
+        filters["date__range"] = [date_debut, date_fin]
+
+    # Total par compte pour CompteResultat
+    cr_totaux = (
+        CompteResultat.objects.filter(**filters)
+        .values("numero_compte", "libelle")
+        .annotate(montant_total=Sum("montant_ar"))
+    )
+
+    # Total par compte pour Bilan
+    bilan_totaux = (
+        Bilan.objects.filter(**filters)
+        .values("numero_compte", "libelle")
+        .annotate(montant_total=Sum("montant_ar"))
+    )
+
+    # Fusion des deux QuerySets
+    comptes_dict = {}
+    for item in list(cr_totaux) + list(bilan_totaux):
+        key = item["numero_compte"]
+        if key in comptes_dict:
+            comptes_dict[key]["montant_total"] += item["montant_total"] or Decimal("0")
+        else:
+            comptes_dict[key] = {
+                "numero_compte": key,
+                "libelle": item["libelle"],
+                "montant_total": item["montant_total"] or Decimal("0")
+            }
+
+    # Trier par montant total décroissant
+    top_comptes = sorted(
+        comptes_dict.values(), key=lambda x: x["montant_total"], reverse=True
+    )[:10]
+
+    serializer = TopCompteSerializer(top_comptes, many=True)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def chiffre_affaire_mensuel_view(request):
+    """
+    GET /api/chiffre-affaire-mensuel/?annee=2025
+    """
+
+    annee = request.GET.get("annee")
+
+    queryset = CompteResultat.objects.filter(
+        nature="PRODUIT",
+        numero_compte__startswith="7"
+    )
+
+    if annee:
+        queryset = queryset.filter(date__year=annee)
+
+    data = (
+        queryset
+        .annotate(mois=TruncMonth("date"))
+        .values("mois")
+        .annotate(total=Sum("montant_ar"))
+        .order_by("mois")
+    )
+
+    result = [
+        {
+            "periode": row["mois"].strftime("%Y-%m"),
+            "chiffre_affaire": row["total"] or Decimal("0")
+        }
+        for row in data
+    ]
+
+    serializer = EvolutionChiffreAffaireSerializer(result, many=True)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def chiffre_affaire_annuel_view(request):
+    """
+    GET /api/chiffre-affaire-annuel/
+    """
+
+    data = (
+        CompteResultat.objects
+        .filter(
+            nature="PRODUIT",
+            numero_compte__startswith="7"
+        )
+        .annotate(annee=TruncYear("date"))
+        .values("annee")
+        .annotate(total=Sum("montant_ar"))
+        .order_by("annee")
+    )
+
+    result = [
+        {
+            "periode": row["annee"].strftime("%Y"),
+            "chiffre_affaire": row["total"] or Decimal("0")
+        }
+        for row in data
+    ]
+
+    serializer = EvolutionChiffreAffaireSerializer(result, many=True)
     return Response(serializer.data)

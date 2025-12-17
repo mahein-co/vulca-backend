@@ -28,6 +28,7 @@ class FileSource(models.Model):
     def __str__(self):
         if self.file_name:
             return self.file_name
+<<<<<<< Updated upstream
         return f"file uploaded at {self.uploaded_at}"
 
 
@@ -50,3 +51,6 @@ class FormSource(models.Model):
         return self.piece_type
 
 
+=======
+        return f"file uploaded at {self.uploaded_at}"
+>>>>>>> Stashed changes

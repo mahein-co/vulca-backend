@@ -1,6 +1,5 @@
 import PyPDF2, pytesseract, re, pandas as pd
 from PIL import Image
-<<<<<<< Updated upstream
 from datetime import datetime
 from pdf2image import convert_from_path
 import io
@@ -25,7 +24,6 @@ def clean_text(text: str) -> str:
         if line and line != prev:
             cleaned_lines.append(line)
         prev = line
-=======
 import pandas as pd
 import easyocr
 from pdf2image import convert_from_bytes
@@ -152,7 +150,6 @@ def extract_content(file, file_type):
             print("=== Erreur CSV ===")
             print(traceback.format_exc())
             text = ""
->>>>>>> Stashed changes
 
     text = "\n".join(cleaned_lines)
     text = re.sub(r'(?<=\w)\s(?=\w)', '', text)  
@@ -160,7 +157,6 @@ def extract_content(file, file_type):
     return text
 
 
-<<<<<<< Updated upstream
 def clean_ai_json(raw: str) -> str:
     """
     Nettoie une réponse OpenAI susceptible de contenir des fences ```json``` ou du texte autour.
@@ -273,9 +269,7 @@ def extract_content(file, file_type):
 
 
 # -------------------- Détection type fichier --------------------
-=======
 # Detect file type based on extension
->>>>>>> Stashed changes
 def detect_file_type(file_name):
     """
     Détecte le type de fichier à partir de son nom.
@@ -287,16 +281,10 @@ def detect_file_type(file_name):
         str: Type du fichier ('pdf', 'png', 'jpg', 'xlsx', 'csv', 'unknown')
     """
     ext = file_name.split(".")[-1].lower()
-<<<<<<< Updated upstream
-    if ext in ["pdf"]:
-        return ext
-    elif ext in ["png", "jpg", "jpeg", "webp"]:
-=======
     
     if ext == "pdf":
         return "pdf"
     elif ext in ["png", "jpg", "jpeg"]:
->>>>>>> Stashed changes
         return ext
     elif ext in ["xls", "xlsx"]:
         return ext

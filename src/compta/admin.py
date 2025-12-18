@@ -23,12 +23,12 @@ class BalanceAdmin(admin.ModelAdmin):
 
 @admin.register(models.Bilan)
 class BilanAdmin(admin.ModelAdmin):
-    list_display = ['libelle','numero_compte','type_bilan','categorie', "created_at"]
+    list_display = ['libelle','numero_compte','type_bilan','categorie','date', "created_at"]
     search_fields = ['id']
 
 @admin.register(models.CompteResultat)
 class CompteResultatAdmin(admin.ModelAdmin):
-    list_display = ['libelle','numero_compte','nature', "created_at"]
+    list_display = ['libelle','numero_compte','nature','date', "created_at"]
     search_fields = ['id']
 
      

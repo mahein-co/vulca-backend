@@ -138,6 +138,17 @@ def generate_financial_statements(sender, instance, **kwargs):
         categorie = regle.get('categorie')
         is_negative = regle.get('is_negative', False)
 
+        # ✅ LOGIQUE SPÉCIFIQUE BANQUE (51)
+        if code.startswith('51'):
+            if solde_credit > 0:
+                type_bilan = 'PASSIF'
+                categorie = 'PASSIFS_COURANTS'
+                label = "Concours bancaires courants"
+            else:
+                type_bilan = 'ACTIF'
+                categorie = 'ACTIF_COURANTS'
+                label = "Banque"
+
         # ✅ Règle de solde automatique
         if solde_debit > 0:
             montant = solde_debit

@@ -4,30 +4,21 @@ import unicodedata
 import hashlib
 from vulca_backend import settings
 
-from rest_framework import generics, status
+from rest_framework import generics
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-import traceback
-import json 
-import re 
+from rest_framework import status
 
-<<<<<<< Updated upstream
 from ocr.models import FileSource, FormSource
 from ocr.serializers import FileSourceSerializer, FormSourceSerializer
 from ocr.utils import detect_file_type, extract_content, clean_ai_json, generate_description
 from ocr.constants import EXTRACTION_FIELDS_PROMPT
-=======
-from ocr.models import FileSource
-from ocr.serializers import FileSourceSerializer
-from ocr.utils import detect_file_type, extract_content 
->>>>>>> Stashed changes
 
 from openai import OpenAI
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
+client = OpenAI(api_key=settings.OPENAI_API_KEY) 
 
 
-<<<<<<< Updated upstream
 # Helper: traduire les clefs d'un dict (récursively) selon un mapping anglais->français
 def translate_keys(obj, mapping):
     """Renomme les clefs d'un dict récursivement selon mapping.
@@ -253,145 +244,13 @@ def verify_against_ocr(obj, ocr_text: str):
         return obj if has_evidence_in_ocr(obj, ocr_text) else None
 
 
-=======
-# ==============================
-## 1. HELPER: NETTOYAGE OCR (Optimisation Vitesse)
-# ==============================
-def clean_ocr_text(content):
-    """
-    Nettoie le texte OCR des symboles aléatoires créés par la mauvaise qualité.
-    Ceci rend le texte plus court et plus lisible pour l'IA, améliorant la vitesse.
-    """
-    # Conserve les lettres, chiffres, espaces, sauts de ligne, et ponctuation courante
-    # Supprime les symboles étranges produits par un OCR dégradé.
-    content = re.sub(r'[^a-zA-Z0-9\s.,/\-\+()\[\]\{\}\r\n]', '', content)
-    # Supprimer les espaces multiples
-    content = re.sub(r'\s+', ' ', content).strip()
-    return content
-
-# ---
-
-# ==============================
-## 2. HELPER: EXTRACTION IA STRUCTURÉE (AVEC CHAMP 'client_number' et CORRECTION OCR)
-# ==============================
-def extract_structured_data_with_ai(content):
-    """
-    Utilise l'IA pour l'extraction détaillée, en incluant la correction des erreurs OCR. 
-    Ajout du champ 'client_number'.
-    """
-    # System prompt renforcé pour le nettoyage et l'ajout du champ client_number
-    system_prompt = """Tu es un expert en extraction et en nettoyage de données comptables. Ton rôle est de :
-1.  **Corriger les erreurs de lecture OCR (fautes de frappe, caractères regroupés)** pour identifier correctement les champs (Ex: 'N° Clierl N'Faclure' doit être corrigé en 'N° Client N° Facture').
-2.  Extraire les informations demandées à partir du texte, **même si elles sont mal formatées dans le texte source**.
-3.  Retourner **UNIQUEMENT** un JSON valide.
-
-Si une information est illisible ou introuvable, utilise la valeur **"N/A"**. Assure-toi que les dates sont au format YYYY-MM-DD.
-
-{
-  "document_type": "facture/reçu/devis/note de frais/bon de commande/autre",
-  "invoice_number": "numéro de facture ou N/A",
-  "client_number": "numéro de client ou N/A", <-- NOUVEAU CHAMP
-  "date": "date au format YYYY-MM-DD ou N/A",
-  "amount": "montant total TTC ou N/A",
-  "supplier": "nom du fournisseur ou N/A",
-  "client": "nom du client ou N/A",
-  "tva": "montant TVA ou N/A",
-  "currency": "EUR/USD/etc ou N/A",
-  "formatted_text": "TEXTE NETTOYÉ ET STRUCTURÉ (corrige les fautes, formate les sauts de ligne) ou N/A"
-}"""
-    try:
-        response = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {"role": "user", "content": f"Voici le contenu extrait : \n\n{content[:5000]}"}
-            ],
-            temperature=0,
-            response_format={"type": "json_object"}
-        )
-        
-        ai_response = response.choices[0].message.content.strip()
-        
-        if ai_response.startswith("```json"):
-            ai_response = ai_response.replace("```json", "").replace("```", "").strip()
-        
-        return json.loads(ai_response)
-    
-    except Exception as e:
-        print(f"=== Erreur d'extraction IA: {str(e)} ===")
-        print(traceback.format_exc())
-        return {
-            "document_type": "N/A", "invoice_number": "N/A", "client_number": "N/A", 
-            "date": "N/A", "amount": "N/A", "supplier": "N/A", "client": "N/A", 
-            "tva": "N/A", "currency": "N/A", "formatted_text": content 
-        }
-
-# ---
-# ==============================
-## 3. HELPER: FILTRE OUI/NON (Résilience et Inclusivité MAXIMALE)
-# ==============================
-def check_accounting_document(content):
-    """
-    Effectue la vérification OUI/NON stricte via OpenAI, avec tolérance pour le texte illisible.
-    Inclut une vérification rapide par mots-clés pour accepter les Proformas/Devis instantanément.
-    """
-    cleaned_content = clean_ocr_text(content)
-    
-    # -------------------------------------------------------------
-    # CONTRÔLE PRÉ-IA : Vérification de Mots-Clés Stricts
-    strict_keywords = ["facture", "reçu", "proforma", "devis", "note de frais", "bon de commande"]
-    if any(keyword in cleaned_content.lower() for keyword in strict_keywords):
-        return True
-    # -------------------------------------------------------------
-
-    # Rejet si le nettoyage ne laisse pas assez de texte pour l'analyse
-    if len("".join(cleaned_content.split())) < 50:
-        return False
-        
-    try:
-        response = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
-            messages=[
-                {"role": "system", 
-                 "content": """Tu es un expert en comptabilité. Réponds uniquement par OUI ou NON. 
-                 **Tu dois considérer comme OUI toute facture, reçu, devis, proforma ou bon de commande, même si la qualité OCR est mauvaise.** Fonde ta décision sur la structure (lignes d'articles, totaux, dates). 
-                 Si tu as le moindre doute que ce n'est pas un document de transaction, réponds NON."""}, 
-                {"role": "user",
-                 "content": f"Voici le contenu extrait (nettoyé) : {cleaned_content[:5000]}\n"
-                             "Dis-moi si c'est un document de transaction financière."} 
-            ],
-            temperature=0
-        )
-        raw_decision = response.choices[0].message.content
-        cleaned_decision = "".join(filter(str.isalpha, raw_decision)).lower()
-        
-        return cleaned_decision in ["oui", "yes"]
-
-    except Exception:
-        print(f"Erreur OpenAI lors du filtrage: {traceback.format_exc()}")
-        return False
-
-# ==============================
-## 4. VUE GÉNÉRIQUE (ListCreateAPIView)
-# ==============================
->>>>>>> Stashed changes
 class FileSourceListCreateView(generics.ListCreateAPIView):
     queryset = FileSource.objects.all().order_by('-uploaded_at')
     serializer_class = FileSourceSerializer
     permission_classes = [AllowAny]
+ 
 
-<<<<<<< Updated upstream
 @api_view(["POST"])
-=======
-
-# ==============================
-## 5. VUE FONCTIONNELLE (Création/Sauvegarde AVEC FILTRE + EXTRACTION)
-# ==============================
-@api_view(["GET", "POST"])
->>>>>>> Stashed changes
 @permission_classes([AllowAny])
 def file_source_list_create(request):
     file = request.FILES.get("file")
@@ -644,7 +503,6 @@ def form_source_list_create(request):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     if request.method == "POST":
-<<<<<<< Updated upstream
         # 1. Convertir le JSON string en dict
         raw_json = request.data.get("description_json")
 
@@ -692,69 +550,8 @@ def form_source_list_create(request):
             )
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-=======
-        file = request.FILES.get("file")
-        if not file:
-            return Response({"error": "Aucun fichier envoyé."}, status=status.HTTP_400_BAD_REQUEST)
-        
-        file_name = file.name
-        file_type = detect_file_type(file.name)
-        if file_type == "unknown":
-            return Response({"error": "Type de fichier non supporté."}, status=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            # Extraction du contenu OCR brut
-            content = extract_content(file, file_type)
-        except Exception as e:
-            return Response({"error": f"Erreur lors de l'extraction OCR : {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        if not content:
-            return Response({"error": "Impossible d'extraire du texte du fichier."}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # --- FILTRAGE OUI/NON (BLOQUANT) ---
-        if not check_accounting_document(content):
-            return Response(
-                {"error": "Ceci n'est pas une pièce comptable"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # --- EXTRACTION DÉTAILLÉE (Utilise le texte brut) ---
-        structured_data = extract_structured_data_with_ai(content)
-        
-        if structured_data is None:
-             return Response(
-                {"error": "Erreur critique lors de l'analyse détaillée par l'IA."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
 
-        # --- SAUVEGARDE ET RÉPONSE ---
-        file_data = {
-            "file": file, 
-            "file_name": file_name,
-            "is_ocr_processed": True,
-            **request.data 
-        }
-
-        serializer = FileSourceSerializer(data=file_data)
-        
-        if serializer.is_valid():
-            saved_file = serializer.save()
-            formatted_text = structured_data.get("formatted_text", content) 
-            
-            return Response(
-                {
-                    "message": "Fichier sauvegardé avec succès et analysé par l'IA.",
-                    "file_data": FileSourceSerializer(saved_file).data,
-                    "extracted_text": formatted_text,
-                    "structured_data": structured_data # Retourne l'objet complet incluant 'client_number'
-                },
-                status=status.HTTP_201_CREATED
-            )
->>>>>>> Stashed changes
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-<<<<<<< Updated upstream
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def extract_content_file_view(request):
@@ -1119,61 +916,3 @@ def extract_content_file_view(request):
         "ocr_brut": content,
         "extracted_json": extracted_json_fr
     }, status=201)
-=======
-# ---
-
-# ==============================
-## 6. VUE D'EXTRACTION SEULE (extract_text_view) AVEC FILTRE
-# ==============================
-@api_view(["POST"])
-@permission_classes([AllowAny])
-def extract_text_view(request):
-    """
-    Extrait le texte et les données structurées, appliquant le filtre OUI/NON en premier.
-    """
-    file = request.FILES.get("file")
-    if not file:
-        return Response({"error": "Aucun fichier envoyé."}, status=status.HTTP_400_BAD_REQUEST)
-    
-    file_type = detect_file_type(file.name)
-    if file_type == "unknown":
-        return Response({"error": "Type de fichier non supporté."}, status=status.HTTP_400_BAD_REQUEST)
-
-    try:
-        content = extract_content(file, file_type)
-    except Exception as e:
-        return Response({"error": f"Erreur OCR : {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    if not content.strip():
-        return Response({"error": "Impossible d'extraire du texte du fichier."}, status=status.HTTP_400_BAD_REQUEST)
-
-    # --- FILTRAGE OUI/NON (BLOQUANT) ---
-    if not check_accounting_document(content):
-        return Response(
-            {"error": "Ceci n'est pas une pièce comptable"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Extraction détaillée
-    structured_data = extract_structured_data_with_ai(content)
-    
-    if structured_data is None:
-        return Response(
-            {
-                "error": "Erreur critique lors de l'analyse détaillée par l'IA.",
-                "extracted_text": content
-            },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-    
-    formatted_text = structured_data.get("formatted_text", content) 
-    
-    return Response(
-        {
-            "message": "Extraction et analyse complètes réussies.",
-            "extracted_text": formatted_text,
-            "structured_data": structured_data # Retourne l'objet complet incluant 'client_number'
-        },
-        status=status.HTTP_200_OK
-    )
->>>>>>> Stashed changes

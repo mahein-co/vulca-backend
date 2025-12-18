@@ -3,8 +3,7 @@ from decimal import Decimal
 from datetime import datetime, date
 
 from django.core.exceptions import ValidationError
-from django.db.models import Sum
-from django.db.models.functions import TruncMonth
+from django.db.models import Sum, Max, Min
 
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
@@ -13,7 +12,6 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
 from openai import OpenAI
-from django.db.utils import OperationalError as DBOperationalError
 
 from ocr.pcg_loader import get_pcg_label
 from ocr.constants import PCG_MAPPING
@@ -25,10 +23,7 @@ from compta.serializers import (
     JournalSerializer, BilanSerializer, BalanceSerializer, CompteResultatSerializer,
     ChiffreAffaireSerializer, EbeSerializer, ResultatNetSerializer, BfrSerializer,
     CafSerializer, LeverageSerializer, AnnuiteCafSerializer, MargeNetteSerializer,
-    DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer,
-    RoeSerializer,RoaSerializer,CurrentRatioSerializer,QuickRatioSerializer,GearingSerializer,
-    RotationStockSerializer,MargeOperationnelleSerializer,RepartitionResultatSerializer,EvolutionTresorerieSerializer,
-    TopCompteSerializer,EvolutionChiffreAffaireSerializer
+    DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer
 )
 
 from vulca_backend import settings
@@ -41,15 +36,30 @@ client = OpenAI(api_key=settings.OPENAI_API_KEY)
 @permission_classes([AllowAny])
 def list_journals_view(request):
     journal_type = request.GET.get("type")
-    show_all = request.GET.get("all", "false").lower() == "true"
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    search_term = request.GET.get("search")
 
-    queryset = Journal.objects.all().order_by("-created_at", "numero_piece")
+    queryset = Journal.objects.all().order_by("-date", "numero_piece")
 
     if journal_type:
         queryset = queryset.filter(type_journal=journal_type)
 
-    if not show_all:
-        queryset = queryset.filter(created_at__date=date.today())
+    if date_start and date_end:
+        queryset = queryset.filter(date__range=[date_start, date_end])
+    elif not request.GET.get("all"): # Default behavior if no range provided: restrict to recent? or all? sticking to previous logic of "today" if nothing specified is risky for dashboard. Let's make it allow all if no specific filter, or maybe default to valid range.
+        # Actually, if date filters are empty, we might return everything (paginated).
+        # The original code filtered by today() if not show_all. 
+        # For the dashboard "detail" view, we usually want specific dates.
+        pass
+
+    if search_term:
+        from django.db.models import Q
+        queryset = queryset.filter(
+            Q(numero_compte__icontains=search_term) | 
+            Q(libelle__icontains=search_term) |
+            Q(numero_piece__icontains=search_term)
+        )
 
     totals = queryset.aggregate(
         total_debit=Sum("debit_ar"),
@@ -58,7 +68,13 @@ def list_journals_view(request):
     )
 
     paginator = PageNumberPagination()
-    paginator.page_size = 3
+    paginator.page_size = 10 # Check frontend requirement, maybe param
+    if request.GET.get("page_size"):
+        try:
+            paginator.page_size = int(request.GET.get("page_size"))
+        except:
+            pass
+            
     paginated_qs = paginator.paginate_queryset(queryset, request)
     serializer = JournalSerializer(paginated_qs, many=True)
 
@@ -71,6 +87,76 @@ def list_journals_view(request):
     }
 
     return response
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def journal_repartition_view(request):
+    """
+    Retourne la répartition des montants par type de journal.
+    Utilisé pour le Dashboard (widgets et barres de progression).
+    """
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    
+    queryset = Journal.objects.all()
+    
+    if date_start and date_end:
+        queryset = queryset.filter(date__range=[date_start, date_end])
+        
+    from django.db.models import Count, Sum
+    
+    # Agrégation par type de journal
+    repartition = queryset.values('type_journal').annotate(
+        total_amount=Sum('debit_ar'), # On utilise le débit comme référence de volume
+        count=Count('id')
+    ).order_by('-total_amount')
+    
+    # Calcul du total global pour les pourcentages
+    total_global = sum((item['total_amount'] or 0) for item in repartition)
+    if total_global == 0:
+        total_global = 1 # Eviter division par zéro
+
+    data = []
+    
+    # Mapping pour les labels et couleurs (optionnel, le frontend peut aussi le gérer)
+    LABELS = {
+        'ACHAT': 'Achats',
+        'VENTE': 'Ventes',
+        'BANQUE': 'Banques',
+        'CAISSE': 'Caisses',
+        'OD': 'Opérations diverses',
+        'AN': 'À Nouveaux'
+    }
+    
+    COLORS = {
+        'ACHAT': 'bg-red-800',
+        'VENTE': 'bg-emerald-900',
+        'BANQUE': 'bg-blue-900',
+        'CAISSE': 'bg-amber-800',
+        'OD': 'bg-gray-600',
+        'AN': 'bg-purple-800'
+    }
+
+    for item in repartition:
+        amount = item['total_amount'] or 0
+        percentage = (amount / total_global) * 100
+        journal_code = item['type_journal']
+        
+        data.append({
+            "code": journal_code,
+            "name": LABELS.get(journal_code, journal_code),
+            "amount": float(amount),
+            "percentage": round(percentage, 1),
+            "value": round(percentage, 1),
+            "count": item['count'],
+            "color": COLORS.get(journal_code, 'bg-gray-500')
+        })
+        
+    return Response({
+        "total_global": float(total_global) if total_global > 1 else 0,
+        "journals": data
+    })
 
 # CLASSIFICATION 
 def classify_accounting(document_json: dict, pcg_mapping: dict):
@@ -91,30 +177,6 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
     prompt = f"""
     Tu es un expert-comptable malgache certifié, spécialiste du Plan Comptable Général de Madagascar 2005.
     
-    try:
-        dotations = solde_net("68")
-        reprises = solde_net("78")
-
-        caf = resultat_net + dotations - reprises
-
-        ratio = Decimal("0.00")
-        if caf != 0:
-            ratio = annuite_emprunt / caf
-
-        alerte = ratio > Decimal("0.50")
-
-        payload = {
-            "annuite_emprunt": annuite_emprunt,
-            "caf": caf,
-            "ratio": ratio.quantize(Decimal("0.01")),
-            "alerte": alerte
-        }
-
-        serializer = AnnuiteCafSerializer(payload)
-        return Response(serializer.data)
-    except DBOperationalError as e:
-        # Database unreachable (timeout, network issue). Return 503 so frontend can handle gracefully.
-        return Response({"error": "Database unavailable", "details": str(e)}, status=503)
     PLAN COMPTABLE GÉNÉRAL 2005 (COMPLET) :
     {pcg_text}
     
@@ -187,6 +249,13 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
         messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
+    
+    ai_response = response.choices[0].message.content
+    
+    # ✅ Nettoyage de la réponse AI (enlève les ```json ... ``` si présents)
+    cleaned_response = clean_ai_json(ai_response)
+    
+    result = json.loads(cleaned_response)
     
     ai_response = response.choices[0].message.content
     
@@ -403,14 +472,45 @@ def process_journal_generation(document_json, file_source=None, form_source=None
 
 
 class BilanListCreateView(generics.ListCreateAPIView):
-    queryset = Bilan.objects.all()
     serializer_class = BilanSerializer
     permission_classes = [AllowAny]
 
+    def get_queryset(self):
+        queryset = Bilan.objects.all()
+        # Filtres
+        date = self.request.query_params.get('date')
+        date_start = self.request.query_params.get('date_start')
+        date_end = self.request.query_params.get('date_end')
+        
+        if date:
+            queryset = queryset.filter(date=date)
+        
+        # LOGIQUE BILAN : Si date_start présent => Range (pour affichage spécifique)
+        # Mais si SEULEMENT date_end => Cumul depuis le début (LTE)
+        if date_start and date_end:
+            queryset = queryset.filter(date__range=[date_start, date_end])
+        elif date_end:
+            queryset = queryset.filter(date__lte=date_end)
+
+        return queryset
+
 class CompteResultatListCreateView(generics.ListCreateAPIView):
-    queryset = CompteResultat.objects.all()
     serializer_class = CompteResultatSerializer
     permission_classes = [AllowAny]
+
+    def get_queryset(self):
+        queryset = CompteResultat.objects.all()
+        # Filtres
+        date = self.request.query_params.get('date')
+        date_start = self.request.query_params.get('date_start')
+        date_end = self.request.query_params.get('date_end')
+        
+        if date:
+            queryset = queryset.filter(date=date)
+        if date_start and date_end:
+            queryset = queryset.filter(date__range=[date_start, date_end])
+
+        return queryset
 # GENERATE JOURNAL VIEW
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -444,15 +544,10 @@ def generate_journal_view(request):
         return Response({"error": str(e)}, status=500)
 
 
-
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def chiffre_affaire_view(request):
-    """
-    GET /api/chiffre-affaire/
-    GET /api/chiffre-affaire/?compte=701
-    GET /api/chiffre-affaire/?date_debut=2025-01-01&date_fin=2025-12-31
-    """
+    
 
     compte = request.GET.get("compte")
     date_debut = request.GET.get("date_debut")
@@ -488,7 +583,6 @@ def chiffre_affaire_view(request):
 
     serializer = ChiffreAffaireSerializer(result, many=True)
     return Response(serializer.data)
-
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
@@ -541,53 +635,144 @@ def ebe_view(request):
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def resultat_net_view(request):
+def resultat_net_view(request):  #partie corriger
     """
-    Calcul du Résultat Net depuis le Grand Livre
+    Calcul du Résultat Net avec variation par rapport à la période précédente
     """
+    from dateutil.relativedelta import relativedelta
+    from datetime import datetime, date
 
-    def solde(prefix):
-        data = GrandLivre.objects.filter(
-            numero_compte__startswith=prefix
-        ).aggregate(
-            credit=Sum("credit"),
-            debit=Sum("debit")
+    # Récupération des dates
+    date_start_str = request.query_params.get('date_start')
+    date_end_str = request.query_params.get('date_end')
+
+    today = date.today()
+    
+    # Par défaut : Année courante vs Année précédente
+    if not date_start_str or not date_end_str:
+        current_start = date(today.year, 1, 1)
+        current_end = date(today.year, 12, 31)
+        
+        previous_start = date(today.year - 1, 1, 1)
+        previous_end = date(today.year - 1, 12, 31)
+    else:
+        try:
+            current_start = datetime.strptime(date_start_str, '%Y-%m-%d').date()
+            current_end = datetime.strptime(date_end_str, '%Y-%m-%d').date()
+
+            # Détermination de la période précédente
+            # Si c'est un mois complet (ou presque), on compare au mois précédent
+            # Si c'est une année, on compare à l'année précédente
+            delta_days = (current_end - current_start).days
+            
+            if 28 <= delta_days <= 32: # Mensuel
+                # Mois précédent
+                previous_start = current_start - relativedelta(months=1)
+                # Gestion fin de mois
+                previous_end = previous_start + relativedelta(day=31)
+                # Ajustement si on a sauté un mois (ex: mars -> fevrier)
+                if previous_end.month != previous_start.month:
+                    previous_end = previous_start + relativedelta(months=1, days=-1)
+                    
+                # Plus simple: Juste reculer d'un mois
+                previous_start = current_start - relativedelta(months=1)
+                previous_end = current_end - relativedelta(months=1)
+                
+                 # Si on veut matcher le mois exact (1er au 31)
+                if current_start.day == 1:
+                     previous_start = (current_start - relativedelta(months=1)).replace(day=1)
+                     previous_end = (previous_start + relativedelta(months=1)) - relativedelta(days=1)
+
+            elif 88 <= delta_days <= 92: # Trimestriel
+                previous_start = current_start - relativedelta(months=3)
+                previous_end = (current_start - relativedelta(days=1))
+            
+            elif delta_days >= 360: # Annuel
+                previous_start = current_start - relativedelta(years=1)
+                previous_end = current_end - relativedelta(years=1)
+            
+            else:
+                 # Fallback: Glissement de la même durée
+                duration = current_end - current_start
+                previous_end = current_start - relativedelta(days=1)
+                previous_start = previous_end - duration
+
+        except ValueError:
+            return Response({"error": "Format de date invalide (YYYY-MM-DD)"}, status=400)
+
+
+    def calculate_resultat(d_start, d_end):
+        def solde(prefix):
+            qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+            if d_start and d_end:
+                 qs = qs.filter(date__range=[d_start, d_end])
+            elif d_end:
+                 qs = qs.filter(date__lte=d_end)
+            
+            data = qs.aggregate(
+                credit=Sum("credit"),
+                debit=Sum("debit")
+            )
+            return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+
+        produits = solde("7")
+        charges_exploitation = sum(solde(str(c)) for c in range(60, 66))
+        charges_financieres = solde("66")
+        produits_financiers = solde("76")
+        charges_exceptionnelles = solde("67")
+        produits_exceptionnels = solde("77")
+        impots_benefices = solde("69")
+
+        res_net = (
+            produits
+            + charges_exploitation
+            + charges_financieres
+            + produits_financiers
+            + charges_exceptionnelles
+            + produits_exceptionnels
+            + impots_benefices
         )
-        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+        return {
+            "produits": produits,
+            "charges_exploitation": charges_exploitation,
+            "charges_financieres": charges_financieres,
+            "produits_financiers": produits_financiers,
+            "charges_exceptionnelles": charges_exceptionnelles,
+            "produits_exceptionnels": produits_exceptionnels,
+            "impots_benefices": impots_benefices,
+            "resultat_net": res_net,
+        }
 
-    produits = solde("7")
-    charges_exploitation = sum(
-        solde(str(c)) for c in range(60, 66)
-    )
-    charges_financieres = solde("66")
-    produits_financiers = solde("76")
-    charges_exceptionnelles = solde("67")
-    produits_exceptionnels = solde("77")
-    impots_benefices = solde("69")
+    # Calcul Période Actuelle
+    current_data = calculate_resultat(current_start, current_end)
+    
+    # Calcul Période Précédente
+    previous_data = calculate_resultat(previous_start, previous_end)
 
-    resultat_net = (
-        produits
-        - charges_exploitation
-        - charges_financieres
-        + produits_financiers
-        - charges_exceptionnelles
-        + produits_exceptionnels
-        - impots_benefices
-    )
+    # Calcul Cumulé (pour Capitaux Propres)
+    cumulative_data = calculate_resultat(None, current_end)
+    
+    # Variation
+    current_net = current_data["resultat_net"]
+    prev_net = previous_data["resultat_net"]
+    variation = current_net - prev_net
+    
+    variation_pct = Decimal(0)
+    if prev_net != 0:
+        variation_pct = (variation / abs(prev_net)) * 100
 
     payload = {
-        "produits": produits,
-        "charges_exploitation": charges_exploitation,
-        "charges_financieres": charges_financieres,
-        "produits_financiers": produits_financiers,
-        "charges_exceptionnelles": charges_exceptionnelles,
-        "produits_exceptionnels": produits_exceptionnels,
-        "impots_benefices": impots_benefices,
-        "resultat_net": resultat_net,
+        **current_data,
+        "previous_resultat_net": prev_net,
+        "variation": variation,
+        "variation_percentage": variation_pct,
+        "resultat_net_cumule": cumulative_data["resultat_net"]
     }
 
     serializer = ResultatNetSerializer(payload)
     return Response(serializer.data)
+
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
@@ -634,6 +819,7 @@ def bfr_view(request):
     })
 
     return Response(serializer.data)
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
@@ -702,6 +888,8 @@ def caf_view(request):
 
     return Response(serializer.data)
 
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def leverage_brut_view(request):
@@ -757,6 +945,8 @@ def leverage_brut_view(request):
         "ebe": ebe,
         "leverage_brut": leverage_brut
     })
+
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
@@ -890,882 +1080,615 @@ def annuite_caf_view(request):
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def dette_lmt_caf_view(request):
+def dashboard_indicators_view(request):
     """
-    GET /api/dette-lmt-caf/?date_debut=2025-01-01&date_fin=2025-12-31
+    ENDPOINT OPTIMISÉ POUR DASHBOARD
+    Calcule tous les indicateurs financiers en une seule requête DB/HTTP.
+    Paramètres: ?date_start=YYYY-MM-DD&date_end=YYYY-MM-DD
     """
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
-
-    # Dette long terme = Passifs non courants (17x)
-    dette_lmt = (
-        Bilan.objects
-        .filter(
-            type_bilan="PASSIF",
-            categorie="PASSIFS_NON_COURANTS",
-            numero_compte__regex=r"^17",
-            **base_filter
+    # --- HELPER INTERNE OPTIMISÉ ---
+    
+    def get_solde(prefix, sens="credit-debit"):
+        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+        if date_start and date_end:
+            qs = qs.filter(date__range=[date_start, date_end])
+            
+        agg = qs.aggregate(
+            d=Sum("debit"), 
+            c=Sum("credit")
         )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
+        d = agg["d"] or Decimal("0.00")
+        c = agg["c"] or Decimal("0.00")
+        
+        if sens == "debit": return d
+        if sens == "credit": return c
+        if sens == "debit-credit": return d - c
+        return c - d # Default: Crédit - Débit (Produits, Passif)
 
-    # === Calcul de la CAF (Méthode additive CORRECTE) ===
-    # Produits totaux (Classe 7)
-    produits_total = (
-        CompteResultat.objects
-        .filter(
-            nature="PRODUIT",
-            numero_compte__regex=r"^7",
-            **base_filter
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
+    # 1. CHIFFRE D'AFFAIRES (Classe 70)
+    ca = get_solde("70")
+    
+    # 2. EBE
+    produits_7 = get_solde("7") # Total classe 7
+    subventions = get_solde("74")
+    achats = get_solde("60", sens="debit-credit") # Charges = Debit - Credit
+    charges_ext = get_solde("61", sens="debit-credit") + get_solde("62", sens="debit-credit")
+    impots = get_solde("63", sens="debit-credit")
+    personnel = get_solde("64", sens="debit-credit")
+    
+    ebe = get_solde("70") + get_solde("74") - (achats + charges_ext + impots + personnel)
 
-    # Charges totales (Classe 6)
-    charges_total = (
-        CompteResultat.objects
-        .filter(
-            nature="CHARGE",
-            numero_compte__regex=r"^6",
-            **base_filter
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
+    # 3. RÉSULTAT NET
+    total_produits = get_solde("7")
+    total_charges = get_solde("6", sens="debit-credit")
+    resultat_net = total_produits - total_charges
 
-    # Résultat Net
-    resultat_net = produits_total - charges_total
-
-    # Dotations (68)
-    dotations = (
-        CompteResultat.objects
-        .filter(
-            nature="CHARGE",
-            numero_compte__startswith="68",
-            **base_filter
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-
-    # Reprises (78)
-    reprises = (
-        CompteResultat.objects
-        .filter(
-            nature="PRODUIT",
-            numero_compte__startswith="78",
-            **base_filter
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-
-    # CAF = Résultat Net + Dotations - Reprises
+    # 4. CAF
+    dotations = get_solde("68", sens="debit-credit")
+    reprises = get_solde("78")
     caf = resultat_net + dotations - reprises
 
-    # Ratio Dette LMT / CAF
-    ratio_dette_lmt_caf = dette_lmt / caf if caf != 0 else None
+    # 5. BFR
+    stocks = get_solde("3", sens="debit-credit")
+    creances = get_solde("411", sens="debit-credit") + get_solde("409", sens="debit-credit") + get_solde("418", sens="debit-credit")
+    dettes_fournisseurs = get_solde("401") + get_solde("408") + get_solde("419")
+    bfr = stocks + creances - dettes_fournisseurs 
 
-    serializer = DetteLmtCafSerializer({
-        "dette_lmt": dette_lmt,
+    # 6. LEVERAGE
+    endettement = get_solde("16") + get_solde("17") + get_solde("19")
+    leverage = Decimal("0.00")
+    if ebe != 0:
+        leverage = endettement / ebe
+
+    # 7. RATIOS DIVERS
+    remboursement_k = get_solde("164", sens="debit") + get_solde("168", sens="debit")
+    frais_fi = get_solde("661", sens="debit-credit")
+    annuite = remboursement_k + frais_fi
+    ratio_annuite_caf = Decimal("0")
+    if caf != 0:
+        ratio_annuite_caf = annuite / caf
+
+    dette_lmt = get_solde("16")
+    ratio_dette_caf = Decimal("0")
+    if caf != 0:
+        ratio_dette_caf = dette_lmt / caf
+
+    ratio_marge_nette = Decimal("0")
+    if ca != 0:
+        ratio_marge_nette = (resultat_net / ca) * 100
+
+    ratio_fi_ebe = Decimal("0")
+    if ebe != 0:
+        ratio_fi_ebe = frais_fi / ebe
+        
+    ratio_fi_ca = Decimal("0")
+    if ca != 0:
+        ratio_fi_ca = frais_fi / ca
+
+    capitaux_propres_base = sum(get_solde(str(c)) for c in range(101, 107))
+    fonds_propres = capitaux_propres_base + resultat_net
+    ratio_gearing = Decimal("0")
+    if fonds_propres != 0:
+        ratio_gearing = dette_lmt / fonds_propres
+
+
+    # 8. TOTAL BALANCE (Total Débit ou Crédit de la période)
+    # Pour afficher "X Ar" sur la carte Balance si équilibrée.
+    total_balance = get_solde("", sens="debit") # Total de tous les débits
+    
+    # --- ASSEMBLAGE RÉPONSE ---
+    return Response({
+        "ca": ca,
+        "ebe": ebe,
+        "resultat_net": resultat_net,
         "caf": caf,
-        "ratio_dette_lmt_caf": ratio_dette_lmt_caf
+        "bfr": bfr,
+        "leverage": leverage.quantize(Decimal("0.01")),
+        "total_balance": total_balance,
+        "ratios": {
+            "annuite_caf": {
+                 "value": ratio_annuite_caf.quantize(Decimal("0.01")),
+                 "alerte": ratio_annuite_caf > Decimal("0.50")
+            },
+            "dette_caf": {
+                 "value": ratio_dette_caf.quantize(Decimal("0.01")),
+                 "alerte": ratio_dette_caf >= Decimal("3.50")
+            },
+            "marge_nette": {
+                "value": ratio_marge_nette.quantize(Decimal("0.01")), # Pourcentage
+            },
+            "fi_ebe": {
+                "value": ratio_fi_ebe.quantize(Decimal("0.01")),
+                "alerte": ratio_fi_ebe >= Decimal("0.30")
+            },
+            "fi_ca": {
+                 "value": ratio_fi_ca, 
+                 "alerte": ratio_fi_ca >= Decimal("0.05")
+            },
+            "gearing": {
+                 "value": ratio_gearing.quantize(Decimal("0.01")),
+                 "alerte": ratio_gearing >= Decimal("1.3")
+            }
+        }
     })
-
-    return Response(serializer.data)
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def marge_net_view(request):
+def journal_date_range_view(request):
     """
-    GET /api/marge-net/?date_debut=2025-01-01&date_fin=2025-12-31
+    Retourne la plage de dates (min, max) des écritures comptables.
     """
-
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
-
-    # Chiffre d'affaires = Produits de classe 70
-    ca = (
-        CompteResultat.objects
-        .filter(
-            nature="PRODUIT",
-            numero_compte__startswith="70",
-            **base_filter
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-
-    # Résultat net = tous produits - toutes charges
-    total_produits = (
-        CompteResultat.objects
-        .filter(nature="PRODUIT", **base_filter)
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-
-    total_charges = (
-        CompteResultat.objects
-        .filter(nature="CHARGE", **base_filter)
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-
-    resultat_net = total_produits - total_charges
-
-    # Ratio Résultat net / CA
-    ratio_resultat_ca = resultat_net / ca if ca != 0 else None
-
-    serializer = MargeNetteSerializer({
-        "chiffre_affaire": ca,
-        "resultat_net": resultat_net,
-        "ratio_resultat_ca": ratio_resultat_ca
+    agg = Journal.objects.aggregate(min_date=Min('date'), max_date=Max('date'))
+    
+    return Response({
+        "min_date": agg['min_date'],
+        "max_date": agg['max_date']
     })
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def balance_generale_view(request):
+    """
+    Retourne la balance générale (agrégée par compte) pour une plage de dates.
+    Paramètres: ?date_start=YYYY-MM-DD&date_end=YYYY-MM-DD
+    """
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    qs = GrandLivre.objects.all()
+    if date_start and date_end:
+        qs = qs.filter(date__range=[date_start, date_end])
+
+    # Agrégation par compte
+    balance_lines = qs.values("numero_compte").annotate(
+        total_debit=Sum("debit"),
+        total_credit=Sum("credit"),
+        # On prend le libellé le plus fréquent ou le premier/dernier trouvé
+        # Max est une heuristique acceptable si le libellé est constant par compte
+        libelle=Max("libelle") 
+    ).order_by("numero_compte")
+
+    results = []
+    for line in balance_lines:
+        d = line["total_debit"] or Decimal("0.00")
+        c = line["total_credit"] or Decimal("0.00")
+        solde = d - c
+        
+        # On ne renvoie que les comptes mouvementés ou avec solde non nul ? 
+        # Généralement Balance inclut tout ce qui a bougé dans la période ou qui a un solde.
+        # Ici on filtre sur les mouvements de la période, donc d et c > 0.
+        
+        nature = "Soldé"
+        if solde > 0: nature = "Débiteur"
+        elif solde < 0: nature = "Créditeur"
+        
+        results.append({
+            "compte": line["numero_compte"],
+            "libelle": line["libelle"] or f"Compte {line['numero_compte']}",
+            "debit": float(d),
+            "credit": float(c),
+            "solde": float(abs(solde)), # Le front gère le signe ou la colonne, ici magnitude
+            "nature": nature
+        })
+
+    return Response(results)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def dette_lmt_caf_view(request):
+    """
+    Ratio : Dette LMT / CAF
+    """
+
+    def solde(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            credit=Sum("credit"),
+            debit=Sum("debit")
+        )
+        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+
+    # 🔹 Dette LMT (comptes 16x)
+    dette_lmt = solde("16")
+
+    # 🔹 CAF
+    def solde_net(prefix):
+        data = GrandLivre.objects.filter(
+            numero_compte__startswith=prefix
+        ).aggregate(
+            credit=Sum("credit"),
+            debit=Sum("debit")
+        )
+        return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
+
+    produits = solde_net("7")
+    charges_exploitation = sum(solde_net(str(c)) for c in range(60, 66))
+    charges_financieres = solde_net("66")
+    produits_financiers = solde_net("76")
+    charges_exceptionnelles = solde_net("67")
+    produits_exceptionnels = solde_net("77")
+    impots_benefices = solde_net("69")
+
+    resultat_net = (
+        produits
+        - charges_exploitation
+        - charges_financieres
+        + produits_financiers
+        - charges_exceptionnelles
+        + produits_exceptionnels
+        - impots_benefices
+    )
+
+    dotations = solde_net("68")
+    reprises = solde_net("78")
+
+    caf = resultat_net + dotations - reprises
+
+    ratio = Decimal("0.00")
+    if caf != 0:
+        ratio = dette_lmt / caf
+
+    alerte = ratio >= Decimal("3.50")
+
+    payload = {
+        "dette_lmt": dette_lmt,
+        "caf": caf,
+        "ratio": ratio.quantize(Decimal("0.01")),
+        "alerte": alerte
+    }
+
+    serializer = DetteLmtCafSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def resultat_net_ca_view(request):
+    """
+    Ratio : Résultat net / Chiffre d'affaires
+    """
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def solde(prefix):
+        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+        if date_start and date_end:
+            qs = qs.filter(date__range=[date_start, date_end])
+
+        data = qs.aggregate(
+            debit=Sum("debit"),
+            credit=Sum("credit")
+        )
+        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
+
+    # 🔹 Chiffre d'affaires (70x)
+    chiffre_affaire = solde("70")
+
+    # 🔹 Résultat net
+    produits = solde("7")
+    charges_exploitation = sum(solde(str(c)) for c in range(60, 66))
+    charges_financieres = solde("66")
+    produits_financiers = solde("76")
+    charges_exceptionnelles = solde("67")
+    produits_exceptionnels = solde("77")
+    impots = solde("69")
+
+    resultat_net = (
+        produits
+        - charges_exploitation
+        - charges_financieres
+        + produits_financiers
+        - charges_exceptionnelles
+        + produits_exceptionnels
+        - impots
+    )
+
+    ratio = Decimal("0.00")
+    ratio_pourcent = Decimal("0.00")
+
+    if chiffre_affaire != 0:
+        ratio = resultat_net / chiffre_affaire
+        ratio_pourcent = ratio * Decimal("100")
+
+    payload = {
+        "resultat_net": resultat_net,
+        "chiffre_affaire": chiffre_affaire,
+        "ratio": ratio.quantize(Decimal("0.0001")),
+        "ratio_pourcent": ratio_pourcent.quantize(Decimal("0.01")),
+    }
+
+    serializer = MargeNetteSerializer(payload)
     return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def charge_ebe_view(request):
     """
-    GET /api/charge-ebe/?date_debut=2025-01-01&date_fin=2025-12-31
+    Ratio : Charge financière / EBE
     """
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
+    def solde(prefix):
+        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+        if date_start and date_end:
+            qs = qs.filter(date__range=[date_start, date_end])
 
-    # Charge financière = comptes 66x
-    charge_financiere = (
-        CompteResultat.objects
-        .filter(
-            nature="CHARGE",
-            numero_compte__regex=r"^66",
-            **base_filter
+        data = qs.aggregate(
+            debit=Sum("debit"),
+            credit=Sum("credit")
         )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
+        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
 
-    # EBE (Excédent Brut d'Exploitation)
-    produits = (
-        CompteResultat.objects
-        .filter(
-            nature="PRODUIT",
-            numero_compte__regex=r"^7[0-4]",
-            **base_filter
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-    charges_exploitation = (
-        CompteResultat.objects
-        .filter(
-            nature="CHARGE",
-            numero_compte__regex=r"^6[0-4]",
-            **base_filter
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-    ebe = produits - charges_exploitation
+    # 🔹 Charge financière (661)
+    charge_financiere = solde("661")
 
-    # Ratio Charge financière / EBE
-    ratio_charge_ebe = charge_financiere / ebe if ebe != 0 else None
+    # 🔹 EBE
+    ca = solde("7")
+    subventions = solde("74")
+    achats = solde("60")
+    charges_ext = solde("61") + solde("62")
+    impots = solde("63")
+    personnel = solde("64")
 
-    serializer = ChargeEbeSerializer({
+    ebe = ca + subventions - achats - charges_ext - impots - personnel
+
+    ratio = Decimal("0.00")
+    if ebe != 0:
+        ratio = charge_financiere / ebe
+
+    alerte = ratio >= Decimal("0.30")
+
+    payload = {
         "charge_financiere": charge_financiere,
         "ebe": ebe,
-        "ratio_charge_ebe": ratio_charge_ebe
-    })
+        "ratio": ratio.quantize(Decimal("0.01")),
+        "alerte": alerte
+    }
 
+    serializer = ChargeEbeSerializer(payload)
     return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def charge_ca_view(request):
     """
-    GET /api/charge-ca/?date_debut=2025-01-01&date_fin=2025-12-31
+    Ratio : Charge financière / Chiffre d'affaires
     """
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
+    def solde(prefix):
+        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+        if date_start and date_end:
+            qs = qs.filter(date__range=[date_start, date_end])
 
-    try:
-        # Charge financière = comptes 66x
-        charge_financiere = (
-            CompteResultat.objects
-            .filter(
-                nature="CHARGE",
-                numero_compte__regex=r"^66",
-                **base_filter
-            )
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        data = qs.aggregate(
+            debit=Sum("debit"),
+            credit=Sum("credit")
         )
+        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
 
-        # Chiffre d'affaires = comptes 70x
-        chiffre_affaire = (
-            CompteResultat.objects
-            .filter(
-                nature="PRODUIT",
-                numero_compte__startswith="70",
-                **base_filter
-            )
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
+    # 🔹 Charge financière
+    charge_financiere = solde("661")
 
-        # Ratio Charge financière / CA
-        ratio_charge_ca = charge_financiere / chiffre_affaire if chiffre_affaire != 0 else None
+    # 🔹 Chiffre d'affaires
+    chiffre_affaire = solde("70")
 
-        serializer = ChargeCaSerializer({
-            "charge_financiere": charge_financiere,
-            "chiffre_affaire": chiffre_affaire,
-            "ratio_charge_ca": ratio_charge_ca
-        })
+    ratio = Decimal("0.00")
+    if chiffre_affaire != 0:
+        ratio = charge_financiere / chiffre_affaire
 
-        return Response(serializer.data)
-    except DBOperationalError as e:
-        return Response({"error": "Database unavailable", "details": str(e)}, status=503)
+    alerte = ratio >= Decimal("0.05")  # 5%
+
+    payload = {
+        "charge_financiere": charge_financiere,
+        "chiffre_affaire": chiffre_affaire,
+        "ratio": ratio.quantize(Decimal("0.02")),
+        "alerte": alerte
+    }
+
+    serializer = ChargeCaSerializer(payload)
+    return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def marge_endettement_view(request):
     """
-    GET /api/marge-endettement/?date_debut=2025-01-01&date_fin=2025-12-31
+    Ratio : Dette CMLT / Fonds Propres
+    Paramètres: ?date_start=YYYY-MM-DD&date_end=YYYY-MM-DD
     """
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
-
-    # Dette CMLT = Passifs financiers courants + non courants (16x + 17x)
-    dette_cmlt = (
-        Bilan.objects
-        .filter(
-            type_bilan="PASSIF",
-            categorie__in=["PASSIFS_COURANTS", "PASSIFS_NON_COURANTS"],
-            numero_compte__regex=r"^16|^17",
-            **base_filter
+    def solde(prefix):
+        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+        if date_start and date_end:
+            qs = qs.filter(date__range=[date_start, date_end])
+        
+        data = qs.aggregate(
+            debit=Sum("debit"),
+            credit=Sum("credit")
         )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
+        return (data["credit"] or Decimal("0")) - (data["debit"] or Decimal("0"))
 
-    # Fonds propres
-    fonds_propres = (
-        Bilan.objects
-        .filter(
-            type_bilan="PASSIF",
-            categorie="CAPITAUX_PROPRES",
-            **base_filter
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
+    # 🔹 Dette CMLT (16x)
+    dette_cmlt = solde("16")
 
-    # Ratio Dette CMLT / Fonds propres
-    ratio_marge_endettement = dette_cmlt / fonds_propres if fonds_propres != 0 else None
+    # 🔹 Fonds Propres (101–106) + Résultat Net
+    capitaux_propres_base = sum(solde(str(c)) for c in range(101, 107))
+    
+    # Résultat Net = Solde(7) + Solde(6) [car solde(6) est négatif]
+    resultat_net = solde("7") + solde("6")
+    
+    fonds_propres = capitaux_propres_base + resultat_net
 
-    serializer = MargeEndettementSerializer({
+    ratio = Decimal("0.00")
+    if fonds_propres != 0:
+        ratio = dette_cmlt / fonds_propres
+
+    alerte = ratio >= Decimal("1.3")
+
+    payload = {
         "dette_cmlt": dette_cmlt,
         "fonds_propres": fonds_propres,
-        "ratio_marge_endettement": ratio_marge_endettement
-    })
+        "ratio": ratio.quantize(Decimal("0.01")),
+        "alerte": alerte
+    }
 
+    serializer = MargeEndettementSerializer(payload)
     return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def roe_view(request):
+def get_min_journal_date_view(request):
     """
-    GET /api/roe/?date_debut=2025-01-01&date_fin=2025-12-31
-    Optionnel: date_debut_prev & date_fin_prev pour calcul variation
+    Retourne la date de la toute première écriture comptable.
+    Utile pour initialiser les filtres de date par défaut.
     """
+    from django.db.models import Min
+    min_date = Journal.objects.aggregate(Min('date'))['date__min']
+    
+    if min_date:
+         return Response({"min_date": min_date})
+    else:
+         # Fallback to current year start if no data
+         return Response({"min_date": f"{date.today().year}-01-01"})
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-    date_debut_prev = request.GET.get("date_debut_prev")
-    date_fin_prev = request.GET.get("date_fin_prev")
-
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
-
-    # Résultat net période courante
-    total_produits = (
-        CompteResultat.objects
-        .filter(nature="PRODUIT", **base_filter)
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-    total_charges = (
-        CompteResultat.objects
-        .filter(nature="CHARGE", **base_filter)
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-    resultat_net = total_produits - total_charges
-
-    # Fonds propres période courante
-    fonds_propres = (
-        Bilan.objects
-        .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", **base_filter)
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-
-    roe = (resultat_net / fonds_propres * 100) if fonds_propres != 0 else None
-
-    # Résultat précédent pour calcul variation
-    variation = None
-    if date_debut_prev and date_fin_prev:
-        base_filter_prev = {"date__range": [date_debut_prev, date_fin_prev]}
-        total_produits_prev = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", **base_filter_prev)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        total_charges_prev = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", **base_filter_prev)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        resultat_net_prev = total_produits_prev - total_charges_prev
-
-        fonds_propres_prev = (
-            Bilan.objects
-            .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", **base_filter_prev)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        roe_prev = (resultat_net_prev / fonds_propres_prev * 100) if fonds_propres_prev != 0 else None
-
-        if roe is not None and roe_prev is not None:
-            variation = roe - roe_prev
-
-    serializer = RoeSerializer({
-        "roe": roe,
-        "variation": variation
-    })
-
-    return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def roa_view(request):
+def get_available_years_view(request):
     """
-    GET /api/roa/?date_debut=2025-01-01&date_fin=2025-12-31
-    Optionnel :
-    date_debut_prev=2024-01-01&date_fin_prev=2024-12-31
+    Retourne la liste des années disponibles dans les écritures comptables.
+    Triées par ordre décroissant (plus récent en premier).
     """
-
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-    date_debut_prev = request.GET.get("date_debut_prev")
-    date_fin_prev = request.GET.get("date_fin_prev")
-
-    def calcul_roa(filters):
-        # Résultat net
-        produits = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-        )
-        charges = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-        )
-        resultat_net = produits - charges
-
-        # Total Actif
-        total_actif = (
-            Bilan.objects
-            .filter(type_bilan="ACTIF", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-        )
-
-        if total_actif == 0:
-            return None
-
-        return (resultat_net / total_actif) * 100
-
-    filters = {}
-    if date_debut and date_fin:
-        filters["date__range"] = [date_debut, date_fin]
-
-    roa = calcul_roa(filters)
-
-    variation = None
-    if date_debut_prev and date_fin_prev:
-        roa_prev = calcul_roa({
-            "date__range": [date_debut_prev, date_fin_prev]
-        })
-        if roa is not None and roa_prev is not None:
-            variation = roa - roa_prev
-
-    serializer = RoaSerializer({
-        "roa": roa,
-        "variation": variation
-    })
-
-    return Response(serializer.data)
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def current_ratio_view(request):
-    """
-    GET /api/current-ratio/?date_debut=2025-01-01&date_fin=2025-12-31
-    """
-
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-
-    filters = {}
-    if date_debut and date_fin:
-        filters["date__range"] = [date_debut, date_fin]
-
-    actifs_courants = (
-        Bilan.objects
-        .filter(
-            type_bilan="ACTIF",
-            categorie="ACTIF_COURANTS",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    from django.db.models.functions import ExtractYear
+    from datetime import date
+    
+    years = (
+        Journal.objects
+        .annotate(year=ExtractYear('date'))
+        .values_list('year', flat=True)
+        .distinct()
+        .order_by('-year')
     )
+    
+    # Filtrer les None éventuels et convertir en liste
+    available_years = [y for y in years if y is not None]
+    
+    # Si vide, retourner l'année courante par défaut
+    if not available_years:
+        available_years = [date.today().year]
+        
+    return Response(available_years)
 
-    passifs_courants = (
-        Bilan.objects
-        .filter(
-            type_bilan="PASSIF",
-            categorie="PASSIFS_COURANTS",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    current_ratio = (
-        actifs_courants / passifs_courants
-        if passifs_courants != 0
-        else None
-    )
-
-    serializer = CurrentRatioSerializer({
-        "current_ratio": current_ratio
-    })
-
-    return Response(serializer.data)
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def quick_ratio_view(request):
-    """
-    GET /api/quick-ratio/?date_debut=2025-01-01&date_fin=2025-12-31
-    """
-
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-
-    filters = {}
-    if date_debut and date_fin:
-        filters["date__range"] = [date_debut, date_fin]
-
-    # Actifs courants
-    actifs_courants = (
-        Bilan.objects
-        .filter(
-            type_bilan="ACTIF",
-            categorie="ACTIF_COURANTS",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    # Stocks (classe 3)
-    stocks = (
-        Bilan.objects
-        .filter(
-            type_bilan="ACTIF",
-            numero_compte__startswith="3",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    # Passifs courants
-    passifs_courants = (
-        Bilan.objects
-        .filter(
-            type_bilan="PASSIF",
-            categorie="PASSIFS_COURANTS",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    quick_ratio = (
-        (actifs_courants - stocks) / passifs_courants
-        if passifs_courants != 0
-        else None
-    )
-
-    serializer = QuickRatioSerializer({
-        "quick_ratio": quick_ratio
-    })
-
-    return Response(serializer.data)
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def gearing_view(request):
-    """
-    GET /api/gearing/?date_debut=2025-01-01&date_fin=2025-12-31
-    """
-
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-
-    filters = {}
-    if date_debut and date_fin:
-        filters["date__range"] = [date_debut, date_fin]
-
-    # Dettes financières (classe 16)
-    dettes_financieres = (
-        Bilan.objects
-        .filter(
-            type_bilan="PASSIF",
-            numero_compte__startswith="16",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    # Fonds propres
-    fonds_propres = (
-        Bilan.objects
-        .filter(
-            type_bilan="PASSIF",
-            categorie="CAPITAUX_PROPRES",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    gearing = (
-        dettes_financieres / fonds_propres
-        if fonds_propres != 0
-        else None
-    )
-
-    serializer = GearingSerializer({
-        "gearing": gearing
-    })
-
-    return Response(serializer.data)
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def rotation_stock_view(request):
-    """
-    GET /api/rotation-stock/?date_debut=2025-01-01&date_fin=2025-12-31
-    """
-
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-
-    filters = {}
-    if date_debut and date_fin:
-        filters["date__range"] = [date_debut, date_fin]
-
-    # Coût des ventes (charges classe 6)
-    cout_ventes = (
-        CompteResultat.objects
-        .filter(
-            nature="CHARGE",
-            numero_compte__startswith="6",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    # Stock moyen (simplifié : stock fin de période)
-    stocks = (
-        Bilan.objects
-        .filter(
-            type_bilan="ACTIF",
-            numero_compte__startswith="3",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    rotation_stock = (
-        cout_ventes / stocks
-        if stocks != 0
-        else None
-    )
-
-    duree_stock = (
-        Decimal("365") / rotation_stock
-        if rotation_stock and rotation_stock != 0
-        else None
-    )
-
-    serializer = RotationStockSerializer({
-        "rotation_stock": rotation_stock,
-        "duree_stock_jours": duree_stock
-    })
-
-    return Response(serializer.data)
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def marge_operationnelle_view(request):
-    """
-    GET /api/marge-operationnelle/?date_debut=2025-01-01&date_fin=2025-12-31
-    """
-
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-
-    filters = {}
-    if date_debut and date_fin:
-        filters["date__range"] = [date_debut, date_fin]
-
-    # Chiffre d'affaires
-    chiffre_affaire = (
-        CompteResultat.objects
-        .filter(
-            nature="PRODUIT",
-            numero_compte__startswith="7",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    # Charges d'exploitation
-    charges_exploitation = (
-        CompteResultat.objects
-        .filter(
-            nature="CHARGE",
-            numero_compte__startswith="6",
-            **filters
-        )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    resultat_operationnel = chiffre_affaire - charges_exploitation
-
-    marge_operationnelle = (
-        (resultat_operationnel / chiffre_affaire) * 100
-        if chiffre_affaire != 0
-        else None
-    )
-
-    serializer = MargeOperationnelleSerializer({
-        "marge_operationnelle": marge_operationnelle
-    })
-
-    return Response(serializer.data)
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def repartition_produits_charges_view(request):
-    """
-    GET /api/repartition-resultat/?date_debut=2025-01-01&date_fin=2025-12-31
-    """
-
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
-
-    filters = {}
-    if date_debut and date_fin:
-        filters["date__range"] = [date_debut, date_fin]
-
-    total_produits = (
-        CompteResultat.objects
-        .filter(nature="PRODUIT", **filters)
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    total_charges = (
-        CompteResultat.objects
-        .filter(nature="CHARGE", **filters)
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
-    )
-
-    total_global = total_produits + total_charges
-
-    def pct(val):
-        return (val / total_global * 100) if total_global != 0 else Decimal("0")
-
-    data = [
-        {
-            "label": "Produits",
-            "montant": total_produits,
-            "pourcentage": pct(total_produits),
-        },
-        {
-            "label": "Charges",
-            "montant": total_charges,
-            "pourcentage": pct(total_charges),
-        }
-    ]
-
-    serializer = RepartitionResultatSerializer(data, many=True)
-    return Response(serializer.data)
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def evolution_tresorerie_view(request):
-    """
-    GET /api/evolution-tresorerie/?annee=2025
-    """
-    annee = request.GET.get("annee")
-
-    # User requested Bilan source
-    queryset = Bilan.objects.filter(numero_compte__startswith="5")
-
-    if annee:
-        queryset = queryset.filter(date__year=annee)
-
-    data = (
-        queryset
-        .annotate(mois=TruncMonth("date"))
-        .values("mois")
-        .annotate(total=Sum("montant_ar"))
-        .order_by("mois")
-    )
-
-    result = []
-    for row in data:
-        result.append({
-            "periode": row["mois"].strftime("%Y-%m"),
-            "tresorerie": row["total"] or Decimal("0")
-        })
-
-    serializer = EvolutionTresorerieSerializer(result, many=True)
-    return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def top_comptes_mouvementes_view(request):
     """
-    GET /api/top-comptes-mouvementes/?date_debut=2025-01-01&date_fin=2025-12-31
+    Retourne les 5 comptes les plus mouvementés (débit + crédit).
     """
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
+    qs = GrandLivre.objects.all()
+    if date_start and date_end:
+        qs = qs.filter(date__range=[date_start, date_end])
 
-    # Filtre de date
-    filters = {}
-    if date_debut and date_fin:
-        filters["date__range"] = [date_debut, date_fin]
-
-    # Total par compte pour CompteResultat
-    cr_totaux = (
-        CompteResultat.objects.filter(**filters)
-        .values("numero_compte", "libelle")
-        .annotate(montant_total=Sum("montant_ar"))
+    # Somme des mouvements (débit + crédit)
+    data = (
+        qs.values("numero_compte", "libelle")
+        .annotate(
+            total_mouvement=Sum("debit") + Sum("credit")
+        )
+        .order_by("-total_mouvement")[:5]
     )
 
-    # Total par compte pour Bilan
-    bilan_totaux = (
-        Bilan.objects.filter(**filters)
-        .values("numero_compte", "libelle")
-        .annotate(montant_total=Sum("montant_ar"))
-    )
+    results = []
+    for item in data:
+        results.append({
+            "compte": item["numero_compte"],
+            "libelle": item["libelle"] or f"Compte {item['numero_compte']}",
+            "mt_mvt": float(item["total_mouvement"] or 0)
+        })
 
-    # Fusion des deux QuerySets
-    comptes_dict = {}
-    for item in list(cr_totaux) + list(bilan_totaux):
-        key = item["numero_compte"]
-        if key in comptes_dict:
-            comptes_dict[key]["montant_total"] += item["montant_total"] or Decimal("0")
-        else:
-            comptes_dict[key] = {
-                "numero_compte": key,
-                "libelle": item["libelle"],
-                "montant_total": item["montant_total"] or Decimal("0")
-            }
+    return Response(results)
 
-    # Trier par montant total décroissant
-    top_comptes = sorted(
-        comptes_dict.values(), key=lambda x: x["montant_total"], reverse=True
-    )[:10]
-
-    serializer = TopCompteSerializer(top_comptes, many=True)
-    return Response(serializer.data)
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def chiffre_affaire_mensuel_view(request):
     """
-    GET /api/chiffre-affaire-mensuel/?annee=2025
+    Retourne l'évolution mensuelle du CA (Classe 70).
     """
+    from django.db.models.functions import TruncMonth
 
-    annee = request.GET.get("annee")
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    queryset = CompteResultat.objects.filter(
-        nature="PRODUIT",
-        numero_compte__startswith="7"
-    )
-
-    if annee:
-        queryset = queryset.filter(date__year=annee)
+    qs = GrandLivre.objects.filter(numero_compte__startswith="70")
+    if date_start and date_end:
+        qs = qs.filter(date__range=[date_start, date_end])
 
     data = (
-        queryset
-        .annotate(mois=TruncMonth("date"))
-        .values("mois")
-        .annotate(total=Sum("montant_ar"))
-        .order_by("mois")
+        qs.annotate(month=TruncMonth("date"))
+        .values("month")
+        .annotate(
+            ca=Sum("credit") - Sum("debit")
+        )
+        .order_by("month")
     )
 
-    result = [
-        {
-            "periode": row["mois"].strftime("%Y-%m"),
-            "chiffre_affaire": row["total"] or Decimal("0")
-        }
-        for row in data
-    ]
+    results = []
+    for item in data:
+        if item["month"]:
+            results.append({
+                "mois": item["month"].strftime("%Y-%m"),
+                "ca": float(item["ca"] or 0)
+            })
 
-    serializer = EvolutionChiffreAffaireSerializer(result, many=True)
-    return Response(serializer.data)
+    return Response(results)
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def chiffre_affaire_annuel_view(request):
     """
-    GET /api/chiffre-affaire-annuel/
+    Retourne l'évolution annuelle du CA (Classe 70).
     """
+    from django.db.models.functions import TruncYear
 
+    qs = GrandLivre.objects.filter(numero_compte__startswith="70")
+    
     data = (
-        CompteResultat.objects
-        .filter(
-            nature="PRODUIT",
-            numero_compte__startswith="7"
+        qs.annotate(year=TruncYear("date"))
+        .values("year")
+        .annotate(
+            ca=Sum("credit") - Sum("debit")
         )
-        .annotate(annee=TruncYear("date"))
-        .values("annee")
-        .annotate(total=Sum("montant_ar"))
-        .order_by("annee")
+        .order_by("year")
     )
 
-    result = [
-        {
-            "periode": row["annee"].strftime("%Y"),
-            "chiffre_affaire": row["total"] or Decimal("0")
-        }
-        for row in data
-    ]
+    results = []
+    for item in data:
+        if item["year"]:
+            results.append({
+                "annee": item["year"].strftime("%Y"),
+                "ca": float(item["ca"] or 0)
+            })
 
-    serializer = EvolutionChiffreAffaireSerializer(result, many=True)
-    return Response(serializer.data)
+    return Response(results)
+
+
+marge_net_view = resultat_net_ca_view
+

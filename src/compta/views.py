@@ -4,7 +4,6 @@ from datetime import datetime, date
 
 from django.core.exceptions import ValidationError
 from django.db.models import Sum, Max, Min, DecimalField
-from django.db.models import Sum, Max, Min, DecimalField
 
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes

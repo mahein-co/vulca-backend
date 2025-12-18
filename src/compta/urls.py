@@ -36,6 +36,7 @@ urlpatterns = [
     # path("chiffre-affaire-mensuel/",views.chiffre_affaire_mensuel_view,name="chiffre-affaire-mensuel"),
     # path("chiffre-affaire-annuel/",views.chiffre_affaire_annuel_view,name="chiffre-affaire-annuel"),
     path("journals/years/", views.get_available_years_view, name="available-years"),
+    path("bilan-kpis-variations/", views.bilan_kpis_with_variations_view, name="bilan-kpis-variations"),
 ]
     #path("journals/", views.list_journals_view, name="list-journals"),
     # path("comptes/", views.list_comptes, name="list-comptes"),

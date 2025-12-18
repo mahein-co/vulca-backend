@@ -65,8 +65,7 @@ def get_pcg_label(account_code: str):
 
 
 PCG_MAPPING = {
-
-    # ===== CLASSE 1 : Capitaux propres & Dettes LT =====
+    # CLASSE 1 : CAPITAUX PROPRES & PASSIFS NON COURANTS
     '10': {'type_bilan': 'PASSIF', 'categorie': 'CAPITAUX_PROPRES'},
     '11': {'type_bilan': 'PASSIF', 'categorie': 'CAPITAUX_PROPRES'},
     '12': {'type_bilan': 'PASSIF', 'categorie': 'CAPITAUX_PROPRES'},
@@ -76,43 +75,35 @@ PCG_MAPPING = {
     '17': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_NON_COURANTS'},
     '18': {'type_bilan': 'PASSIF', 'categorie': 'CAPITAUX_PROPRES'},
 
-    # ===== CLASSE 2 : Immobilisations =====
+    # CLASSE 2 : ACTIFS NON COURANTS
     '20': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_NON_COURANTS'},
     '21': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_NON_COURANTS'},
     '22': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_NON_COURANTS'},
-
-    # ✅ Amortissements (soustraction)
+    '26': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_NON_COURANTS'},
     '28': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_NON_COURANTS', 'is_negative': True},
-    '29': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_NON_COURANTS', 'is_negative': True},
 
-    # ===== CLASSE 3 : Stocks =====
+    # CLASSE 3 : ACTIFS COURANTS (STOCKS)
     '30': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
     '31': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
     '32': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
     '35': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
-    '37': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
 
-    # ✅ Dépréciation stocks
-    '39': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS', 'is_negative': True},
-
-    # ===== CLASSE 4 : Comptes de tiers =====
-    '40': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},   # Fournisseurs
-    '41': {'type_bilan': 'ACTIF',  'categorie': 'ACTIF_COURANTS'},     # Clients
-    '42': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},   # Dettes fiscales
+    # CLASSE 4 : COMPTES DE TIERS (COURANTS)
+    '40': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},
+    '41': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
+    '42': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},
     '43': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},
-    '44': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},   # TVA collectée
-    '445':{'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},   # TVA
+    '4456': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
+    '4457': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},
     '45': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},
-    '46': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_NON_COURANTS'},
-    '47': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_NON_COURANTS'},
-    '48': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_NON_COURANTS'},
+    '46': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
+    '48': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
 
-    # ===== CLASSE 5 : Trésorerie =====
-    '50': {'type_bilan': 'ACTIF',  'categorie': 'ACTIF_COURANTS'},
-    '51': {'type_bilan': 'ACTIF',  'categorie': 'ACTIF_COURANTS'},   # Banque (débiteur)
-    '52': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'}, # Banque (créditeur)
-    '53': {'type_bilan': 'ACTIF',  'categorie': 'ACTIF_COURANTS'},   # Caisse
-    '57': {'type_bilan': 'ACTIF',  'categorie': 'ACTIF_COURANTS'},
+    # CLASSE 5 : TRESORERIE
+    '50': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
+    '51': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
+    '519': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},
+    '53': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
 
     # ===== CLASSE 6 : Charges =====
     '60': {'nature': 'CHARGE'},

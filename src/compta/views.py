@@ -3,7 +3,7 @@ from decimal import Decimal
 from datetime import datetime, date
 
 from django.core.exceptions import ValidationError
-from django.db.models import Sum, Max, Min
+from django.db.models import Sum, Max, Min, DecimalField
 
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
@@ -12,7 +12,6 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
 from openai import OpenAI
-
 from ocr.pcg_loader import get_pcg_label
 from ocr.constants import PCG_MAPPING
 from ocr.utils import clean_ai_json
@@ -485,12 +484,10 @@ class BilanListCreateView(generics.ListCreateAPIView):
         if date:
             queryset = queryset.filter(date=date)
         
-        # LOGIQUE BILAN : Si date_start présent => Range (pour affichage spécifique)
-        # Mais si SEULEMENT date_end => Cumul depuis le début (LTE)
+        # LOGIQUE BILAN : Affichage par période (mensuel, trimestriel, annuel)
+        # Aligné avec le comportement du Compte de Résultat
         if date_start and date_end:
             queryset = queryset.filter(date__range=[date_start, date_end])
-        elif date_end:
-            queryset = queryset.filter(date__lte=date_end)
 
         return queryset
 
@@ -702,36 +699,80 @@ def resultat_net_view(request):  #partie corriger
 
 
     def calculate_resultat(d_start, d_end):
-        def solde(prefix):
-            qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
-            if d_start and d_end:
-                 qs = qs.filter(date__range=[d_start, d_end])
-            elif d_end:
-                 qs = qs.filter(date__lte=d_end)
+        # ✅ OPTIMISATION : Une seule requête au lieu de 8+ requêtes
+        from django.db.models import Case, When, Q
+        
+        qs = GrandLivre.objects.all()
+        if d_start and d_end:
+            qs = qs.filter(date__range=[d_start, d_end])
+        elif d_end:
+            qs = qs.filter(date__lte=d_end)
+        
+        # Agrégation conditionnelle pour tous les soldes en une seule requête
+        data = qs.aggregate(
+            # Produits (classe 7)
+            produits_credit=Sum(Case(When(numero_compte__startswith='7', then='credit'), default=0, output_field=DecimalField())),
+            produits_debit=Sum(Case(When(numero_compte__startswith='7', then='debit'), default=0, output_field=DecimalField())),
             
-            data = qs.aggregate(
-                credit=Sum("credit"),
-                debit=Sum("debit")
-            )
-            return (data["credit"] or Decimal("0.00")) - (data["debit"] or Decimal("0.00"))
-
-        produits = solde("7")
-        charges_exploitation = sum(solde(str(c)) for c in range(60, 66))
-        charges_financieres = solde("66")
-        produits_financiers = solde("76")
-        charges_exceptionnelles = solde("67")
-        produits_exceptionnels = solde("77")
-        impots_benefices = solde("69")
+            # Charges exploitation (60-65)
+            charges_60_credit=Sum(Case(When(numero_compte__startswith='60', then='credit'), default=0, output_field=DecimalField())),
+            charges_60_debit=Sum(Case(When(numero_compte__startswith='60', then='debit'), default=0, output_field=DecimalField())),
+            charges_61_credit=Sum(Case(When(numero_compte__startswith='61', then='credit'), default=0, output_field=DecimalField())),
+            charges_61_debit=Sum(Case(When(numero_compte__startswith='61', then='debit'), default=0, output_field=DecimalField())),
+            charges_62_credit=Sum(Case(When(numero_compte__startswith='62', then='credit'), default=0, output_field=DecimalField())),
+            charges_62_debit=Sum(Case(When(numero_compte__startswith='62', then='debit'), default=0, output_field=DecimalField())),
+            charges_63_credit=Sum(Case(When(numero_compte__startswith='63', then='credit'), default=0, output_field=DecimalField())),
+            charges_63_debit=Sum(Case(When(numero_compte__startswith='63', then='debit'), default=0, output_field=DecimalField())),
+            charges_64_credit=Sum(Case(When(numero_compte__startswith='64', then='credit'), default=0, output_field=DecimalField())),
+            charges_64_debit=Sum(Case(When(numero_compte__startswith='64', then='debit'), default=0, output_field=DecimalField())),
+            charges_65_credit=Sum(Case(When(numero_compte__startswith='65', then='credit'), default=0, output_field=DecimalField())),
+            charges_65_debit=Sum(Case(When(numero_compte__startswith='65', then='debit'), default=0, output_field=DecimalField())),
+            
+            # Charges financières (66)
+            charges_66_credit=Sum(Case(When(numero_compte__startswith='66', then='credit'), default=0, output_field=DecimalField())),
+            charges_66_debit=Sum(Case(When(numero_compte__startswith='66', then='debit'), default=0, output_field=DecimalField())),
+            
+            # Produits financiers (76)
+            produits_76_credit=Sum(Case(When(numero_compte__startswith='76', then='credit'), default=0, output_field=DecimalField())),
+            produits_76_debit=Sum(Case(When(numero_compte__startswith='76', then='debit'), default=0, output_field=DecimalField())),
+            
+            # Charges exceptionnelles (67)
+            charges_67_credit=Sum(Case(When(numero_compte__startswith='67', then='credit'), default=0, output_field=DecimalField())),
+            charges_67_debit=Sum(Case(When(numero_compte__startswith='67', then='debit'), default=0, output_field=DecimalField())),
+            
+            # Produits exceptionnels (77)
+            produits_77_credit=Sum(Case(When(numero_compte__startswith='77', then='credit'), default=0, output_field=DecimalField())),
+            produits_77_debit=Sum(Case(When(numero_compte__startswith='77', then='debit'), default=0, output_field=DecimalField())),
+            
+            # Impôts sur bénéfices (69)
+            impots_69_credit=Sum(Case(When(numero_compte__startswith='69', then='credit'), default=0, output_field=DecimalField())),
+            impots_69_debit=Sum(Case(When(numero_compte__startswith='69', then='debit'), default=0, output_field=DecimalField())),
+        )
+        
+        # Calcul des soldes (crédit - débit pour les produits, débit - crédit pour les charges)
+        produits = (data["produits_credit"] or Decimal("0.00")) - (data["produits_debit"] or Decimal("0.00"))
+        
+        charges_exploitation = sum([
+            (data[f"charges_{c}_debit"] or Decimal("0.00")) - (data[f"charges_{c}_credit"] or Decimal("0.00"))
+            for c in [60, 61, 62, 63, 64, 65]
+        ])
+        
+        charges_financieres = (data["charges_66_debit"] or Decimal("0.00")) - (data["charges_66_credit"] or Decimal("0.00"))
+        produits_financiers = (data["produits_76_credit"] or Decimal("0.00")) - (data["produits_76_debit"] or Decimal("0.00"))
+        charges_exceptionnelles = (data["charges_67_debit"] or Decimal("0.00")) - (data["charges_67_credit"] or Decimal("0.00"))
+        produits_exceptionnels = (data["produits_77_credit"] or Decimal("0.00")) - (data["produits_77_debit"] or Decimal("0.00"))
+        impots_benefices = (data["impots_69_debit"] or Decimal("0.00")) - (data["impots_69_credit"] or Decimal("0.00"))
 
         res_net = (
             produits
-            + charges_exploitation
-            + charges_financieres
+            - charges_exploitation
+            - charges_financieres
             + produits_financiers
-            + charges_exceptionnelles
+            - charges_exceptionnelles
             + produits_exceptionnels
-            + impots_benefices
+            - impots_benefices
         )
+        
         return {
             "produits": produits,
             "charges_exploitation": charges_exploitation,
@@ -1692,3 +1733,168 @@ def chiffre_affaire_annuel_view(request):
 
 marge_net_view = resultat_net_ca_view
 
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def bilan_kpis_with_variations_view(request):
+    """
+    Calcule tous les KPIs du Bilan avec variations par rapport à la période précédente.
+    Optimisé pour une seule requête par période.
+    Paramètres: ?date_start=YYYY-MM-DD&date_end=YYYY-MM-DD
+    """
+    from dateutil.relativedelta import relativedelta
+    from datetime import datetime
+    from django.db.models import Case, When, Q
+    
+    date_start_str = request.GET.get('date_start')
+    date_end_str = request.GET.get('date_end')
+    
+    if not date_start_str or not date_end_str:
+        return Response({"error": "date_start et date_end sont requis"}, status=400)
+    
+    try:
+        current_start = datetime.strptime(date_start_str, '%Y-%m-%d').date()
+        current_end = datetime.strptime(date_end_str, '%Y-%m-%d').date()
+        
+        # Détermination de la période précédente
+        delta_days = (current_end - current_start).days
+        
+        if 28 <= delta_days <= 32:  # Mensuel
+            previous_start = current_start - relativedelta(months=1)
+            previous_end = current_end - relativedelta(months=1)
+        elif 88 <= delta_days <= 92:  # Trimestriel
+            previous_start = current_start - relativedelta(months=3)
+            previous_end = current_end - relativedelta(months=3)
+        elif delta_days >= 360:  # Annuel
+            previous_start = current_start - relativedelta(years=1)
+            previous_end = current_end - relativedelta(years=1)
+        else:  # Fallback
+            duration = current_end - current_start
+            previous_end = current_start - relativedelta(days=1)
+            previous_start = previous_end - duration
+            
+    except ValueError:
+        return Response({"error": "Format de date invalide (YYYY-MM-DD)"}, status=400)
+    
+    def calculate_bilan_kpis(d_start, d_end):
+        """Calcule tous les KPIs du Bilan en une seule requête optimisée"""
+        qs = Bilan.objects.filter(date__range=[d_start, d_end])
+        
+        # Agrégation conditionnelle pour tous les montants
+        data = qs.aggregate(
+            # Actif Courant
+            actif_courant=Sum(Case(
+                When(Q(categorie__icontains='ACTIF') & Q(categorie__icontains='COURANT'), then='montant_ar'),
+                default=0,
+                output_field=DecimalField()
+            )),
+            # Actif Non Courant
+            actif_non_courant=Sum(Case(
+                When(Q(categorie__icontains='ACTIF') & ~Q(categorie__icontains='COURANT'), then='montant_ar'),
+                default=0,
+                output_field=DecimalField()
+            )),
+            # Passif Courant
+            passif_courant=Sum(Case(
+                When(Q(categorie__icontains='PASSIF') & Q(categorie__icontains='COURANT'), then='montant_ar'),
+                default=0,
+                output_field=DecimalField()
+            )),
+            # Passif Non Courant
+            passif_non_courant=Sum(Case(
+                When(Q(categorie__icontains='PASSIF') & ~Q(categorie__icontains='COURANT'), then='montant_ar'),
+                default=0,
+                output_field=DecimalField()
+            )),
+            # Capitaux Propres (comptes de la catégorie CAPITAUX_PROPRES)
+            capitaux_propres_bilan=Sum(Case(
+                When(categorie__icontains='CAPITAUX', then='montant_ar'),
+                default=0,
+                output_field=DecimalField()
+            )),
+        )
+        
+        # Calcul du Résultat Net de la période (depuis CompteResultat)
+        cr_data = CompteResultat.objects.filter(date__range=[d_start, d_end]).aggregate(
+            produits=Sum(Case(When(nature='PRODUIT', then='montant_ar'), default=0, output_field=DecimalField())),
+            charges=Sum(Case(When(nature='CHARGE', then='montant_ar'), default=0, output_field=DecimalField())),
+        )
+        
+        resultat_net = (cr_data['produits'] or Decimal('0.00')) - (cr_data['charges'] or Decimal('0.00'))
+        
+        # Capitaux Propres = Comptes CAPITAUX_PROPRES + Résultat Net de la période
+        capitaux_propres_total = (data['capitaux_propres_bilan'] or Decimal('0.00')) + resultat_net
+        
+        # Calcul du ratio d'endettement
+        total_dettes = (data['passif_courant'] or Decimal('0.00')) + (data['passif_non_courant'] or Decimal('0.00'))
+        ratio_endettement = (total_dettes / capitaux_propres_total * 100) if capitaux_propres_total != 0 else Decimal('0.00')
+        
+        return {
+            'actif_courant': data['actif_courant'] or Decimal('0.00'),
+            'actif_non_courant': data['actif_non_courant'] or Decimal('0.00'),
+            'passif_courant': data['passif_courant'] or Decimal('0.00'),
+            'passif_non_courant': data['passif_non_courant'] or Decimal('0.00'),
+            'capitaux_propres': capitaux_propres_total,
+            'ratio_endettement': ratio_endettement,
+        }
+    
+    # Calcul période actuelle et précédente
+    current_kpis = calculate_bilan_kpis(current_start, current_end)
+    previous_kpis = calculate_bilan_kpis(previous_start, previous_end)
+    
+    # Calcul des variations (en montant absolu, pas en pourcentage)
+    variations = {
+        'actif_courant': current_kpis['actif_courant'] - previous_kpis['actif_courant'],
+        'actif_non_courant': current_kpis['actif_non_courant'] - previous_kpis['actif_non_courant'],
+        'passif_courant': current_kpis['passif_courant'] - previous_kpis['passif_courant'],
+        'passif_non_courant': current_kpis['passif_non_courant'] - previous_kpis['passif_non_courant'],
+        'capitaux_propres': current_kpis['capitaux_propres'] - previous_kpis['capitaux_propres'],
+        'ratio_endettement': current_kpis['ratio_endettement'] - previous_kpis['ratio_endettement'],  # Variation en points
+    }
+    
+    # Assemblage de la réponse
+    response_data = {
+        'current': {
+            'actif_courant': float(current_kpis['actif_courant']),
+            'actif_non_courant': float(current_kpis['actif_non_courant']),
+            'passif_courant': float(current_kpis['passif_courant']),
+            'passif_non_courant': float(current_kpis['passif_non_courant']),
+            'capitaux_propres': float(current_kpis['capitaux_propres']),
+            'ratio_endettement': float(current_kpis['ratio_endettement']),
+        },
+        'previous': {
+            'actif_courant': float(previous_kpis['actif_courant']),
+            'actif_non_courant': float(previous_kpis['actif_non_courant']),
+            'passif_courant': float(previous_kpis['passif_courant']),
+            'passif_non_courant': float(previous_kpis['passif_non_courant']),
+            'capitaux_propres': float(previous_kpis['capitaux_propres']),
+            'ratio_endettement': float(previous_kpis['ratio_endettement']),
+        },
+        'variations': {
+            'actif_courant': float(variations['actif_courant']),
+            'actif_non_courant': float(variations['actif_non_courant']),
+            'passif_courant': float(variations['passif_courant']),
+            'passif_non_courant': float(variations['passif_non_courant']),
+            'capitaux_propres': float(variations['capitaux_propres']),
+            'ratio_endettement': float(variations['ratio_endettement']),
+        }
+    }
+    
+    return Response(response_data)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def get_available_years_view(request):
+    """Retourne les années disponibles dans le journal"""
+    from django.db.models.functions import ExtractYear
+    
+    years = (
+        Journal.objects
+        .annotate(year=ExtractYear('date'))
+        .values_list('year', flat=True)
+        .distinct()
+        .order_by('-year')
+    )
+    
+    return Response(list(years))

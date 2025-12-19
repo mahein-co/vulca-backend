@@ -14,6 +14,7 @@ Analyse le texte fourni et :
 5. N'invente pas de valeurs
 6. Ne renvoie que du JSON, sans ``` ni texte autour
 7. IMPORTANT : Pour les montants, remplace la VIRGULE par un POINT (ex: "190101,00" -> 190101.00). Ne renvoie JAMAIS d'entiers si le montant a des décimales.
+8 - Le numero Facture est obligatoire ("numero_facture": "string ou null (IMPORTANT: cherche N°, Facture N°, FACTURE, Invoice, Ref, REF, #)")
 """
 
 CLASSE_PROMPT_TEMPLATE = """

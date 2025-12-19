@@ -244,6 +244,76 @@ def verify_against_ocr(obj, ocr_text: str):
         return obj if has_evidence_in_ocr(obj, ocr_text) else None
 
 
+
+# Helper pour normaliser les dates vers le format ISO (YYYY-MM-DD)
+def normalize_date_to_iso(date_str: str) -> str:
+    """Normalize various date formats to ISO format (YYYY-MM-DD).
+    Handles:
+    - French text dates: "14 Avril 2019" -> "2019-04-14"
+    - DD/MM/YYYY: "14/04/2019" -> "2019-04-14"
+    - DD-MM-YYYY: "14-04-2019" -> "2019-04-14"
+    - Already ISO: "2019-04-14" -> "2019-04-14"
+    """
+    if not date_str:
+        return date_str
+    
+    date_str = str(date_str).strip()
+    
+    # French month names mapping
+    french_months = {
+        'janvier': '01', 'février': '02', 'fevrier': '02', 'mars': '03',
+        'avril': '04', 'mai': '05', 'juin': '06', 'juillet': '07',
+        'août': '08', 'aout': '08', 'septembre': '09', 'octobre': '10',
+        'novembre': '11', 'décembre': '12', 'decembre': '12',
+        # Abbreviated forms
+        'janv': '01', 'févr': '02', 'fevr': '02', 'avr': '04',
+        'juil': '07', 'sept': '09', 'oct': '10', 'nov': '11', 'déc': '12', 'dec': '12'
+    }
+    
+    # Try French text format: "14 Avril 2019" or "14Avril2019"
+    match = re.search(r'(\d{1,2})\s*([a-zéèêàâû]+)\s*(\d{4})', date_str, re.I)
+    if match:
+        day, month_name, year = match.groups()
+        month_name_lower = normalize_for_search(month_name)
+        for fr_month, num in french_months.items():
+            if fr_month in month_name_lower or month_name_lower in fr_month:
+                return f"{year}-{num}-{day.zfill(2)}"
+    
+    # Try DD/MM/YYYY or DD-MM-YYYY
+    match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})', date_str)
+    if match:
+        day, month, year = match.groups()
+        return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+    
+    # Try YYYY-MM-DD (already ISO)
+    match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', date_str)
+    if match:
+        year, month, day = match.groups()
+        return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+    
+    # Return original if no pattern matched
+    return date_str
+
+
+# Helper pour nettoyer les collages OCR (ex: BNIMadagascarMontant -> BNI Madagascar)
+def clean_collated_value(val: str) -> str:
+    if not val:
+        return val
+    v = val.strip()
+    v = re.sub(r"\s+", " ", v)
+    # retirer éventuels mots résiduels collés en fin
+    v = re.sub(r"(?i)\bmontant\b[:\s]*$", "", v).strip()
+    # insérer un espace entre acronymes collés et mot suivant (ex: BNIMadagascar -> BNI Madagascar)
+    v = re.sub(r"([A-Z]{2,})([A-Z][a-z]+)", r"\1 \2", v)
+    # insérer un espace entre lower->Upper (camelCase) (ex: ImprimerieGraphix -> Imprimerie Graphix)
+    v = re.sub(r"([a-zà-ÿ])([A-Z])", r"\1 \2", v)
+    # séparer lettres/chiffres collés (ex: BNI123 -> BNI 123)
+    v = re.sub(r"([A-Za-z])(\d)", r"\1 \2", v)
+    v = re.sub(r"(\d)([A-Za-z])", r"\1 \2", v)
+    v = re.sub(r"\s+", " ", v).strip()
+    return v
+
+
 class FileSourceListCreateView(generics.ListCreateAPIView):
     queryset = FileSource.objects.all().order_by('-uploaded_at')
     serializer_class = FileSourceSerializer
@@ -312,14 +382,16 @@ def file_source_list_create(request):
     print(f"   🔬 Has numero_facture = {bool(extracted_json.get('numero_facture'))}")
     
     # Règles de détection améliorées
+    has_banque_field = bool(extracted_json.get("banque") or extracted_json.get("nom_banque"))
+    
     if extracted_json.get("numero_facture") or extracted_json.get("invoice_number") or \
        type_doc in ["vente", "achat", "facture"] or type_field in ["vente", "achat", "facture"]:
         piece_type = "Facture"
         print(f"   ✅ Détecté comme: {piece_type}")
     
     # Détection bancaire améliorée: différencier virement et relevé
-    elif ("banc" in type_doc or "banque" in type_doc or "bank" in type_doc or 
-          "banc" in type_field or "banque" in type_field or "bank" in type_field):
+    elif has_banque_field or any(k in type_doc for k in ["banc", "banq", "relev", "virement", "statement", "encaissement"]) or \
+         any(k in type_field for k in ["banc", "banq", "relev", "virement", "statement"]):
         print("   📊 Document bancaire détecté")
         
         # Vérifier d'abord la référence bancaire
@@ -327,15 +399,16 @@ def file_source_list_create(request):
             extracted_json.get("reference") or 
             extracted_json.get("numero_piece") or
             extracted_json.get("ref") or
+            extracted_json.get("identifiant") or
             ""
         )
         
         print(f"   Référence bancaire: '{ref_bancaire}'")
         
-        # Si la référence commence par "VIRM", c'est un virement
-        if ref_bancaire.upper().startswith("VIRM"):
+        # Si la référence commence par "VIRM" ou RECU DE VIREMENT dans type, c'est un virement
+        if ref_bancaire.upper().startswith("VIRM") or "virement" in type_doc or "encaissement" in type_doc:
             piece_type = "Virement bancaire"
-            print(f"   ✅ Détecté comme: {piece_type} (référence commence par VIRM)")
+            print(f"   ✅ Détecté comme: {piece_type}")
         else:
             # Sinon, vérifier la structure du document
             # Un relevé bancaire contient généralement:
@@ -354,20 +427,15 @@ def file_source_list_create(request):
             )
             is_statement = "relev" in type_doc or "relev" in type_field or "statement" in type_doc
             
-            # Si contient mot "virement" explicitement
-            if "virement" in type_doc or "virement" in type_field or "transfer" in type_doc:
-                piece_type = "Virement bancaire"
-                print(f"   ✅ Détecté comme: {piece_type} (mot 'virement' trouvé)")
             # Si a des transactions multiples ou période ou mot "relevé"
-            elif has_transactions or has_period or is_statement:
+            if has_transactions or has_period or is_statement:
                 piece_type = "Relevé bancaire"
                 print(f"   ✅ Détecté comme: {piece_type} (transactions/période/relevé)")
             else:
-                # Par défaut pour documents bancaires: relevé
-                piece_type = "Relevé bancaire"
+                piece_type = "Relevé bancaire" # Default banking
                 print(f"   ✅ Détecté comme: {piece_type} (défaut bancaire)")
-    
-    
+
+
     elif "bon" in type_doc and "caisse" in type_doc:
         piece_type = "Bon de caisse"
     elif "fiche" in type_doc and "paie" in type_doc:
@@ -383,6 +451,7 @@ def file_source_list_create(request):
             extracted_json.get("numero_facture") or 
             extracted_json.get("invoice_number") or
             extracted_json.get("reference") or
+            extracted_json.get("identifiant") or
             extracted_json.get("numero_piece") or
             None
         )
@@ -418,9 +487,12 @@ def file_source_list_create(request):
             gen_data = extracted_json.copy() if isinstance(extracted_json, dict) else {}
             
             # ✅ DÉTERMINATION DU type_document POUR LA COMPTABILITÉ
-            # piece_type est pour l'affichage UI (Facture, Relevé bancaire, etc.)
-            # type_document est pour la comptabilité (VENTE, ACHAT, BANQUE, etc.)
-            if "type_document" not in gen_data or not gen_data["type_document"]:
+            
+            # Forcer BANQUE si détecté comme tel
+            if any(k in piece_type.lower() for k in ["banc", "banq", "relev", "virement", "statement"]):
+                 gen_data["type_document"] = "BANQUE"
+            
+            elif "type_document" not in gen_data or not gen_data["type_document"]:
                 # Si pas de type_document, on le déduit du piece_type ET du contenu
                 if piece_type == "Facture":
                     # ✅ Déterminer si c'est une VENTE ou un ACHAT
@@ -434,10 +506,6 @@ def file_source_list_create(request):
                         # Fallback : regarder si montant positif (vente) ou négatif (achat)
                         # Par défaut, on suppose VENTE
                         gen_data["type_document"] = "VENTE"
-                elif "banc" in piece_type.lower() or "relev" in piece_type.lower():
-                    gen_data["type_document"] = "BANQUE"
-                elif "virement" in piece_type.lower():
-                    gen_data["type_document"] = "BANQUE"
                 elif "caisse" in piece_type.lower():
                     gen_data["type_document"] = "CAISSE"
                 else:
@@ -674,7 +742,21 @@ def extract_content_file_view(request):
     # ==========================
     # ✅ AJOUT TYPE DOCUMENT
     # ==========================
-    extracted_json["type_document"] = type_document
+    
+    # ✅ FORÇAGE BANQUE SI DÉTECTÉ DANS LE CONTENU OU TYPE INITIAL
+    # Permet de corriger des cas où l'IA renvoie "ENCAISSEMENT" ou "VIREMENT" au lieu de "BANQUE"
+    content_lower = content.lower()
+    type_doc_lower = type_document.lower()
+    type_field_lower = str(extracted_json.get("type", "")).lower()
+    
+    is_bank = any(k in type_doc_lower for k in ["banc", "banq", "relev", "virement", "statement", "encaissement"]) or \
+              any(k in type_field_lower for k in ["banc", "banq", "relev", "virement", "statement"]) or \
+              ("banque" in content_lower and ("relev" in content_lower or "virement" in content_lower))
+
+    if is_bank:
+        extracted_json["type_document"] = "BANQUE"
+    else:
+        extracted_json["type_document"] = type_document
 
     # ==========================
     # ✅ FORMAT TVA
@@ -736,7 +818,8 @@ def extract_content_file_view(request):
         "quantity": "quantite",
         "unit_price": "prix_unitaire",
         "price": "prix_unitaire",
-        "amount": "montant"
+        "amount": "montant",
+        "identifiant": "reference"
     }
 
     # Traduction récursive des clefs
@@ -782,72 +865,7 @@ def extract_content_file_view(request):
             val = val.strip()
             extracted_json_fr["banque"] = val
 
-    # Helper pour normaliser les dates vers le format ISO (YYYY-MM-DD)
-    def normalize_date_to_iso(date_str: str) -> str:
-        """Normalize various date formats to ISO format (YYYY-MM-DD).
-        Handles:
-        - French text dates: "14 Avril 2019" -> "2019-04-14"
-        - DD/MM/YYYY: "14/04/2019" -> "2019-04-14"
-        - DD-MM-YYYY: "14-04-2019" -> "2019-04-14"
-        - Already ISO: "2019-04-14" -> "2019-04-14"
-        """
-        if not date_str:
-            return date_str
-        
-        date_str = str(date_str).strip()
-        
-        # French month names mapping
-        french_months = {
-            'janvier': '01', 'février': '02', 'fevrier': '02', 'mars': '03',
-            'avril': '04', 'mai': '05', 'juin': '06', 'juillet': '07',
-            'août': '08', 'aout': '08', 'septembre': '09', 'octobre': '10',
-            'novembre': '11', 'décembre': '12', 'decembre': '12',
-            # Abbreviated forms
-            'janv': '01', 'févr': '02', 'fevr': '02', 'avr': '04',
-            'juil': '07', 'sept': '09', 'oct': '10', 'nov': '11', 'déc': '12', 'dec': '12'
-        }
-        
-        # Try French text format: "14 Avril 2019" or "14Avril2019"
-        match = re.search(r'(\d{1,2})\s*([a-zéèêàâû]+)\s*(\d{4})', date_str, re.I)
-        if match:
-            day, month_name, year = match.groups()
-            month_name_lower = normalize_for_search(month_name)
-            for fr_month, num in french_months.items():
-                if fr_month in month_name_lower or month_name_lower in fr_month:
-                    return f"{year}-{num}-{day.zfill(2)}"
-        
-        # Try DD/MM/YYYY or DD-MM-YYYY
-        match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})', date_str)
-        if match:
-            day, month, year = match.groups()
-            return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-        
-        # Try YYYY-MM-DD (already ISO)
-        match = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', date_str)
-        if match:
-            year, month, day = match.groups()
-            return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-        
-        # Return original if no pattern matched
-        return date_str
 
-    # Helper pour nettoyer les collages OCR (ex: BNIMadagascarMontant -> BNI Madagascar)
-    def clean_collated_value(val: str) -> str:
-        if not val:
-            return val
-        v = val.strip()
-        v = re.sub(r"\s+", " ", v)
-        # retirer éventuels mots résiduels collés en fin
-        v = re.sub(r"(?i)\bmontant\b[:\s]*$", "", v).strip()
-        # insérer un espace entre acronymes collés et mot suivant (ex: BNIMadagascar -> BNI Madagascar)
-        v = re.sub(r"([A-Z]{2,})([A-Z][a-z]+)", r"\1 \2", v)
-        # insérer un espace entre lower->Upper (camelCase) (ex: ImprimerieGraphix -> Imprimerie Graphix)
-        v = re.sub(r"([a-zà-ÿ])([A-Z])", r"\1 \2", v)
-        # séparer lettres/chiffres collés (ex: BNI123 -> BNI 123)
-        v = re.sub(r"([A-Za-z])(\d)", r"\1 \2", v)
-        v = re.sub(r"(\d)([A-Za-z])", r"\1 \2", v)
-        v = re.sub(r"\s+", " ", v).strip()
-        return v
 
     # FallBacks pour autres champs cruciaux si absents : societe, reference, remarques
     # On recherche les labels dans l'OCR (tolérant aux collages et casse)
@@ -904,6 +922,16 @@ def extract_content_file_view(request):
             val = m.group(1).strip()
             extracted_json_fr["fournisseur"] = clean_collated_value(val)
 
+    # ✅ S'assurer que le champ 'reference' est rempli pour le frontend
+    if "reference" not in extracted_json_fr or not extracted_json_fr.get("reference"):
+        extracted_json_fr["reference"] = (
+            extracted_json_fr.get("identifiant") or 
+            extracted_json_fr.get("numero_facture") or 
+            extracted_json_fr.get("numero_piece") or
+            extracted_json_fr.get("invoice_number") or
+            extracted_json_fr.get("ref")
+        )
+
     print("\n✅ JSON FINAL NETTOYÉ (FR) :")
     print("=" * 80)
     print(json.dumps(extracted_json_fr, indent=2, ensure_ascii=False))
@@ -912,7 +940,7 @@ def extract_content_file_view(request):
     return Response({
         "status": "success",
         "message": "OCR + extraction + correction facture/client réussis.",
-        "type_document": type_document,
+        "type_document": extracted_json_fr.get("type_document") or type_document,
         "ocr_brut": content,
         "extracted_json": extracted_json_fr
     }, status=201)

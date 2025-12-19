@@ -122,19 +122,40 @@ def extract_content(file, file_type):
     # ---- IMAGES ----
     elif file_type in ["png", "jpg", "jpeg"]:
         image = Image.open(io.BytesIO(file_bytes))
-        return pytesseract.image_to_string(image)
+        text = pytesseract.image_to_string(image)
+        return clean_text_output(text)
 
     # ---- EXCEL ----
     elif file_type in ["xls", "xlsx"]:
-        df = pd.read_excel(io.BytesIO(file_bytes))
-        return df.astype(str).agg(' '.join, axis=1).str.cat(sep='\n')
+        try:
+            df = pd.read_excel(io.BytesIO(file_bytes))
+            # Conversion en CSV string pour garder la structure
+            return df.to_csv(index=False, sep=';')
+        except Exception as e:
+            print(f"Excel read error: {e}")
+            return ""
 
     # ---- CSV ----
     elif file_type == "csv":
-        df = pd.read_csv(io.BytesIO(file_bytes))
-        return df.astype(str).agg(' '.join, axis=1).str.cat(sep='\n')
+        try:
+            df = pd.read_csv(io.BytesIO(file_bytes))
+            return df.to_csv(index=False, sep=';')
+        except Exception as e:
+            print(f"CSV read error: {e}")
+            return ""
 
-    return text
+    return clean_text_output(text)
+
+
+def clean_text_output(text: str) -> str:
+    """Nettoie le texte extrait (espaces multiples, lignes vides excessives)"""
+    if not text:
+        return ""
+    # Remplacer les espaces multiples par un seul
+    text = re.sub(r'[ \t]+', ' ', text)
+    # Limiter les sauts de ligne consécutifs à 2
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    return text.strip()
 
 
 # Detect file type based on extension

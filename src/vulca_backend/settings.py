@@ -10,6 +10,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv('SECRET_KEY')
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
+APPEND_SLASH = True
+
 
 ALLOWED_HOSTS = ['*']
 APPEND_SLASH = False
@@ -168,4 +170,3 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # OPENAI Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o')
-

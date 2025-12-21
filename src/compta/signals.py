@@ -331,26 +331,31 @@ def generate_financial_statements(sender, instance, **kwargs):
         )
 
         # ============================
-        # ✅ CP TEMPORAIRE : UNIQUEMENT si AUCUN capital réel (10x)
+        # ✅ CP TEMPORAIRE : UNIQUEMENT pour comptes bancaires (51x)
         # ============================
+        
+        # Vérifier si un capital réel existe
         capital_reel_existe = Bilan.objects.filter(
             date=instance.date,
             numero_compte__startswith='10',
             type_bilan='PASSIF'
         ).exclude(libelle__icontains='calculé').exists()
 
-        # ❌ Si un capital réel existe, NE PAS créer de CP temporaire
+        # ❌ Si un capital réel existe, supprimer tout CP temporaire
         if capital_reel_existe:
-            # Supprimer tout CP temporaire existant
             Bilan.objects.filter(
                 date=instance.date,
                 numero_compte='101',
                 libelle__icontains='calculé'
             ).delete()
-            return  # ✅ SORTIR ICI pour ne pas créer de CP temporaire
+            return
 
-        # ✅ Sinon, créer un CP temporaire uniquement si nécessaire
-        # Supprimer l'ancien CP temporaire s'il existe
+        # ✅ NOUVELLE RÈGLE : CP temporaire UNIQUEMENT si le compte est bancaire (51x)
+        if not code.startswith('51'):
+            # Si ce n'est pas un compte bancaire, ne pas créer de CP temporaire
+            return
+
+        # ✅ Supprimer l'ancien CP temporaire s'il existe
         Bilan.objects.filter(
             date=instance.date,
             numero_compte='101',
@@ -374,13 +379,14 @@ def generate_financial_statements(sender, instance, **kwargs):
 
         cp_temp = total_actif - total_passif
 
+        # ✅ Créer CP temporaire uniquement si positif
         if cp_temp > 0:
             # ✅ Créer une balance fictive pour le CP temporaire
             balance_cp, _ = Balance.objects.get_or_create(
                 numero_compte='101',
                 date=instance.date,
                 defaults={
-                    'libelle': 'Capitaux propres (calculé)',
+                    'libelle': 'Capitaux propres (calculé - encaissement)',
                     'solde_debit': Decimal('0.00'),
                     'solde_credit': cp_temp
                 }
@@ -390,8 +396,8 @@ def generate_financial_statements(sender, instance, **kwargs):
                 numero_compte='101',
                 date=instance.date,
                 defaults={
-                    'balance': balance_cp,  # ✅ Utiliser une balance dédiée
-                    'libelle': 'Capitaux propres (calculé)',
+                    'balance': balance_cp,
+                    'libelle': 'Capitaux propres (calculé - encaissement)',
                     'montant_ar': cp_temp,
                     'type_bilan': 'PASSIF',
                     'categorie': 'CAPITAUX_PROPRES'

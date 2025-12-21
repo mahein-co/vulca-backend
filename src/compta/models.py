@@ -195,7 +195,7 @@ class Bilan(models.Model):
     CATEGORIE_CHOICES = [
         ('ACTIF_COURANTS', 'Actif courants'),
         ('ACTIF_NON_COURANTS', 'Actif non courants'),
-        ('CAPITAUX_PROPRES', 'Capitaux propres '),
+        ('CAPITAUX_PROPRES', 'Capitaux propres'),
         ('PASSIFS_COURANTS', 'Passifs courants'),
         ('PASSIFS_NON_COURANTS', 'Passifs non courants'),
         

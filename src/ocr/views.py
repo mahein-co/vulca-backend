@@ -65,37 +65,6 @@ def normalize_date_to_iso(date_str: str) -> str:
     return date_str
 
 
-def extract_invoice_number(ocr_text: str) -> str:
-    """
-    Extrait le numéro de facture depuis le texte OCR.
-    Cherche les patterns courants : N°, No., Facture n°, etc.
-    """
-    if not ocr_text:
-        return None
-    
-    # Liste de patterns par ordre de priorité
-    patterns = [
-        # Facture N° 001 ou FACTURE N°001
-        r'FACTURE\s+N[°oO\.]\s*[:\-]?\s*(\d+)',
-        # N° 001 (isolé)
-        r'(?:^|\s)N[°oO\.]\s*(\d+)(?:\s|$)',
-        # Numéro : 001 ou Numero 001
-        r'NUM[EÉ]RO\s*[:\-]?\s*(\d+)',
-        # Invoice No. 001
-        r'INVOICE\s+NO?[\.:]?\s*(\d+)',
-        # Réf. 001 ou REF: 001
-        r'R[EÉ]F[EÉ]?RENCE\s*[:\-]?\s*(\d+)',
-        r'R[EÉ]F\.\s*[:\-]?\s*(\d+)',
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, ocr_text, flags=re.I | re.MULTILINE)
-        if match:
-            return match.group(1).zfill(3)  # Padding avec zéros : 1 -> 001
-    
-    return None
-
-
 def normalize_extracted_json(data: dict, ocr_text: str = "") -> dict:
     """
     Post-traite le JSON extrait par l'IA pour garantir cohérence et nettoyage.
@@ -137,34 +106,16 @@ def normalize_extracted_json(data: dict, ocr_text: str = "") -> dict:
             val = re.sub(r"([A-Z]{2,})([A-Z][a-z]+)", r"\1 \2", val)
             data['banque'] = val
     
-    # 6. NOUVEAU : Extraire numéro de facture depuis OCR si manquant
-    if ocr_text and ('numero_facture' not in data or not data.get('numero_facture')):
-        extracted_num = extract_invoice_number(ocr_text)
-        if extracted_num:
-            data['numero_facture'] = extracted_num
-            print(f"   ✅ Numéro facture extrait depuis OCR: {extracted_num}")
-    
-    # 7. Gérer référence vs numero_facture (éviter duplication)
-    # Si les deux existent et sont identiques, garder seulement numero_facture
-    if data.get('reference') and data.get('numero_facture'):
-        if str(data['reference']) == str(data['numero_facture']):
-            del data['reference']
-    
-    # Si pas de référence mais qu'on a numero_facture, ne pas créer de référence
-    # Si pas de numero_facture mais qu'on a référence, copier vers numero_facture
-    elif data.get('reference') and not data.get('numero_facture'):
-        data['numero_facture'] = data['reference']
-        del data['reference']
-    
-    # Si aucun des deux n'existe, essayer de trouver depuis d'autres champs
-    elif not data.get('numero_facture') and not data.get('reference'):
-        data['numero_facture'] = (
+    # 6. S'assurer qu'on a une référence
+    if 'reference' not in data or not data.get('reference'):
+        data['reference'] = (
+            data.get("numero_facture") or 
             data.get("numero_piece") or
             data.get("identifiant") or
             None
         )
     
-    # 8. Normalisation client : si numero_client contient lettres → nom_client
+    # 7. Normalisation client : si numero_client contient lettres → nom_client
     if 'numero_client' in data:
         val = data.get('numero_client')
         if val and not str(val).isdigit():
@@ -173,11 +124,7 @@ def normalize_extracted_json(data: dict, ocr_text: str = "") -> dict:
                 data['nom_client'] = str(val)
             data['numero_client'] = None
     
-    # 9. Supprimer objet_description car redondant avec type_document
-    if 'objet_description' in data:
-        del data['objet_description']
-    
-    # 10. Supprimer les clés null
+    # 8. Supprimer les clés null
     return {k: v for k, v in data.items() if v is not None}
 
 
@@ -475,8 +422,7 @@ def extract_content_file_view(request):
             "raw": extracted_json_str
         }, status=500)
 
-    # POST-TRAITEMENT avec normalisation (PASSE LE TEXTE OCR)
-    print("\n🔧 Normalisation du JSON avec OCR...")
+    # POST-TRAITEMENT avec normalisation
     extracted_json = normalize_extracted_json(extracted_json, content)
 
     # Ajouter type_document

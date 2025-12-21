@@ -1883,18 +1883,51 @@ def bilan_kpis_with_variations_view(request):
     return Response(response_data)
 
 
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def get_available_years_view(request):
-    """Retourne les années disponibles dans le journal"""
+    """
+    Retourne la liste des années disponibles dans les écritures comptables,
+    le Bilan et le Compte de Résultat.
+    Triées par ordre décroissant (plus récent en premier).
+    """
     from django.db.models.functions import ExtractYear
+    from datetime import date
     
-    years = (
+    # 1. Années du Journal des écritures
+    journal_years = set(
         Journal.objects
         .annotate(year=ExtractYear('date'))
         .values_list('year', flat=True)
         .distinct()
-        .order_by('-year')
     )
     
-    return Response(list(years))
+    # 2. Années du Bilan
+    bilan_years = set(
+        Bilan.objects
+        .annotate(year=ExtractYear('date'))
+        .values_list('year', flat=True)
+        .distinct()
+    )
+
+    # 3. Années du Compte de Résultat
+    cr_years = set(
+        CompteResultat.objects
+        .annotate(year=ExtractYear('date'))
+        .values_list('year', flat=True)
+        .distinct()
+    )
+
+    # Fusion des ensembles pour éviter les doublons
+    all_years_set = journal_years | bilan_years | cr_years
+    
+    # Filtrer les None éventuels, convertir en liste et trier
+    available_years = sorted([y for y in all_years_set if y is not None], reverse=True)
+    
+    # Si vide, retourner l'année courante par défaut
+    if not available_years:
+        available_years = [date.today().year]
+        
+    return Response(available_years)
+

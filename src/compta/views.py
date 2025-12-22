@@ -3,7 +3,7 @@ from decimal import Decimal
 from datetime import datetime, date
 
 from django.core.exceptions import ValidationError
-from django.db.models import Sum, Max, Min, DecimalField
+from django.db.models import Sum, Max, Min, DecimalField, Case, When, Q
 
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
@@ -22,7 +22,9 @@ from compta.serializers import (
     JournalSerializer, BilanSerializer, BalanceSerializer, CompteResultatSerializer,
     ChiffreAffaireSerializer, EbeSerializer, ResultatNetSerializer, BfrSerializer,
     CafSerializer, LeverageSerializer, AnnuiteCafSerializer, MargeNetteSerializer,
-    DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer
+    DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer,
+    CurrentRatioSerializer, QuickRatioSerializer, GearingSerializer, RotationStockSerializer,
+    MargeOperationnelleSerializer, MargeBruteSerializer
 )
 
 from vulca_backend import settings
@@ -544,91 +546,304 @@ def generate_journal_view(request):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def chiffre_affaire_view(request):
-    
+    """
+    Calcul du Chiffre d'Affaires avec variation par rapport à la période précédente
+    GET /api/chiffre-affaire/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
 
-    compte = request.GET.get("compte")
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    queryset = CompteResultat.objects.filter(
-        nature="PRODUIT",
-        numero_compte__startswith="70"
-    )
-
-    if compte:
-        queryset = queryset.filter(numero_compte=compte)
-
-    if date_debut and date_fin:
-        queryset = queryset.filter(date__range=[date_debut, date_fin])
-
-    data = (
-        queryset
-        .values("numero_compte", "libelle")
-        .annotate(
-            chiffre_affaire=Sum("montant_ar")
+    def calculate_ca(start_date, end_date):
+        """Fonction helper pour calculer le CA pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+        
+        total_ca = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .order_by("numero_compte")
-    )
+        
+        return total_ca
 
-    result = []
-    for row in data:
-        result.append({
-            "numero_compte": row["numero_compte"],
-            "libelle": row["libelle"],
-            "chiffre_affaire": row["chiffre_affaire"] or Decimal("0.00")
-        })
+    # Calcul période courante
+    current_ca = calculate_ca(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            # Calculer la durée de la période
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            # Déterminer la période précédente
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:  # Autre durée : décaler de la même durée
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            # Calculer CA période précédente
+            previous_ca = calculate_ca(previous_start, previous_end)
+            
+            # Calculer variation en pourcentage
+            # Éviter les pourcentages aberrants si la valeur précédente est trop faible
+            if previous_ca != 0 and abs(previous_ca) > 50000:  # Seuil minimum 50000 Ar
+                variation = ((current_ca - previous_ca) / abs(previous_ca)) * 100
+                # Plafonner la variation à ±1000%
+                if variation > 1000:
+                    variation = 1000
+                elif variation < -1000:
+                    variation = -1000
+            else:
+                variation = None
+        except:
+            pass
 
-    serializer = ChiffreAffaireSerializer(result, many=True)
-    return Response(serializer.data)
+    return Response({
+        "chiffre_affaire": current_ca,
+        "variation": variation,
+        "numero_compte": "70",
+        "total_credit": current_ca,
+        "total_debit": Decimal("0.00")
+    })
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def ebe_view(request):
     """
-    GET /api/ebe/
-    GET /api/ebe/?date_debut=2025-01-01&date_fin=2025-12-31
+    Calcul de l'EBE avec variation par rapport à la période précédente
+    GET /api/ebe/?date_start=2025-01-01&date_end=2025-12-31
     """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
+    def calculate_ebe(start_date, end_date):
+        """
+        Fonction helper pour calculer l'EBE pour une période donnée
+        Formule PCG 2005 : EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
+        """
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
 
-    # Produits d'exploitation (70 à 74)
-    produits = (
-        CompteResultat.objects
-        .filter(
-            nature="PRODUIT",
-            numero_compte__regex=r"^7[0-4]",
-            **base_filter
+        # Ventes de marchandises (70)
+        compte_70 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .aggregate(total=Sum("montant_ar"))["total"]
-        or Decimal("0.00")
-    )
 
-    # Charges d'exploitation (60 à 64)
-    charges = (
-        CompteResultat.objects
-        .filter(
-            nature="CHARGE",
-            numero_compte__regex=r"^6[0-4]",
-            **base_filter
+        # Production stockée (71)
+        compte_71 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="71", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .aggregate(total=Sum("montant_ar"))["total"]
-        or Decimal("0.00")
-    )
 
-    ebe = produits - charges
+        # Production immobilisée (72)
+        compte_72 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="72", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-    serializer = EbeSerializer({
-        "produits_exploitation": produits,
-        "charges_exploitation": charges,
-        "ebe": ebe
+        # Subventions d'exploitation (74)
+        compte_74 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="74", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Achats consommés (60)
+        compte_60 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="60", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Services extérieurs A (61)
+        compte_61 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="61", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Services extérieurs B (62)
+        compte_62 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="62", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Impôts et taxes (63)
+        compte_63 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="63", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Charges de personnel (64)
+        compte_64 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="64", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
+        ebe = (compte_70 + compte_71 + compte_72) - (compte_60 + compte_61 + compte_62) + compte_74 - compte_63 - compte_64
+
+        return ebe
+
+    # Calcul période courante
+    current_ebe = calculate_ebe(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous_ebe = calculate_ebe(previous_start, previous_end)
+            
+            # Calculer variation en pourcentage
+            # Éviter les pourcentages aberrants si la valeur précédente est trop faible
+            if previous_ebe != 0 and abs(previous_ebe) > 50000:  # Seuil minimum 50000 Ar
+                variation = ((current_ebe - previous_ebe) / abs(previous_ebe)) * 100
+                # Plafonner la variation à ±1000%
+                if variation > 1000:
+                    variation = 1000
+                elif variation < -1000:
+                    variation = -1000
+            else:
+                variation = None
+        except:
+            pass
+
+    return Response({
+        "ebe": current_ebe,
+        "variation": variation,
+        "produits_exploitation": Decimal("0.00"),  # Compatibility
+        "charges_exploitation": Decimal("0.00"),   # Compatibility
+        "chiffre_affaires": Decimal("0.00"),
+        "subventions": Decimal("0.00"),
+        "achats": Decimal("0.00"),
+        "charges_externes": Decimal("0.00"),
+        "impots_taxes": Decimal("0.00"),
+        "charges_personnel": Decimal("0.00")
     })
 
-    return Response(serializer.data)
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def marge_brute_view(request):
+    """
+    Calcul de la Marge Brute selon PCG 2005
+    Formule : (Ventes 70 + Production Stockée 71 + Production Immobilisée 72) - Achats (60)
+    GET /api/marge-brute/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_marge_brute(start_date, end_date):
+        """Fonction helper pour calculer la Marge Brute pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+
+        # Produits (70, 71, 72)
+        produits = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__regex=r"^(70|71|72)", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Achats (60)
+        achats = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="60", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        return produits, achats
+
+    # Calcul période courante
+    current_prod, current_ach = calculate_marge_brute(date_start, date_end)
+    current_marge = current_prod - current_ach
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:
+                prev_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                prev_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:
+                prev_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                prev_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:
+                prev_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                prev_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                prev_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                prev_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            prev_prod, prev_ach = calculate_marge_brute(prev_start, prev_end)
+            prev_marge = prev_prod - prev_ach
+            
+            if prev_marge != 0 and abs(prev_marge) > 50000:
+                variation = ((current_marge - prev_marge) / abs(prev_marge)) * 100
+                if variation > 1000: variation = 1000
+                elif variation < -1000: variation = -1000
+        except:
+            pass
+
+    return Response({
+        "ventes": current_prod,
+        "achats": current_ach,
+        "marge_brute": current_marge,
+        "variation": variation
+    })
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
@@ -700,7 +915,6 @@ def resultat_net_view(request):  #partie corriger
 
     def calculate_resultat(d_start, d_end):
         # ✅ OPTIMISATION : Une seule requête au lieu de 8+ requêtes
-        from django.db.models import Case, When, Q
         
         qs = GrandLivre.objects.all()
         if d_start and d_end:
@@ -708,79 +922,70 @@ def resultat_net_view(request):  #partie corriger
         elif d_end:
             qs = qs.filter(date__lte=d_end)
         
-        # Agrégation conditionnelle pour tous les soldes en une seule requête
+        # Agrégation par blocs de comptes (PCG 2005)
+        # On sépare les catégories pour pouvoir les afficher en détail si besoin
         data = qs.aggregate(
-            # Produits (classe 7)
-            produits_credit=Sum(Case(When(numero_compte__startswith='7', then='credit'), default=0, output_field=DecimalField())),
-            produits_debit=Sum(Case(When(numero_compte__startswith='7', then='debit'), default=0, output_field=DecimalField())),
+            # 1. Exploitation
+            produits_expl_cr=Sum(Case(When(numero_compte__regex=r'^(70|71|72|74|75)', then='credit'), default=0, output_field=DecimalField())),
+            produits_expl_db=Sum(Case(When(numero_compte__regex=r'^(70|71|72|74|75)', then='debit'), default=0, output_field=DecimalField())),
+            charges_expl_db=Sum(Case(When(numero_compte__regex=r'^(60|61|62|63|64|65)', then='debit'), default=0, output_field=DecimalField())),
+            charges_expl_cr=Sum(Case(When(numero_compte__regex=r'^(60|61|62|63|64|65)', then='credit'), default=0, output_field=DecimalField())),
             
-            # Charges exploitation (60-65)
-            charges_60_credit=Sum(Case(When(numero_compte__startswith='60', then='credit'), default=0, output_field=DecimalField())),
-            charges_60_debit=Sum(Case(When(numero_compte__startswith='60', then='debit'), default=0, output_field=DecimalField())),
-            charges_61_credit=Sum(Case(When(numero_compte__startswith='61', then='credit'), default=0, output_field=DecimalField())),
-            charges_61_debit=Sum(Case(When(numero_compte__startswith='61', then='debit'), default=0, output_field=DecimalField())),
-            charges_62_credit=Sum(Case(When(numero_compte__startswith='62', then='credit'), default=0, output_field=DecimalField())),
-            charges_62_debit=Sum(Case(When(numero_compte__startswith='62', then='debit'), default=0, output_field=DecimalField())),
-            charges_63_credit=Sum(Case(When(numero_compte__startswith='63', then='credit'), default=0, output_field=DecimalField())),
-            charges_63_debit=Sum(Case(When(numero_compte__startswith='63', then='debit'), default=0, output_field=DecimalField())),
-            charges_64_credit=Sum(Case(When(numero_compte__startswith='64', then='credit'), default=0, output_field=DecimalField())),
-            charges_64_debit=Sum(Case(When(numero_compte__startswith='64', then='debit'), default=0, output_field=DecimalField())),
-            charges_65_credit=Sum(Case(When(numero_compte__startswith='65', then='credit'), default=0, output_field=DecimalField())),
-            charges_65_debit=Sum(Case(When(numero_compte__startswith='65', then='debit'), default=0, output_field=DecimalField())),
+            # 2. Financier
+            produits_fin_cr=Sum(Case(When(numero_compte__startswith='76', then='credit'), default=0, output_field=DecimalField())),
+            produits_fin_db=Sum(Case(When(numero_compte__startswith='76', then='debit'), default=0, output_field=DecimalField())),
+            charges_fin_db=Sum(Case(When(numero_compte__startswith='66', then='debit'), default=0, output_field=DecimalField())),
+            charges_fin_cr=Sum(Case(When(numero_compte__startswith='66', then='credit'), default=0, output_field=DecimalField())),
             
-            # Charges financières (66)
-            charges_66_credit=Sum(Case(When(numero_compte__startswith='66', then='credit'), default=0, output_field=DecimalField())),
-            charges_66_debit=Sum(Case(When(numero_compte__startswith='66', then='debit'), default=0, output_field=DecimalField())),
+            # 3. Exceptionnel
+            produits_exc_cr=Sum(Case(When(numero_compte__startswith='77', then='credit'), default=0, output_field=DecimalField())),
+            produits_exc_db=Sum(Case(When(numero_compte__startswith='77', then='debit'), default=0, output_field=DecimalField())),
+            charges_exc_db=Sum(Case(When(numero_compte__startswith='67', then='debit'), default=0, output_field=DecimalField())),
+            charges_exc_cr=Sum(Case(When(numero_compte__startswith='67', then='credit'), default=0, output_field=DecimalField())),
             
-            # Produits financiers (76)
-            produits_76_credit=Sum(Case(When(numero_compte__startswith='76', then='credit'), default=0, output_field=DecimalField())),
-            produits_76_debit=Sum(Case(When(numero_compte__startswith='76', then='debit'), default=0, output_field=DecimalField())),
+            # 4. Dotations & Reprises (Amortissements/Provisions - 68/78)
+            dotations_db=Sum(Case(When(numero_compte__startswith='68', then='debit'), default=0, output_field=DecimalField())),
+            dotations_cr=Sum(Case(When(numero_compte__startswith='68', then='credit'), default=0, output_field=DecimalField())),
+            reprises_cr=Sum(Case(When(numero_compte__startswith='78', then='credit'), default=0, output_field=DecimalField())),
+            reprises_db=Sum(Case(When(numero_compte__startswith='78', then='debit'), default=0, output_field=DecimalField())),
             
-            # Charges exceptionnelles (67)
-            charges_67_credit=Sum(Case(When(numero_compte__startswith='67', then='credit'), default=0, output_field=DecimalField())),
-            charges_67_debit=Sum(Case(When(numero_compte__startswith='67', then='debit'), default=0, output_field=DecimalField())),
-            
-            # Produits exceptionnels (77)
-            produits_77_credit=Sum(Case(When(numero_compte__startswith='77', then='credit'), default=0, output_field=DecimalField())),
-            produits_77_debit=Sum(Case(When(numero_compte__startswith='77', then='debit'), default=0, output_field=DecimalField())),
-            
-            # Impôts sur bénéfices (69)
-            impots_69_credit=Sum(Case(When(numero_compte__startswith='69', then='credit'), default=0, output_field=DecimalField())),
-            impots_69_debit=Sum(Case(When(numero_compte__startswith='69', then='debit'), default=0, output_field=DecimalField())),
+            # 5. Impôts (69)
+            impots_db=Sum(Case(When(numero_compte__startswith='69', then='debit'), default=0, output_field=DecimalField())),
+            impots_cr=Sum(Case(When(numero_compte__startswith='69', then='credit'), default=0, output_field=DecimalField())),
         )
         
-        # Calcul des soldes (crédit - débit pour les produits, débit - crédit pour les charges)
-        produits = (data["produits_credit"] or Decimal("0.00")) - (data["produits_debit"] or Decimal("0.00"))
+        # Calcul des soldes nets par catégorie
+        prod_expl = (data["produits_expl_cr"] or 0) - (data["produits_expl_db"] or 0)
+        char_expl = (data["charges_expl_db"] or 0) - (data["charges_expl_cr"] or 0)
         
-        charges_exploitation = sum([
-            (data[f"charges_{c}_debit"] or Decimal("0.00")) - (data[f"charges_{c}_credit"] or Decimal("0.00"))
-            for c in [60, 61, 62, 63, 64, 65]
-        ])
+        prod_fin = (data["produits_fin_cr"] or 0) - (data["produits_fin_db"] or 0)
+        char_fin = (data["charges_fin_db"] or 0) - (data["charges_fin_cr"] or 0)
         
-        charges_financieres = (data["charges_66_debit"] or Decimal("0.00")) - (data["charges_66_credit"] or Decimal("0.00"))
-        produits_financiers = (data["produits_76_credit"] or Decimal("0.00")) - (data["produits_76_debit"] or Decimal("0.00"))
-        charges_exceptionnelles = (data["charges_67_debit"] or Decimal("0.00")) - (data["charges_67_credit"] or Decimal("0.00"))
-        produits_exceptionnels = (data["produits_77_credit"] or Decimal("0.00")) - (data["produits_77_debit"] or Decimal("0.00"))
-        impots_benefices = (data["impots_69_debit"] or Decimal("0.00")) - (data["impots_69_credit"] or Decimal("0.00"))
+        prod_exc = (data["produits_exc_cr"] or 0) - (data["produits_exc_db"] or 0)
+        char_exc = (data["charges_exc_db"] or 0) - (data["charges_exc_cr"] or 0)
+        
+        dotations = (data["dotations_db"] or 0) - (data["dotations_cr"] or 0)
+        reprises = (data["reprises_cr"] or 0) - (data["reprises_db"] or 0)
+        
+        impots = (data["impots_db"] or 0) - (data["impots_cr"] or 0)
 
-        res_net = (
-            produits
-            - charges_exploitation
-            - charges_financieres
-            + produits_financiers
-            - charges_exceptionnelles
-            + produits_exceptionnels
-            - impots_benefices
-        )
+        # Résultat d'Exploitation = (Produits Expl + Reprises) - (Charges Expl + Dotations)
+        res_expl = (prod_expl + reprises) - (char_expl + dotations)
+        # Résultat Financier
+        res_fin = prod_fin - char_fin
+        # Résultat Exceptionnel
+        res_exc = prod_exc - char_exc
+
+        res_net = res_expl + res_fin + res_exc - impots
         
         return {
-            "produits": produits,
-            "charges_exploitation": charges_exploitation,
-            "charges_financieres": charges_financieres,
-            "produits_financiers": produits_financiers,
-            "charges_exceptionnelles": charges_exceptionnelles,
-            "produits_exceptionnels": produits_exceptionnels,
-            "impots_benefices": impots_benefices,
+            "produits": prod_expl + prod_fin + prod_exc + reprises,
+            "charges_exploitation": char_expl + dotations,
+            "charges_financieres": char_fin,
+            "produits_financiers": prod_fin,
+            "charges_exceptionnelles": char_exc,
+            "produits_exceptionnels": prod_exc,
+            "impots_benefices": impots,
             "resultat_net": res_net,
         }
 
@@ -819,115 +1024,267 @@ def resultat_net_view(request):  #partie corriger
 @permission_classes([AllowAny])
 def bfr_view(request):
     """
-    GET /api/bfr/?date_debut=2025-01-01&date_fin=2025-12-31
+    Calcul du BFR avec variation par rapport à la période précédente
+    GET /api/bfr/?date_start=2025-01-01&date_end=2025-12-31
     """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
+    def calculate_bfr(start_date, end_date):
+        """Fonction helper pour calculer le BFR pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
 
-    # Actif circulant
-    actif_circulant = (
-        Bilan.objects
-        .filter(
-            type_bilan="ACTIF",
-            categorie="ACTIF_COURANTS",
-            **base_filter
+        # Actif circulant
+        actif_circulant = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", categorie="ACTIF_COURANTS", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
 
-    # Passif circulant
-    passif_circulant = (
-        Bilan.objects
-        .filter(
-            type_bilan="PASSIF",
-            categorie="PASSIFS_COURANTS",
-            **base_filter
+        # Passif circulant
+        passif_circulant = (
+            Bilan.objects
+            .filter(type_bilan="PASSIF", categorie="PASSIFS_COURANTS", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
 
-    bfr = actif_circulant - passif_circulant
+        return actif_circulant - passif_circulant
 
-    serializer = BfrSerializer({
-        "actif_circulant": actif_circulant,
-        "passif_circulant": passif_circulant,
-        "bfr": bfr
+    # Calcul période courante
+    current_bfr = calculate_bfr(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous_bfr = calculate_bfr(previous_start, previous_end)
+            
+            # Calculer variation en pourcentage
+            # Éviter les pourcentages aberrants si la valeur précédente est trop faible
+            if previous_bfr != 0 and abs(previous_bfr) > 50000:  # Seuil minimum 50000 Ar
+                variation = ((current_bfr - previous_bfr) / abs(previous_bfr)) * 100
+                # Plafonner la variation à ±1000%
+                if variation > 1000:
+                    variation = 1000
+                elif variation < -1000:
+                    variation = -1000
+            else:
+                variation = None
+        except:
+            pass
+
+    return Response({
+        "bfr": current_bfr,
+        "variation": variation,
+        "stocks": Decimal("0.00"),
+        "creances_clients": Decimal("0.00"),
+        "autres_creances": Decimal("0.00"),
+        "dettes_fournisseurs": Decimal("0.00"),
+        "autres_dettes": Decimal("0.00")
     })
-
-    return Response(serializer.data)
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def caf_view(request):
     """
-    GET /api/caf/
-    GET /api/caf/?date_debut=2025-01-01&date_fin=2025-12-31
+    Calcul de la CAF avec variation par rapport à la période précédente
+    GET /api/caf/?date_start=2025-01-01&date_end=2025-12-31
     """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
+    def calculate_caf(start_date, end_date):
+        """
+        Fonction helper pour calculer la CAF pour une période donnée
+        Formule PCG 2005 : CAF = EBE + 75 - 65 + 77 - 67 - 69
+        """
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
 
-    # Résultat net (tous produits - toutes charges)
-    produits_total = (
-        CompteResultat.objects
-        .filter(nature="PRODUIT", **base_filter)
-        .aggregate(total=Sum("montant_ar"))["total"]
-        or Decimal("0.00")
-    )
-
-    charges_total = (
-        CompteResultat.objects
-        .filter(nature="CHARGE", **base_filter)
-        .aggregate(total=Sum("montant_ar"))["total"]
-        or Decimal("0.00")
-    )
-
-    resultat_net = produits_total - charges_total
-
-    # Dotations (681 / 687)
-    dotations = (
-        CompteResultat.objects
-        .filter(
-            nature="CHARGE",
-            numero_compte__regex=r"^68[1|7]",
-            **base_filter
+        # === Calcul de l'EBE : (70+71+72) - (60+61+62) + 74 - 63 - 64 ===
+        # Ventes de marchandises (70)
+        compte_70 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .aggregate(total=Sum("montant_ar"))["total"]
-        or Decimal("0.00")
-    )
 
-    # Reprises (781 / 787)
-    reprises = (
-        CompteResultat.objects
-        .filter(
-            nature="PRODUIT",
-            numero_compte__regex=r"^78[1|7]",
-            **base_filter
+        # Production stockée (71)
+        compte_71 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="71", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .aggregate(total=Sum("montant_ar"))["total"]
-        or Decimal("0.00")
-    )
 
-    caf = resultat_net + dotations - reprises
+        # Production immobilisée (72)
+        compte_72 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="72", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-    serializer = CafSerializer({
-        "resultat_net": resultat_net,
-        "dotations": dotations,
-        "reprises": reprises,
-        "caf": caf
+        # Subventions d'exploitation (74)
+        compte_74 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="74", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Achats consommés (60)
+        compte_60 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="60", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Services extérieurs A (61)
+        compte_61 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="61", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Services extérieurs B (62)
+        compte_62 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="62", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Impôts et taxes (63)
+        compte_63 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="63", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Charges de personnel (64)
+        compte_64 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="64", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
+        ebe = (compte_70 + compte_71 + compte_72) - (compte_60 + compte_61 + compte_62) + compte_74 - compte_63 - compte_64
+
+        # === Comptes supplémentaires pour la CAF ===
+        # Autres produits de gestion courante (75)
+        compte_75 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="75", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Autres charges de gestion courante (65)
+        compte_65 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="65", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Produits exceptionnels (77)
+        compte_77 = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="77", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Charges exceptionnelles (67)
+        compte_67 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="67", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Impôts sur les bénéfices (69)
+        compte_69 = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="69", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # CAF = EBE + 75 - 65 + 77 - 67 - 69
+        caf = ebe + compte_75 - compte_65 + compte_77 - compte_67 - compte_69
+
+        return caf
+
+    # Calcul période courante
+    current_caf = calculate_caf(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous_caf = calculate_caf(previous_start, previous_end)
+            
+            # Calculer variation en pourcentage
+            # Éviter les pourcentages aberrants si la valeur précédente est trop faible
+            if previous_caf != 0 and abs(previous_caf) > 50000:  # Seuil minimum 50000 Ar
+                variation = ((current_caf - previous_caf) / abs(previous_caf)) * 100
+                # Plafonner la variation à ±1000%
+                if variation > 1000:
+                    variation = 1000
+                elif variation < -1000:
+                    variation = -1000
+            else:
+                variation = None
+        except:
+            pass
+
+    return Response({
+        "caf": current_caf,
+        "variation": variation,
+        "resultat_net": Decimal("0.00"),
+        "dotations_amort_provisions": Decimal("0.00"),
+        "reprises_amort_provisions": Decimal("0.00")
     })
-
-    return Response(serializer.data)
 
 
 
@@ -935,56 +1292,91 @@ def caf_view(request):
 @permission_classes([AllowAny])
 def leverage_brut_view(request):
     """
-    GET /api/leverage-brut/?date_debut=2025-01-01&date_fin=2025-12-31
+    Calcul du Leverage Brut avec variation par rapport à la période précédente
+    GET /api/leverage-brut/?date_start=2025-01-01&date_end=2025-12-31
     """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
 
-    date_debut = request.GET.get("date_debut")
-    date_fin = request.GET.get("date_fin")
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
 
-    base_filter = {}
-    if date_debut and date_fin:
-        base_filter["date__range"] = [date_debut, date_fin]
+    def calculate_leverage(start_date, end_date):
+        """Fonction helper pour calculer le Leverage pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
 
-    # Total endettement = Passifs financiers (courts et longs termes)
-    total_endettement = (
-        Bilan.objects
-        .filter(
-            type_bilan="PASSIF",
-            categorie__in=["PASSIFS_COURANTS", "PASSIFS_NON_COURANTS"],
-            numero_compte__regex=r"^16|^17|^19",
-            **base_filter
+        # Total endettement
+        total_endettement = (
+            Bilan.objects
+            .filter(
+                type_bilan="PASSIF",
+                categorie__in=["PASSIFS_COURANTS", "PASSIFS_NON_COURANTS"],
+                numero_compte__regex=r"^16|^17|^19",
+                **filters
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
 
-    # Calcul EBE (réutilisation de la logique précédente)
-    produits = (
-        CompteResultat.objects
-        .filter(
-            nature="PRODUIT",
-            numero_compte__regex=r"^7[0-4]",
-            **base_filter
+        # Calcul EBE
+        produits = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__regex=r"^7[0-4]", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-    charges = (
-        CompteResultat.objects
-        .filter(
-            nature="CHARGE",
-            numero_compte__regex=r"^6[0-4]",
-            **base_filter
+        
+        charges = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__regex=r"^6[0-4]", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-    )
-    ebe = produits - charges
+        
+        ebe = produits - charges
 
-    # Sécurité division par zéro
-    leverage_brut = total_endettement / ebe if ebe != 0 else None
+        return (total_endettement / ebe) if ebe != 0 else None
+
+    # Calcul période courante
+    current_leverage = calculate_leverage(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end and current_leverage is not None:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous_leverage = calculate_leverage(previous_start, previous_end)
+            
+            # Calculer variation en pourcentage
+            # Pour le leverage, on utilise un seuil plus bas (0.01) car c'est un ratio
+            if previous_leverage is not None and previous_leverage != 0 and abs(previous_leverage) > 0.01:
+                variation = ((current_leverage - previous_leverage) / abs(previous_leverage)) * 100
+            else:
+                variation = None
+        except:
+            pass
 
     return Response({
-        "total_endettement": total_endettement,
-        "ebe": ebe,
-        "leverage_brut": leverage_brut
+        "leverage_brut": current_leverage,
+        "variation": variation,
+        "total_endettement": Decimal("0.00"),
+        "ebe": Decimal("0.00")
     })
 
 
@@ -1668,70 +2060,758 @@ def top_comptes_mouvementes_view(request):
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def chiffre_affaire_mensuel_view(request):
+def roe_view(request):
     """
-    Retourne l'évolution mensuelle du CA (Classe 70).
+    Calcul du ROE (Return on Equity) : (Résultat Net / Fonds Propres) * 100
+    GET /api/roe/
+    GET /api/roe/?date_start=2025-01-01&date_end=2025-12-31
     """
-    from django.db.models.functions import TruncMonth
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
 
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
-    qs = GrandLivre.objects.filter(numero_compte__startswith="70")
+    def calculate_roe(start_date, end_date):
+        """Fonction helper pour calculer le ROE pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+        elif end_date:
+            filters["date__lte"] = end_date
+        
+        # 1. Résultat Net : On prend la dernière date disponible dans la période pour CompteResultat
+        latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
+        
+        resultat_net = Decimal("0.00")
+        if latest_res_date:
+            agg_res = CompteResultat.objects.filter(date=latest_res_date).aggregate(
+                prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
+                char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
+            )
+            resultat_net = (agg_res["prod"] or Decimal("0.00")) - (agg_res["char"] or Decimal("0.00"))
+
+        # 2. Fonds propres : On prend la dernière date disponible dans la période pour Bilan
+        latest_bilan_date = Bilan.objects.filter(categorie="CAPITAUX_PROPRES", **filters).aggregate(Max('date'))['date__max']
+        
+        fonds_propres = Decimal("0.00")
+        if latest_bilan_date:
+            fonds_propres = (
+                Bilan.objects
+                .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", date=latest_bilan_date)
+                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+            )
+
+        # 3. Calcul du ROE
+        if fonds_propres != 0 and abs(fonds_propres) >= 100000:
+            roe = (resultat_net / fonds_propres * 100)
+            # Protection contre les extrêmes
+            if roe > 1000: roe = 1000
+            elif roe < -1000: roe = -1000
+        else:
+            roe = None
+        
+        return {
+            "resultat_net": resultat_net,
+            "fonds_propres": fonds_propres,
+            "roe": roe
+        }
+
+    # Calcul période courante
+    current_data = calculate_roe(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
     if date_start and date_end:
-        qs = qs.filter(date__range=[date_start, date_end])
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            # Calculer la durée de la période
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            # Déterminer la période précédente
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:  # Autre durée : décaler de la même durée
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            # Calculer ROE période précédente
+            previous_data = calculate_roe(previous_start, previous_end)
+            
+            # Calculer variation
+            if current_data["roe"] is not None and previous_data["roe"] is not None:
+                variation = current_data["roe"] - previous_data["roe"]
+        except:
+            pass
 
-    data = (
-        qs.annotate(month=TruncMonth("date"))
-        .values("month")
-        .annotate(
-            ca=Sum("credit") - Sum("debit")
+    return Response({
+        "resultat_net": current_data["resultat_net"],
+        "fonds_propres": current_data["fonds_propres"],
+        "roe": current_data["roe"],
+        "variation": variation
+    })
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def roa_view(request):
+    """
+    Calcul du ROA (Return on Assets) : (Résultat Net / Total Actif) * 100
+    GET /api/roa/
+    GET /api/roa/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_roa(start_date, end_date):
+        """Fonction helper pour calculer le ROA pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+        elif end_date:
+            filters["date__lte"] = end_date
+        
+        # 1. Résultat Net : On prend la dernière date disponible dans la période pour CompteResultat
+        latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
+        
+        resultat_net = Decimal("0.00")
+        if latest_res_date:
+            agg_res = CompteResultat.objects.filter(date=latest_res_date).aggregate(
+                prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
+                char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
+            )
+            resultat_net = (agg_res["prod"] or Decimal("0.00")) - (agg_res["char"] or Decimal("0.00"))
+
+        # 2. Total Actif : On prend la dernière date disponible dans la période pour Bilan
+        latest_bilan_date = Bilan.objects.filter(type_bilan="ACTIF", **filters).aggregate(Max('date'))['date__max']
+        
+        total_actif = Decimal("0.00")
+        if latest_bilan_date:
+            total_actif = (
+                Bilan.objects
+                .filter(type_bilan="ACTIF", date=latest_bilan_date)
+                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+            )
+
+        # 3. Calcul du ROA
+        if total_actif != 0 and abs(total_actif) >= 100000:
+            roa = (resultat_net / total_actif * 100)
+            if roa > 1000: roa = 1000
+            elif roa < -1000: roa = -1000
+        else:
+            roa = None
+        
+        return {
+            "resultat_net": resultat_net,
+            "total_actif": total_actif,
+            "roa": roa
+        }
+
+    # Calcul période courante
+    current_data = calculate_roa(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            # Calculer la durée de la période
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            # Déterminer la période précédente
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:  # Autre durée : décaler de la même durée
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            # Calculer ROA période précédente
+            previous_data = calculate_roa(previous_start, previous_end)
+            
+            # Calculer variation
+            if current_data["roa"] is not None and previous_data["roa"] is not None:
+                variation = current_data["roa"] - previous_data["roa"]
+        except:
+            pass
+
+    return Response({
+        "resultat_net": current_data["resultat_net"],
+        "total_actif": current_data["total_actif"],
+        "roa": current_data["roa"],
+        "variation": variation
+    })
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def current_ratio_view(request):
+    """
+    Calcul du Current Ratio : (Actifs Courants / Passifs Courants)
+    GET /api/current-ratio/
+    GET /api/current-ratio/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_current_ratio(start_date, end_date):
+        """Fonction helper pour calculer le Current Ratio pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+        
+        actifs_courants = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", categorie="ACTIF_COURANTS", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .order_by("month")
-    )
 
-    results = []
-    for item in data:
-        if item["month"]:
-            results.append({
-                "mois": item["month"].strftime("%Y-%m"),
-                "ca": float(item["ca"] or 0)
-            })
+        passifs_courants = (
+            Bilan.objects
+            .filter(type_bilan="PASSIF", categorie="PASSIFS_COURANTS", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-    return Response(results)
+        current_ratio = (actifs_courants / passifs_courants) if passifs_courants != 0 else None
+        
+        return {
+            "actifs_courants": actifs_courants,
+            "passifs_courants": passifs_courants,
+            "current_ratio": current_ratio
+        }
+
+    # Calcul période courante
+    current_data = calculate_current_ratio(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous_data = calculate_current_ratio(previous_start, previous_end)
+            
+            if current_data["current_ratio"] is not None and previous_data["current_ratio"] is not None:
+                variation = current_data["current_ratio"] - previous_data["current_ratio"]
+        except:
+            pass
+
+    payload = {
+        "actifs_courants": current_data["actifs_courants"],
+        "passifs_courants": current_data["passifs_courants"],
+        "current_ratio": current_data["current_ratio"],
+        "variation": variation
+    }
+    
+    serializer = CurrentRatioSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def quick_ratio_view(request):
+    """
+    Calcul du Quick Ratio : ((Actifs Courants - Stocks) / Passifs Courants)
+    GET /api/quick-ratio/
+    GET /api/quick-ratio/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_quick_ratio(start_date, end_date):
+        """Fonction helper pour calculer le Quick Ratio pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+
+        # Actifs courants
+        actifs_courants = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", categorie="ACTIF_COURANTS", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Stocks (classe 3)
+        stocks = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", numero_compte__startswith="3", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Passifs courants
+        passifs_courants = (
+            Bilan.objects
+            .filter(type_bilan="PASSIF", categorie="PASSIFS_COURANTS", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        quick_ratio = (
+            (actifs_courants - stocks) / passifs_courants
+            if passifs_courants != 0
+            else None
+        )
+
+        return {
+            "actifs_courants": actifs_courants,
+            "stocks": stocks,
+            "passifs_courants": passifs_courants,
+            "quick_ratio": quick_ratio
+        }
+
+    # Calcul période courante
+    current_data = calculate_quick_ratio(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:  # Autre durée
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous_data = calculate_quick_ratio(previous_start, previous_end)
+            
+            if current_data["quick_ratio"] is not None and previous_data["quick_ratio"] is not None:
+                variation = current_data["quick_ratio"] - previous_data["quick_ratio"]
+        except:
+            pass
+
+    payload = {
+        "actifs_courants": current_data["actifs_courants"],
+        "stocks": current_data["stocks"],
+        "passifs_courants": current_data["passifs_courants"],
+        "quick_ratio": current_data["quick_ratio"],
+        "variation": variation
+    }
+    
+    serializer = QuickRatioSerializer(payload)
+    return Response(serializer.data)
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def chiffre_affaire_annuel_view(request):
+def gearing_view(request):
     """
-    Retourne l'évolution annuelle du CA (Classe 70).
+    Calcul du Gearing : (Dettes Financières / Fonds Propres) * 100
+    GET /api/gearing/
+    GET /api/gearing/?date_start=2025-01-01&date_end=2025-12-31
     """
-    from django.db.models.functions import TruncYear
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
 
-    qs = GrandLivre.objects.filter(numero_compte__startswith="70")
-    
-    data = (
-        qs.annotate(year=TruncYear("date"))
-        .values("year")
-        .annotate(
-            ca=Sum("credit") - Sum("debit")
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_gearing(start_date, end_date):
+        """Fonction helper pour calculer le Gearing pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+
+        # Dettes financières (classe 16)
+        dettes_financieres = (
+            Bilan.objects
+            .filter(type_bilan="PASSIF", numero_compte__startswith="16", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
-        .order_by("year")
+
+        # Fonds propres
+        fonds_propres = (
+            Bilan.objects
+            .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        gearing = (
+            (dettes_financieres / fonds_propres) * 100
+            if fonds_propres != 0
+            else None
+        )
+
+        return {
+            "dettes_financieres": dettes_financieres,
+            "fonds_propres": fonds_propres,
+            "gearing": gearing
+        }
+
+    # Calcul période courante
+    current_data = calculate_gearing(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:  # Autre durée
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous_data = calculate_gearing(previous_start, previous_end)
+            
+            if current_data["gearing"] is not None and previous_data["gearing"] is not None:
+                variation = current_data["gearing"] - previous_data["gearing"]
+        except:
+            pass
+
+    payload = {
+        "dettes_financieres": current_data["dettes_financieres"],
+        "fonds_propres": current_data["fonds_propres"],
+        "gearing": current_data["gearing"],
+        "variation": variation
+    }
+    
+    serializer = GearingSerializer(payload)
+    return Response(serializer.data)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def rotation_stock_view(request):
+    """
+    Calcul de la Rotation des stocks : Coût des ventes / Stock moyen
+    GET /api/rotation-stock/
+    GET /api/rotation-stock/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_rotation_stock(start_date, end_date):
+        """Fonction helper pour calculer la Rotation des stocks pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+
+        # Coût des ventes (charges classe 6)
+        cout_ventes = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="6", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Stock moyen (simplifié : stock fin de période)
+        stocks = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", numero_compte__startswith="3", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        rotation_stock = (
+            cout_ventes / stocks
+            if stocks != 0
+            else None
+        )
+
+        duree_stock = (
+            Decimal("365") / rotation_stock
+            if rotation_stock and rotation_stock != 0
+            else None
+        )
+
+        return {
+            "cout_ventes": cout_ventes,
+            "stocks": stocks,
+            "rotation_stock": rotation_stock,
+            "duree_stock_jours": duree_stock
+        }
+
+    # Calcul période courante
+    current_data = calculate_rotation_stock(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:  # Autre durée
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous_data = calculate_rotation_stock(previous_start, previous_end)
+            
+            if current_data["rotation_stock"] is not None and previous_data["rotation_stock"] is not None:
+                variation = current_data["rotation_stock"] - previous_data["rotation_stock"]
+        except:
+            pass
+
+    payload = {
+        "cout_ventes": current_data["cout_ventes"],
+        "stocks": current_data["stocks"],
+        "rotation_stock": current_data["rotation_stock"],
+        "duree_stock_jours": current_data["duree_stock_jours"],
+        "variation": variation
+    }
+    
+    serializer = RotationStockSerializer(payload)
+    return Response(serializer.data)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def marge_operationnelle_view(request):
+    """
+    Calcul de la Marge opérationnelle : (Résultat opérationnel / CA) * 100
+    GET /api/marge-operationnelle/
+    GET /api/marge-operationnelle/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_marge_operationnelle(start_date, end_date):
+        """Fonction helper pour calculer la Marge opérationnelle pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+        elif end_date:
+            filters["date__lte"] = end_date
+
+        # Utiliser la dernière date disponible dans la période pour CompteResultat
+        latest_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
+
+        chiffre_affaire = Decimal("0.00")
+        charges_exploitation = Decimal("0.00")
+        res_op = Decimal("0.00")
+        
+        if latest_date:
+            agg = CompteResultat.objects.filter(date=latest_date).aggregate(
+                # CA = Comptes 70, 71, 72
+                ca=Sum(Case(When(numero_compte__regex=r'^(70|71|72)', then='montant_ar'), default=0, output_field=DecimalField())),
+                # Résultat Opérationnel = (70-75) - (60-65)
+                prod_op=Sum(Case(When(numero_compte__regex=r'^(70|71|72|74|75)', then='montant_ar'), default=0, output_field=DecimalField())),
+                char_op=Sum(Case(When(numero_compte__regex=r'^(60|61|62|63|64|65)', then='montant_ar'), default=0, output_field=DecimalField()))
+            )
+            chiffre_affaire = agg["ca"] or Decimal("0.00")
+            charges_exploitation = agg["char_op"] or Decimal("0.00")
+            res_op = (agg["prod_op"] or Decimal("0.00")) - charges_exploitation
+
+        # Éviter les variations aberrantes
+        if chiffre_affaire != 0 and abs(chiffre_affaire) >= 1000:
+            marge_operationnelle = (res_op / chiffre_affaire) * 100
+            if marge_operationnelle > 1000: marge_operationnelle = 1000
+            elif marge_operationnelle < -1000: marge_operationnelle = -1000
+        else:
+            marge_operationnelle = None
+
+        return {
+            "chiffre_affaire": chiffre_affaire,
+            "charges_exploitation": charges_exploitation,
+            "resultat_operationnel": res_op,
+            "marge_operationnelle": marge_operationnelle
+        }
+
+    # Calcul période courante
+    current_data = calculate_marge_operationnelle(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:  # Autre durée
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous_data = calculate_marge_operationnelle(previous_start, previous_end)
+            
+            if current_data["marge_operationnelle"] is not None and previous_data["marge_operationnelle"] is not None:
+                variation = current_data["marge_operationnelle"] - previous_data["marge_operationnelle"]
+        except:
+            pass
+
+    payload = {
+        "chiffre_affaire": current_data["chiffre_affaire"],
+        "charges_exploitation": current_data["charges_exploitation"],
+        "resultat_operationnel": current_data["resultat_operationnel"],
+        "marge_operationnelle": current_data["marge_operationnelle"],
+        "variation": variation
+    }
+    
+    serializer = MargeOperationnelleSerializer(payload)
+    return Response(serializer.data)
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def repartition_produits_charges_view(request):
+    """
+    Retourne 3 jeux de données pour les camemberts:
+    1. Top 5 des produits par catégorie
+    2. Top 5 des charges par catégorie
+    3. Total Produits vs Total Charges
+    GET /api/repartition-resultat/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from django.db.models import Q
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    filters = {}
+    if date_start and date_end:
+        filters["date__range"] = [date_start, date_end]
+
+    # === TOP 5 PRODUITS PAR CATÉGORIE ===
+    produits_data = (
+        CompteResultat.objects
+        .filter(nature="PRODUIT", **filters)
+        .values("numero_compte", "libelle")
+        .annotate(total=Sum("montant_ar"))
+        .order_by("-total")[:5]
+    )
+    
+    produits_list = [
+        {
+            "label": item["libelle"] or f"Compte {item['numero_compte']}",
+            "montant": float(item["total"] or 0),
+        }
+        for item in produits_data
+    ]
+
+    # === TOP 5 CHARGES PAR CATÉGORIE ===
+    charges_data = (
+        CompteResultat.objects
+        .filter(nature="CHARGE", **filters)
+        .values("numero_compte", "libelle")
+        .annotate(total=Sum("montant_ar"))
+        .order_by("-total")[:5]
+    )
+    
+    charges_list = [
+        {
+            "label": item["libelle"] or f"Compte {item['numero_compte']}",
+            "montant": float(item["total"] or 0),
+        }
+        for item in charges_data
+    ]
+
+    # === TOTAL PRODUITS VS CHARGES ===
+    total_produits = (
+        CompteResultat.objects
+        .filter(nature="PRODUIT", **filters)
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
     )
 
-    results = []
-    for item in data:
-        if item["year"]:
-            results.append({
-                "annee": item["year"].strftime("%Y"),
-                "ca": float(item["ca"] or 0)
-            })
+    total_charges = (
+        CompteResultat.objects
+        .filter(nature="CHARGE", **filters)
+        .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0")
+    )
 
-    return Response(results)
+    comparison = [
+        {
+            "label": "Produits",
+            "montant": float(total_produits),
+        },
+        {
+            "label": "Charges",
+            "montant": float(total_charges),
+        }
+    ]
+
+    return Response({
+        "produits": produits_list,
+        "charges": charges_list,
+        "comparison": comparison
+    })
 
 
-marge_net_view = resultat_net_ca_view
+
+
 
 
 @api_view(["GET"])
@@ -1898,3 +2978,134 @@ def get_available_years_view(request):
     )
     
     return Response(list(years))
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def tva_view(request):
+    """
+    Calcul de la TVA (Collectée, Déductible, Nette) avec variation par rapport à la période précédente
+    GET /api/tva/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+    from .serializers import TVASerializer
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_tva(start_date, end_date):
+        """Fonction helper pour calculer la TVA pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+        
+        # TVA Collectée (compte 4457) = Crédit - Débit
+        tva_collectee_credit = (
+            GrandLivre.objects
+            .filter(numero_compte__startswith="4457", **filters)
+            .aggregate(total=Sum("credit"))["total"] or Decimal("0.00")
+        )
+        tva_collectee_debit = (
+            GrandLivre.objects
+            .filter(numero_compte__startswith="4457", **filters)
+            .aggregate(total=Sum("debit"))["total"] or Decimal("0.00")
+        )
+        tva_collectee = tva_collectee_credit - tva_collectee_debit
+        
+        # TVA Déductible (compte 4456) = Débit - Crédit
+        tva_deductible_debit = (
+            GrandLivre.objects
+            .filter(numero_compte__startswith="4456", **filters)
+            .aggregate(total=Sum("debit"))["total"] or Decimal("0.00")
+        )
+        tva_deductible_credit = (
+            GrandLivre.objects
+            .filter(numero_compte__startswith="4456", **filters)
+            .aggregate(total=Sum("credit"))["total"] or Decimal("0.00")
+        )
+        tva_deductible = tva_deductible_debit - tva_deductible_credit
+        
+        # TVA Nette = TVA Collectée - TVA Déductible
+        tva_nette = tva_collectee - tva_deductible
+        
+        return {
+            "tva_collectee": tva_collectee,
+            "tva_deductible": tva_deductible,
+            "tva_nette": tva_nette
+        }
+
+    # Calcul période courante
+    current_tva = calculate_tva(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation_collectee = None
+    variation_deductible = None
+    variation_nette = None
+    
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            # Calculer la durée de la période
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            # Déterminer la période précédente
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:  # Autre durée : décaler de la même durée
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            # Calculer TVA période précédente
+            previous_tva = calculate_tva(previous_start, previous_end)
+            
+            # Calculer variation en pourcentage pour TVA Collectée
+            if previous_tva["tva_collectee"] != 0 and abs(previous_tva["tva_collectee"]) > 50000:
+                variation_collectee = ((current_tva["tva_collectee"] - previous_tva["tva_collectee"]) / abs(previous_tva["tva_collectee"])) * 100
+                # Plafonner la variation à ±1000%
+                if variation_collectee > 1000:
+                    variation_collectee = 1000
+                elif variation_collectee < -1000:
+                    variation_collectee = -1000
+            
+            # Calculer variation en pourcentage pour TVA Déductible
+            if previous_tva["tva_deductible"] != 0 and abs(previous_tva["tva_deductible"]) > 50000:
+                variation_deductible = ((current_tva["tva_deductible"] - previous_tva["tva_deductible"]) / abs(previous_tva["tva_deductible"])) * 100
+                # Plafonner la variation à ±1000%
+                if variation_deductible > 1000:
+                    variation_deductible = 1000
+                elif variation_deductible < -1000:
+                    variation_deductible = -1000
+            
+            # Calculer variation en pourcentage pour TVA Nette
+            if previous_tva["tva_nette"] != 0 and abs(previous_tva["tva_nette"]) > 50000:
+                variation_nette = ((current_tva["tva_nette"] - previous_tva["tva_nette"]) / abs(previous_tva["tva_nette"])) * 100
+                # Plafonner la variation à ±1000%
+                if variation_nette > 1000:
+                    variation_nette = 1000
+                elif variation_nette < -1000:
+                    variation_nette = -1000
+        except:
+            pass
+
+    response_data = {
+        "tva_collectee": current_tva["tva_collectee"],
+        "tva_deductible": current_tva["tva_deductible"],
+        "tva_nette": current_tva["tva_nette"],
+        "variation_collectee": variation_collectee,
+        "variation_deductible": variation_deductible,
+        "variation_nette": variation_nette
+    }
+    
+    serializer = TVASerializer(response_data)
+    return Response(serializer.data)
+

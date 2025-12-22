@@ -93,6 +93,7 @@ PCG_MAPPING = {
     '41': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
     '42': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},
     '43': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},
+    '44': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},  # État - Impôts et taxes (442, 443, 444...) Etat, impôts et taxes
     '4456': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
     '4457': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},
     '45': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'},

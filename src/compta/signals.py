@@ -45,6 +45,133 @@ def generate_grand_livre(sender, instance, created, **kwargs):
     )
 
 
+@receiver(post_save, sender=Journal)
+def detect_payslip_payment(sender, instance, created, **kwargs):
+    """
+    Détecte automatiquement les paiements de paie depuis les relevés bancaires
+    et génère les écritures de contrepartie correspondantes.
+    
+    Logique :
+    - Si type_journal == "BANQUE" ET compte == "512" (crédit)
+    - Recherche dans le libellé ou la référence un N° de fiche de paie
+    - Si trouvé, génère automatiquement l'écriture de paiement correspondante
+    """
+    if not created:
+        return
+    
+    # Vérifier si c'est un relevé bancaire (sortie de banque)
+    if instance.type_journal != "BANQUE" or instance.numero_compte != "512":
+        return
+    
+    # Vérifier si c'est un crédit (sortie d'argent)
+    if instance.credit_ar <= 0:
+        return
+    
+    # Rechercher une référence de fiche de paie dans le libellé ou numero_piece
+    # Pattern: PAIE-YYYY-XXX ou similaire
+    import re
+    import json
+    pattern = r'PAIE[-_]?\d{4}[-_]?\d+'
+    
+    reference = None
+    if re.search(pattern, str(instance.numero_piece), re.IGNORECASE):
+        reference = re.search(pattern, str(instance.numero_piece), re.IGNORECASE).group(0)
+    elif re.search(pattern, str(instance.libelle), re.IGNORECASE):
+        reference = re.search(pattern, str(instance.libelle), re.IGNORECASE).group(0)
+    
+    if not reference:
+        return
+    
+    # Rechercher la fiche de paie correspondante
+    from ocr.models import FormSource, FileSource
+    
+    # Chercher dans FormSource
+    form_source = FormSource.objects.filter(
+        piece_type="Fiche de paie",
+        ref_file__icontains=reference
+    ).first()
+    
+    # Chercher dans FileSource si pas trouvé
+    if not form_source:
+        file_source = FileSource.objects.filter(
+            piece_type="Fiche de paie",
+            ref_file__icontains=reference
+        ).first()
+    else:
+        file_source = None
+    
+    # Si aucune fiche de paie trouvée, arrêter
+    if not form_source and not file_source:
+        print(f"⚠️ Référence paie détectée ({reference}) mais aucune fiche de paie trouvée")
+        return
+    
+    # Récupérer les montants depuis description_json
+    source = form_source or file_source
+    try:
+        description = json.loads(source.description) if isinstance(source.description, str) else source.description
+    except:
+        print(f"❌ Erreur parsing description pour {reference}")
+        return
+    
+    net_a_payer = Decimal(str(description.get('net_a_payer', 0)))
+    total_cotisation_salariale = Decimal(str(description.get('total_cotisation_salariale', 0)))
+    total_cotisation_patronale = Decimal(str(description.get('total_cotisation_patronale', 0)))
+    total_cotisations = total_cotisation_salariale + total_cotisation_patronale
+    retenue_source = Decimal(str(description.get('retenue_source', 0)))
+    
+    # Déterminer quel type de paiement c'est basé sur le montant
+    montant = Decimal(str(instance.credit_ar))
+    
+    compte_debit = None
+    libelle_paiement = None
+    
+    # Tolérance de 1 Ar pour les arrondis
+    tolerance = Decimal('1.00')
+    
+    if abs(montant - net_a_payer) < tolerance:
+        compte_debit = "421"
+        libelle_paiement = f"Paiement salaire - {reference}"
+    elif abs(montant - total_cotisations) < tolerance:
+        compte_debit = "431"
+        libelle_paiement = f"Paiement cotisations sociales - {reference}"
+    elif abs(montant - retenue_source) < tolerance:
+        compte_debit = "442"
+        libelle_paiement = f"Paiement IRSA - {reference}"
+    else:
+        # Montant ne correspond à aucun paiement attendu
+        print(f"⚠️ Montant {montant} ne correspond à aucun paiement pour {reference}")
+        print(f"   Net: {net_a_payer}, Cotisations: {total_cotisations}, IRSA: {retenue_source}")
+        return
+    
+    # Vérifier si l'écriture de contrepartie n'existe pas déjà
+    existing = Journal.objects.filter(
+        date=instance.date,
+        numero_piece=instance.numero_piece,
+        type_journal="BANQUE",
+        numero_compte=compte_debit,
+        debit_ar=montant
+    ).exists()
+    
+    if existing:
+        print(f"ℹ️ Écriture de paiement déjà existante pour {reference}")
+        return
+    
+    # Générer l'écriture de contrepartie (débit du compte de dette)
+    libelle_compte = get_pcg_label(compte_debit)
+    
+    Journal.objects.create(
+        date=instance.date,
+        numero_piece=instance.numero_piece,
+        type_journal="BANQUE",
+        numero_compte=compte_debit,
+        libelle=libelle_compte,
+        debit_ar=montant,
+        credit_ar=Decimal('0.00')
+    )
+    
+    print(f"✅ Paiement paie détecté et enregistré : {libelle_paiement} ({montant} Ar)")
+
+
 @receiver(post_save, sender=GrandLivre)
 def generate_balance(sender, instance, **kwargs):
     """
@@ -143,14 +270,16 @@ def generate_financial_statements(sender, instance, **kwargs):
         solde_debit = Decimal(instance.solde_debit or 0)
         solde_credit = Decimal(instance.solde_credit or 0)
 
-        # ============================
         # Recherche de la règle PCG
         # ============================
         regle = None
+        best_len = 0
         for prefix, data in PCG_MAPPING.items():
             if code.startswith(prefix):
-                regle = data
-                break
+                # On garde la regle avec le préfixe le plus long (plus précis)
+                if len(prefix) > best_len:
+                    regle = data
+                    best_len = len(prefix)
 
         if not regle:
             return
@@ -313,8 +442,15 @@ def generate_financial_statements(sender, instance, **kwargs):
         if is_negative:
             montant = -montant
 
-        # Ne créer que si montant significatif (sauf clients/fournisseurs pour traçabilité)
-        if montant == 0 and not (code.startswith('41') or code.startswith('40')):
+        # Ne créer que si montant significatif (SAUF pour Clients/Fournisseurs qu'on veut voir soldés)
+        if montant == 0 and not code.startswith(('40', '41')):
+            # Si le montant est 0, on SUPPRIME l'entrée du Bilan si elle existe
+            # (pour éviter que des dettes soldées restent affichées)
+            Bilan.objects.filter(
+                balance=instance,
+                numero_compte=code,
+                date=instance.date
+            ).delete()
             return
 
         # Création ou mise à jour du Bilan
@@ -350,12 +486,7 @@ def generate_financial_statements(sender, instance, **kwargs):
             ).delete()
             return
 
-        # ✅ NOUVELLE RÈGLE : CP temporaire UNIQUEMENT si le compte est bancaire (51x)
-        if not code.startswith('51'):
-            # Si ce n'est pas un compte bancaire, ne pas créer de CP temporaire
-            return
-
-        # ✅ Supprimer l'ancien CP temporaire s'il existe
+        # ✅ Supprimer l'ancien CP temporaire s'il existe (pour le recréer à jour)
         Bilan.objects.filter(
             date=instance.date,
             numero_compte='101',
@@ -377,9 +508,26 @@ def generate_financial_statements(sender, instance, **kwargs):
             ).exclude(numero_compte='101')  # Exclure le CP temporaire du calcul
         ])
 
-        cp_temp = total_actif - total_passif
+        # ✅ AJOUT : Inclure le Résultat Net dans le passif théorique
+        # (Car Bénéfice = Capitaux Propres)
+        resultat_net = Decimal('0.00')
+        cr_items = CompteResultat.objects.filter(date=instance.date)
+        for item in cr_items:
+            if item.nature == 'PRODUIT':
+                resultat_net += item.montant_ar
+            elif item.nature == 'CHARGE':
+                resultat_net -= item.montant_ar
+        
+        # Le Passif Total doit inclure le Résultat pour équilibrer l'Actif
+        passif_avec_resultat = total_passif + resultat_net
 
-        # ✅ Créer CP temporaire uniquement si positif
+        cp_temp = total_actif - passif_avec_resultat
+        
+        # S'assurer qu'on ne crée pas de tout petits montants (arrondis floating point)
+        if abs(cp_temp) < Decimal('0.01'):
+            cp_temp = Decimal('0.00')
+
+        # ✅ Créer CP temporaire uniquement si positif (et significatif)
         if cp_temp > 0:
             # ✅ Créer une balance fictive pour le CP temporaire
             balance_cp, _ = Balance.objects.get_or_create(

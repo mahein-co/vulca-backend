@@ -10,39 +10,47 @@ def generate_grand_livre(sender, instance, created, **kwargs):
     """
     Génère automatiquement une ligne dans le Grand Livre
     à chaque création d'une écriture Journal.
+    
+    ⚡ OPTIMISATION : Utilise transaction.on_commit() pour différer
+    l'exécution jusqu'après l'envoi de la réponse HTTP au client.
     """
     if not created:
         return
 
-    # Dernier solde du compte
-    last_entry = (
-        GrandLivre.objects
-        .filter(numero_compte=instance.numero_compte)
-        .order_by('-date', '-id')
-        .first()
-    )
-    last_solde = last_entry.solde if last_entry else Decimal('0.00')
+    def _generate():
+        # Dernier solde du compte
+        last_entry = (
+            GrandLivre.objects
+            .filter(numero_compte=instance.numero_compte)
+            .order_by('-date', '-id')
+            .first()
+        )
+        last_solde = last_entry.solde if last_entry else Decimal('0.00')
 
-    # Convertir les montants en Decimal pour éviter les erreurs
-    debit_ar = Decimal(str(instance.debit_ar))
-    credit_ar = Decimal(str(instance.credit_ar))
+        # Convertir les montants en Decimal pour éviter les erreurs
+        debit_ar = Decimal(str(instance.debit_ar))
+        credit_ar = Decimal(str(instance.credit_ar))
 
-    # ✅ SOLDE = ancien + débit - crédit
-    new_solde = last_solde + debit_ar - credit_ar
+        # ✅ SOLDE = ancien + débit - crédit
+        new_solde = last_solde + debit_ar - credit_ar
 
-    # ✅ DATE COMPTABLE = DATE DE LA FACTURE
-    GrandLivre.objects.create(
-        journal=instance,
-        numero_compte=instance.numero_compte,
-        # date=instance.created_at.date(), #changer 
-        date=instance.date,
-        numero_piece=instance.numero_piece,
-        libelle=instance.libelle,
-        debit=debit_ar,
-        credit=credit_ar,
-        solde=new_solde,
-        # description=instance.libelle,
-    )
+        # ✅ DATE COMPTABLE = DATE DE LA FACTURE
+        GrandLivre.objects.create(
+            journal=instance,
+            numero_compte=instance.numero_compte,
+            # date=instance.created_at.date(), #changer 
+            date=instance.date,
+            numero_piece=instance.numero_piece,
+            libelle=instance.libelle,
+            debit=debit_ar,
+            credit=credit_ar,
+            solde=new_solde,
+            # description=instance.libelle,
+        )
+    
+    # ⚡ Différer l'exécution jusqu'après le commit de la transaction
+    from django.db import transaction
+    transaction.on_commit(_generate)
 
 
 @receiver(post_save, sender=Journal)

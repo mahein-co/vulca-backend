@@ -14,7 +14,35 @@ Analyse le texte fourni et :
 5. N'invente pas de valeurs
 6. Ne renvoie que du JSON, sans ``` ni texte autour
 7. IMPORTANT : Pour les montants, remplace la VIRGULE par un POINT (ex: "190101,00" -> 190101.00). Ne renvoie JAMAIS d'entiers si le montant a des décimales.
-8 - Le numero Facture est obligatoire ("numero_facture": "string ou null (IMPORTANT: cherche N°, Facture N°, FACTURE, Invoice, Ref, REF, #)")
+
+8. ⚠️ CRITIQUE - NUMÉRO DE FACTURE (OBLIGATOIRE) :
+   Le numéro de facture est LE champ le plus important pour identifier un document.
+   
+   ⚠️ ATTENTION : Ne confonds PAS le numéro de facture avec :
+   - Le numéro de client (N°Client, Client ID)
+   - Le numéro de compte
+   - Le numéro de téléphone
+   
+   Cherche ACTIVEMENT dans TOUT le texte les patterns suivants :
+   - "NeFacure XXX" ou "N°Facture XXX" (ex: "NeFacure 0000636289")
+   - "Facture N°XXX" ou "FACTURE N°XXX"
+   - "N°XXX" ou "N° XXX" (ex: "N°001", "N° 2024-123")
+   - "Invoice #XXX" ou "Invoice: XXX"
+   - "Ref: XXX" ou "REF: XXX" ou "Référence: XXX"
+   - "Numéro: XXX" ou "NUMERO: XXX"
+   - "#XXX" près du mot FACTURE/INVOICE
+   - Tout numéro isolé sur la même ligne que "FACTURE" ou "INVOICE"
+   
+   Exemple ORANGE :
+   Texte: "N°Client NeFacure Date facture"
+          "1.00391850 0000636289 01/06/2020"
+   → "numero_facture": "0000636289" (PAS "1.00391850" qui est le N°Client)
+   
+   Le numéro peut contenir : chiffres, lettres, tirets, slashes
+   Exemples valides : "001", "0000636289", "FAC-2024-001", "2024/001", "INV-12345"
+   
+   TOUJOURS inclure "numero_facture" dans le JSON.
+   Si vraiment aucun numéro trouvé après recherche exhaustive, utilise null.
 """
 
 CLASSE_PROMPT_TEMPLATE = """

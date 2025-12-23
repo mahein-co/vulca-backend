@@ -78,9 +78,20 @@ def normalize_extracted_json(data: dict, ocr_text: str = "") -> dict:
             data[field] = normalize_phone(data[field])
     
     # 2. Normaliser les dates vers ISO
-    for field in ['date_facture', 'date_echeance', 'date_emission', 'date_document', 'date']:
+    date_fields = [
+        'date_facture', 'date_echeance', 'date_emission', 'date_document', 'date',
+        'date_paie', 'date_bon', 'date_operation', 'date_valeur', 'date_transaction'
+    ]
+    for field in date_fields:
         if field in data and data[field]:
             data[field] = normalize_date_to_iso(data[field])
+
+    # S'assurer qu'il y a un champ 'date' générique
+    if 'date' not in data or not data.get('date'):
+        for k in date_fields:
+            if k != 'date' and data.get(k):
+                data['date'] = data[k]
+                break
     
     # 3. Convertir devise "Ar" ou "Ariary" → "MGA"
     if 'devise' in data:
@@ -205,16 +216,29 @@ def file_source_list_create(request):
         else:
             piece_type = "Relevé bancaire"
     elif "bon" in type_doc and "caisse" in type_doc:
-        piece_type = "Bon de caisse"
+        piece_type = "Bon d'achat"
     elif "fiche" in type_doc and "paie" in type_doc:
         piece_type = "Fiche de paie"
 
     # Extraire référence
     ref_file = request.data.get("ref_file") or extracted_json.get("numero_facture") or extracted_json.get("reference")
     
+    # Extraire date en donnant la priorité aux champs spécifiques puis génériques
+    date_keys = [
+        "date", "date_facture", "date_emission", "date_document", 
+        "date_paie", "date_bon", "date_operation", "date_valeur", "date_transaction"
+    ]
+    date_val = request.data.get("date")
+    if not date_val:
+        for k in date_keys:
+            if extracted_json.get(k):
+                date_val = extracted_json.get(k)
+                break
+
     print(f"\n📋 RÉSULTAT:")
     print(f"   piece_type = '{piece_type}'")
     print(f"   ref_file = '{ref_file}'")
+    print(f"   date = '{date_val}'")
 
     data_to_save = {
         "file": file,
@@ -222,6 +246,8 @@ def file_source_list_create(request):
         "description": description,
         "piece_type": piece_type,
         "ref_file": ref_file,
+        "date": date_val,
+        "is_ocr_processed": True,
         "hash_ocr": file_hash
     }
 
@@ -229,7 +255,8 @@ def file_source_list_create(request):
     if serializer.is_valid():
         saved_file = serializer.save()
 
-        # Génération automatique du journal
+        # Génération automatique du journal (SYNCHRONE)
+        # L'utilisateur veut que le chargement reste visible jusqu'à la fin
         try:
             from compta.views import generate_journal_view
             from rest_framework.test import APIRequestFactory
@@ -270,15 +297,23 @@ def file_source_list_create(request):
             
             if response.status_code in [200, 201]:
                 print("✅ Journal généré avec succès")
+                print("   ⚡ Les signals Django ont généré automatiquement :")
+                print("      → GrandLivre (post_save Journal)")
+                print("      → Balance (post_save GrandLivre)")
+                print("      → Bilan + CompteResultat (post_save Balance)")
             else:
                 print(f"❌ Échec génération journal: {response.data}")
 
         except Exception as e:
             print(f"❌ Erreur génération journal: {e}")
+            import traceback
+            print(traceback.format_exc())
 
+        # ✅ RETOUR APRÈS GÉNÉRATION COMPLÈTE
+        # Le chargement reste visible jusqu'à ce que tout soit terminé
         return Response({
             "status": "success",
-            "message": "Document sauvegardé.",
+            "message": "Document et journal enregistrés avec succès.",
             "file_source": serializer.data
         }, status=201)
     else:
@@ -322,6 +357,22 @@ def form_source_list_create(request):
 
         data = dict(request.data) 
         data["description"] = description
+        
+        # Extraire date si manquante
+        date_val = data.get("date")
+        
+        if not date_val and isinstance(description_json, dict):
+             date_keys = [
+                "date_facture", "date_emission", "date_document", 
+                "date_paie", "date_bon", "date_operation", "date_valeur", "date_transaction", "date"
+             ]
+             for k in date_keys:
+                 if description_json.get(k):
+                     date_val = description_json.get(k)
+                     break
+        
+        if date_val:
+            data["date"] = normalize_date_to_iso(date_val)
 
         serializer = FormSourceSerializer(data=data)
         if serializer.is_valid():
@@ -434,6 +485,50 @@ def extract_content_file_view(request):
     else:
         extracted_json["type_document"] = type_document
 
+    # ⚠️ FALLBACK : Extraction du numéro de facture si l'IA ne l'a pas trouvé
+    if not extracted_json.get("numero_facture"):
+        print("⚠️ Numéro de facture manquant, tentative d'extraction par regex...")
+        
+        # Patterns de recherche pour numéro de facture (PAR ORDRE DE PRIORITÉ)
+        # Les patterns plus spécifiques en premier pour éviter les faux positifs
+        patterns = [
+            # Patterns très spécifiques (haute priorité)
+            r'(?:N[°o]|Num[ée]ro|Number)[\s:]*(?:Facture|Invoice|Bill)[\s:]*(\w+[-/]?\w+)',  # N° Facture: XXX
+            r'(?:Facture|Invoice|Bill)[\s:]*(?:N[°o]|Num[ée]ro|#)[\s:]*(\w+[-/]?\w+)',  # Facture N°: XXX
+            r'(?:R[ée]f[ée]rence|Ref)[\s:]*(?:Facture|Invoice)?[\s:]*(\w+[-/]?\w+)',  # Référence: XXX
+            
+            # Patterns pour formats longs (numéros de 6+ chiffres)
+            r'(?:NeFacure|N[°o]Facture|NumFacture)[\s:]*(\d{6,})',  # NeFacure 0000636289
+            r'(?:^|\s)(\d{6,})(?=\s|$)',  # Numéro isolé de 6+ chiffres
+            
+            # Patterns standards
+            r'FACTURE[\s:]+N[°o][\s:]*(\S+)',  # FACTURE N°001
+            r'Invoice[\s:]*[#:][\s:]*(\S+)',  # Invoice #001
+            r'NUM[ÉE]RO[\s:]+(\S+)',  # NUMÉRO: 001
+            
+            # Patterns génériques (basse priorité - peuvent capturer des faux positifs)
+            r'N[°o][\s:]*(\d{4,})',  # N° suivi de 4+ chiffres minimum
+            r'#(\d{3,})',  # # suivi de 3+ chiffres minimum
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE | re.MULTILINE)
+            if match:
+                numero = match.group(1).strip()
+                # Validation : ignorer si c'est juste "1" ou trop court
+                if len(numero) >= 3 or (len(numero) >= 1 and not numero.isdigit()):
+                    extracted_json["numero_facture"] = numero
+                    print(f"✅ Numéro de facture extrait par regex : {numero}")
+                    break
+        
+        if not extracted_json.get("numero_facture"):
+            print("❌ Aucun numéro de facture trouvé, même avec regex")
+            # Générer un numéro temporaire basé sur la date
+            from datetime import datetime
+            temp_num = f"TEMP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            extracted_json["numero_facture"] = temp_num
+            print(f"⚠️ Numéro temporaire généré : {temp_num}")
+
     print("\n✅ JSON FINAL NORMALISÉ :")
     print("=" * 80)
     print(json.dumps(extracted_json, indent=2, ensure_ascii=False))
@@ -446,3 +541,63 @@ def extract_content_file_view(request):
         "ocr_brut": content,
         "extracted_json": extracted_json
     }, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def all_pieces_list_view(request):
+    """
+    Retourne la liste combinée de FileSource et FormSource
+    pour affichage dans GestionPiecesBoard
+    """
+    # Récupérer tous les FileSource
+    file_sources = FileSource.objects.all().order_by('-uploaded_at')
+    # Récupérer tous les FormSource
+    form_sources = FormSource.objects.all().order_by('-created_at')
+    
+    pieces = []
+    
+    # Ajouter FileSource
+    for fs in file_sources:
+        ptype = fs.piece_type or "Autres"
+        if ptype == "Bon de caisse":
+            ptype = "Bon d'achat"
+            
+        pieces.append({
+            "id": f"file_{fs.id}",
+            "source_type": "file",
+            "source_label": "Via OCR",
+            "piece_type": ptype,
+            "nom": fs.file_name or "Sans nom",
+            "description": fs.description or "",
+            "ref": fs.ref_file or "",
+            "date": fs.date.isoformat() if fs.date else None,
+            "created_at": fs.uploaded_at.isoformat() if fs.uploaded_at else None,
+        })
+    
+    # Ajouter FormSource
+    for fs in form_sources:
+        ptype = fs.piece_type or "Autres"
+        if ptype == "Bon de caisse":
+            ptype = "Bon d'achat"
+
+        pieces.append({
+            "id": f"form_{fs.id}",
+            "source_type": "form",
+            "source_label": "Saisie manuelle",
+            "piece_type": ptype,
+            "nom": fs.ref_file or f"Document {fs.id}",
+            "description": fs.description or "",
+            "ref": fs.ref_file or "",
+            "date": fs.date.isoformat() if fs.date else None,
+            "created_at": fs.created_at.isoformat() if fs.created_at else None,
+        })
+    
+    # Trier par date (plus récent en premier)
+    pieces.sort(key=lambda x: x.get('date') or x.get('created_at') or '', reverse=True)
+    
+    return Response({
+        "status": "success",
+        "count": len(pieces),
+        "pieces": pieces
+    }, status=200)

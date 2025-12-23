@@ -14,6 +14,7 @@ class FileSource(models.Model):
     piece_type = models.CharField(max_length=225, null=True, blank=True, default='Autres')
     ref_file = models.CharField(max_length=225, null=True, blank=True)
     hash_ocr = models.CharField(max_length=225, null=True, blank=True)
+    date = models.DateField(db_index=True, null=True, blank=True)
     is_ocr_processed = models.BooleanField(default=False)
     description = models.TextField(blank=True, null=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
@@ -40,10 +41,10 @@ class FormSource(models.Model):
         blank=True,
         related_name='form_sources'
     )
-    # piece_type = models.CharField(max_length=225, null=True, blank=True, default='Autres')
     piece_type = models.CharField(max_length=225, null=True, blank=True, default='Autres')
     description = models.TextField(blank=True, null=True)
     ref_file = models.CharField(max_length=225, null=True, blank=True)
+    date = models.DateField(db_index=True, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     

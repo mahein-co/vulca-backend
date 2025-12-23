@@ -176,5 +176,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o')
 
+# Configuration des fichiers médias (Uploads)
+# MEDIA_URL = '/media/'
+# MEDIA_ROOT = BASE_DIR / 'media'
+
 
 

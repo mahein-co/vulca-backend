@@ -91,3 +91,6 @@ yarn.lock
 .tmp/
 *.bak
 *.backup
+
+/staticfiles/
+

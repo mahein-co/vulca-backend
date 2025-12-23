@@ -195,6 +195,7 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
     - Si le document contient "facture" ET un fournisseur/nom_fournisseur → type_document = "ACHAT"
     - Si le document contient "banque", "virement", "relevé bancaire" → type_document = "BANQUE"
     - Si le document contient "caisse", "espèces", "cash" → type_document = "CAISSE"
+    - Si le document contient "fiche de paie", "bulletin de salaire", "payslip", "employee_name", "salaire_brut" → type_document = "OD"
     - Si le document contient "opération diverse", "OD" → type_document = "OD"
     - Si le document contient "à-nouveau", "AN", "report" → type_document = "AN"
     - Par défaut, si c'est une facture émise par l'entreprise → type_document = "VENTE"
@@ -213,8 +214,20 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
     - ACHAT : Débit 602/607 (Achats), Débit 4456 (TVA déductible si applicable), Crédit 401 (Fournisseurs)
     - BANQUE : Utilise 512 (Banques) avec contrepartie appropriée (411 pour encaissement client, 401 pour paiement fournisseur)
     - CAISSE : Utilise 531 (Caisse) avec contrepartie appropriée
+    - FICHE DE PAIE (Salaire) : 
+      * Débit 641 (Rémunérations du personnel) = salaire_brut
+      * Débit 645 (Charges sociales patronales) = total_cotisation_patronale
+      * Crédit 421 (Personnel - Rémunérations dues) = net_a_payer
+      * Crédit 431 (Sécurité sociale) = SOMME(total_cotisation_salariale + total_cotisation_patronale)  <-- TRES IMPORTANT : ADDITIONNER LES DEUX MONTANTS
+      * Crédit 442 (État - Impôts et taxes) = retenue_source (IRSA)
+      * IMPORTANT: Total Débit = salaire_brut + cotisation_patronale
+      * IMPORTANT: Total Crédit = net_a_payer + (cotisation_salariale + cotisation_patronale) + retenue_source
+      * Vérifie bien que: salaire_brut + cotisation_patronale = net_a_payer + cotisation_salariale + cotisation_patronale + retenue_source
+    
     
     FORMAT DE SORTIE OBLIGATOIRE (JSON pur, sans markdown) :
+    
+    EXEMPLE VENTE:
     {{
         "type_document": "VENTE",
         "journal": [
@@ -239,10 +252,50 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
         ]
     }}
     
+    EXEMPLE FICHE DE PAIE (salaire_brut=400000, cotisation_salariale=4000, cotisation_patronale=52000, retenue_source=2300, net_a_payer=393700):
+    {{
+        "type_document": "OD",
+        "journal": [
+            {{
+                "compte": "641",
+                "libelle": "Rémunérations du personnel",
+                "debit": 400000,
+                "credit": 0
+            }},
+            {{
+                "compte": "645",
+                "libelle": "Charges sociales patronales",
+                "debit": 52000,
+                "credit": 0
+            }},
+            {{
+                "compte": "421",
+                "libelle": "Personnel - Rémunérations dues",
+                "debit": 0,
+                "credit": 393700
+            }},
+            {{
+                "compte": "431",
+                "libelle": "Sécurité sociale",
+                "debit": 0,
+                "credit": 56000
+            }},
+            {{
+                "compte": "442",
+                "libelle": "État - Impôts et taxes",
+                "debit": 0,
+                "credit": 2300
+            }}
+        ]
+    }}
+    Note: Total Débit = 400000 + 52000 = 452000, Total Crédit = 393700 + 56000 + 2300 = 452000 ✓
+    
     IMPORTANT : 
     - Retourne UNIQUEMENT le JSON, sans texte explicatif ni balises markdown
     - Le champ "type_document" est OBLIGATOIRE et ne doit JAMAIS être vide
     - Utilise les montants exacts du document (montant_ttc, montant_ht, montant_tva)
+    - Pour les fiches de paie, VÉRIFIE TOUJOURS que Total Débit = Total Crédit
+    - NE GÉNÈRE PAS de ligne d'écriture si le montant est 0 (par exemple, si retenue_source = 0, ne pas créer de ligne pour le compte 442)
     """
 
     response = client.chat.completions.create(
@@ -293,7 +346,16 @@ def generate_journal_from_pcg(document_json):
     from datetime import date as dt_date
     
     # ✅ EXTRACTION DES DONNÉES DE BASE
-    numero_piece = document_json.get("numero_facture") or document_json.get("numero_piece") or document_json.get("reference") or "N/A"
+    numero_piece = document_json.get("numero_facture") or document_json.get("numero_piece") or document_json.get("reference")
+    
+    # Check nested description_json for payslip_number if not found
+    if not numero_piece and "description_json" in document_json:
+        desc = document_json["description_json"]
+        if isinstance(desc, dict):
+            numero_piece = desc.get("payslip_number") or desc.get("numero_facture") or desc.get("reference")
+            
+    if not numero_piece:
+        numero_piece = "N/A"
     date_facture_raw = document_json.get("date") or document_json.get("date_facture") or str(dt_date.today())
     
     # ✅ CONVERSION DE DATE : "5 septembre 2024" → "2024-09-05"
@@ -367,6 +429,111 @@ def process_journal_generation(document_json, file_source=None, form_source=None
     print(f"   Input data keys: {list(document_json.keys())}")
     print()
     
+    # ===================================================
+    # 🏦 TRAITEMENT SPÉCIAL POUR RELEVÉ BANCAIRE
+    # ===================================================
+    piece_type = document_json.get("piece_type", "")
+    description_json = document_json.get("description_json", {})
+    
+    if piece_type == "Relevé bancaire" and "transactions_details" in description_json:
+        print("   📋 Détection: Relevé bancaire avec transactions multiples")
+        transactions = description_json.get("transactions_details", [])
+        
+        if not transactions:
+            raise ValidationError("Aucune transaction dans le relevé bancaire")
+        
+        print(f"   📊 Traitement de {len(transactions)} transactions")
+        
+        all_saved_lines = []
+        
+        # Traiter chaque transaction séparément
+        for idx, transaction in enumerate(transactions, start=1):
+            print(f"\n   💳 Transaction {idx}/{len(transactions)}")
+            
+            # Créer un document JSON pour cette transaction
+            transaction_doc = {
+                "numero_facture": transaction.get("reference") or f"BANK-{idx}",
+                "reference": transaction.get("reference") or f"BANK-{idx}",
+                "date": transaction.get("date"),
+                "objet_description": transaction.get("description", ""),
+                "banque": description_json.get("bank_name", ""),
+                "type_document": "BANQUE",
+                "montant_ttc": transaction.get("debit", 0) or transaction.get("credit", 0),
+                "debit": transaction.get("debit", 0),
+                "credit": transaction.get("credit", 0),
+            }
+            
+            # Générer le journal pour cette transaction
+            try:
+                ai_result = generate_journal_from_pcg(transaction_doc)
+            except Exception as e:
+                print(f"      ❌ Erreur transaction {idx}: {str(e)}")
+                continue
+            
+            type_journal = ai_result.get("type_journal")
+            numero_piece = ai_result.get("numero_piece")
+            date_val = ai_result.get("date")
+            ecritures = ai_result.get("ecritures", [])
+            
+            if not ecritures:
+                print(f"      ⚠️ Aucune écriture générée pour transaction {idx}")
+                continue
+            
+            # Vérifier l'équilibre
+            total_debit = sum(Decimal(str(e["debit_ar"])) for e in ecritures)
+            total_credit = sum(Decimal(str(e["credit_ar"])) for e in ecritures)
+            
+            if total_debit != total_credit:
+                print(f"      ⚠️ Transaction {idx} non équilibrée (D:{total_debit} / C:{total_credit})")
+                continue
+            
+            # Sauvegarder les écritures
+            for line in ecritures:
+                numero_compte = line["numero_compte"]
+                libelle = get_pcg_label(numero_compte)
+                if not libelle:
+                    libelle = line.get("libelle", f"Compte {numero_compte}")
+                
+                entry = Journal(
+                    date=date_val,
+                    numero_piece=numero_piece,
+                    type_journal=type_journal,
+                    numero_compte=numero_compte,
+                    libelle=libelle,
+                    debit_ar=line["debit_ar"],
+                    credit_ar=line["credit_ar"],
+                )
+                
+                entry.clean()
+                entry.save()
+                
+                if form_source:
+                    form_source.journal = entry
+                    form_source.save()
+                
+                all_saved_lines.append({
+                    "id": entry.id,
+                    "compte": entry.numero_compte,
+                    "debit": float(entry.debit_ar),
+                    "credit": float(entry.credit_ar),
+                    "libelle": entry.libelle
+                })
+                
+                print(f"      ✅ {numero_compte} | D:{line['debit_ar']} | C:{line['credit_ar']}")
+        
+        print(f"\n   ✅ {len(all_saved_lines)} écritures générées pour {len(transactions)} transactions")
+        
+        return {
+            "message": "Journal enregistré avec succès",
+            "type_journal": "BANQUE",
+            "numero_piece": "RELEVE-BANCAIRE",
+            "date": description_json.get("periode_date_end"),
+            "lignes": all_saved_lines
+        }
+    
+    # ===================================================
+    # 📄 TRAITEMENT NORMAL POUR AUTRES DOCUMENTS
+    # ===================================================
     try:
         # ✅ GÉNÉRATION AUTOMATIQUE PAR RÈGLES PCG (pas d'IA pour les comptes)
         ai_result = generate_journal_from_pcg(document_json)
@@ -2649,32 +2816,65 @@ def marge_operationnelle_view(request):
         elif end_date:
             filters["date__lte"] = end_date
 
-        # Utiliser la dernière date disponible dans la période pour CompteResultat
-        latest_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
+        # CA = Comptes 70, 71, 72 (PRODUITS uniquement)
+        chiffre_affaire = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        chiffre_affaire += (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="71", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        chiffre_affaire += (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="72", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
 
-        chiffre_affaire = Decimal("0.00")
+        # Produits opérationnels = 70 + 71 + 72 + 74 + 75 (PRODUITS uniquement)
+        produits_operationnels = chiffre_affaire  # 70+71+72 déjà calculé
+        produits_operationnels += (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="74", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        produits_operationnels += (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="75", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Charges d'exploitation = 60 + 61 + 62 + 63 + 64 + 65 (CHARGES uniquement)
         charges_exploitation = Decimal("0.00")
-        res_op = Decimal("0.00")
-        
-        if latest_date:
-            agg = CompteResultat.objects.filter(date=latest_date).aggregate(
-                # CA = Comptes 70, 71, 72
-                ca=Sum(Case(When(numero_compte__regex=r'^(70|71|72)', then='montant_ar'), default=0, output_field=DecimalField())),
-                # Résultat Opérationnel = (70-75) - (60-65)
-                prod_op=Sum(Case(When(numero_compte__regex=r'^(70|71|72|74|75)', then='montant_ar'), default=0, output_field=DecimalField())),
-                char_op=Sum(Case(When(numero_compte__regex=r'^(60|61|62|63|64|65)', then='montant_ar'), default=0, output_field=DecimalField()))
+        for compte_prefix in ["60", "61", "62", "63", "64", "65"]:
+            charges_exploitation += (
+                CompteResultat.objects
+                .filter(nature="CHARGE", numero_compte__startswith=compte_prefix, **filters)
+                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
             )
-            chiffre_affaire = agg["ca"] or Decimal("0.00")
-            charges_exploitation = agg["char_op"] or Decimal("0.00")
-            res_op = (agg["prod_op"] or Decimal("0.00")) - charges_exploitation
 
-        # Éviter les variations aberrantes
+        # Résultat opérationnel = Produits opérationnels - Charges d'exploitation
+        res_op = produits_operationnels - charges_exploitation
+
+        # Calcul de la marge opérationnelle : (Résultat opérationnel / CA) * 100
+        # On évite d'afficher des valeurs aberrantes si les charges écrasent totalement le CA.
+        marge_operationnelle = None
         if chiffre_affaire != 0 and abs(chiffre_affaire) >= 1000:
-            marge_operationnelle = (res_op / chiffre_affaire) * 100
-            if marge_operationnelle > 1000: marge_operationnelle = 1000
-            elif marge_operationnelle < -1000: marge_operationnelle = -1000
-        else:
-            marge_operationnelle = None
+            raw_marge = (res_op / chiffre_affaire) * 100
+
+            # Si l'écart est extrême (charges >> CA), on retourne None pour signaler un ratio non pertinent
+            if abs(res_op) > abs(chiffre_affaire) * 20:
+                marge_operationnelle = None
+            else:
+                # Plafonner les valeurs aberrantes
+                if raw_marge > 1000:
+                    marge_operationnelle = 1000
+                elif raw_marge < -1000:
+                    marge_operationnelle = -1000
+                else:
+                    marge_operationnelle = raw_marge
 
         return {
             "chiffre_affaire": chiffre_affaire,
@@ -2963,33 +3163,64 @@ def bilan_kpis_with_variations_view(request):
     return Response(response_data)
 
 
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def get_available_years_view(request):
-    """Retourne les années disponibles dans le journal"""
+    """
+    Retourne la liste des années disponibles dans les écritures comptables,
+    le Bilan et le Compte de Résultat.
+    Triées par ordre décroissant (plus récent en premier).
+    """
     from django.db.models.functions import ExtractYear
+    from datetime import date
     
-    years = (
+    # 1. Années du Journal des écritures
+    journal_years = set(
         Journal.objects
         .annotate(year=ExtractYear('date'))
         .values_list('year', flat=True)
         .distinct()
-        .order_by('-year')
     )
     
-    return Response(list(years))
+    # 2. Années du Bilan
+    bilan_years = set(
+        Bilan.objects
+        .annotate(year=ExtractYear('date'))
+        .values_list('year', flat=True)
+        .distinct()
+    )
+
+    # 3. Années du Compte de Résultat
+    cr_years = set(
+        CompteResultat.objects
+        .annotate(year=ExtractYear('date'))
+        .values_list('year', flat=True)
+        .distinct()
+    )
+
+    # Fusion des ensembles pour éviter les doublons
+    all_years_set = journal_years | bilan_years | cr_years
+    
+    # Filtrer les None éventuels, convertir en liste et trier
+    available_years = sorted([y for y in all_years_set if y is not None], reverse=True)
+    
+    # Si vide, retourner l'année courante par défaut
+    if not available_years:
+        available_years = [date.today().year]
+        
+    return Response(available_years)
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def tva_view(request):
     """
-    Calcul de la TVA (Collectée, Déductible, Nette) avec variation par rapport à la période précédente
+    Calcul de la TVA (TVA collectée, TVA déductible, TVA nette) avec variation par rapport à la période précédente
     GET /api/tva/?date_start=2025-01-01&date_end=2025-12-31
     """
     from datetime import datetime
     from dateutil.relativedelta import relativedelta
-    from .serializers import TVASerializer
 
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
@@ -3000,33 +3231,21 @@ def tva_view(request):
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         
-        # TVA Collectée (compte 4457) = Crédit - Débit
-        tva_collectee_credit = (
-            GrandLivre.objects
+        # TVA collectée (compte 4457) - somme des crédits
+        tva_collectee = (
+            Journal.objects
             .filter(numero_compte__startswith="4457", **filters)
-            .aggregate(total=Sum("credit"))["total"] or Decimal("0.00")
+            .aggregate(total=Sum("credit_ar"))["total"] or Decimal("0.00")
         )
-        tva_collectee_debit = (
-            GrandLivre.objects
-            .filter(numero_compte__startswith="4457", **filters)
-            .aggregate(total=Sum("debit"))["total"] or Decimal("0.00")
-        )
-        tva_collectee = tva_collectee_credit - tva_collectee_debit
         
-        # TVA Déductible (compte 4456) = Débit - Crédit
-        tva_deductible_debit = (
-            GrandLivre.objects
+        # TVA déductible (compte 4456) - somme des débits
+        tva_deductible = (
+            Journal.objects
             .filter(numero_compte__startswith="4456", **filters)
-            .aggregate(total=Sum("debit"))["total"] or Decimal("0.00")
+            .aggregate(total=Sum("debit_ar"))["total"] or Decimal("0.00")
         )
-        tva_deductible_credit = (
-            GrandLivre.objects
-            .filter(numero_compte__startswith="4456", **filters)
-            .aggregate(total=Sum("credit"))["total"] or Decimal("0.00")
-        )
-        tva_deductible = tva_deductible_debit - tva_deductible_credit
         
-        # TVA Nette = TVA Collectée - TVA Déductible
+        # TVA nette = TVA collectée - TVA déductible
         tva_nette = tva_collectee - tva_deductible
         
         return {
@@ -3068,28 +3287,26 @@ def tva_view(request):
             # Calculer TVA période précédente
             previous_tva = calculate_tva(previous_start, previous_end)
             
-            # Calculer variation en pourcentage pour TVA Collectée
-            if previous_tva["tva_collectee"] != 0 and abs(previous_tva["tva_collectee"]) > 50000:
+            # Calculer variations en pourcentage
+            # TVA collectée
+            if previous_tva["tva_collectee"] != 0 and abs(previous_tva["tva_collectee"]) > 10000:
                 variation_collectee = ((current_tva["tva_collectee"] - previous_tva["tva_collectee"]) / abs(previous_tva["tva_collectee"])) * 100
-                # Plafonner la variation à ±1000%
                 if variation_collectee > 1000:
                     variation_collectee = 1000
                 elif variation_collectee < -1000:
                     variation_collectee = -1000
             
-            # Calculer variation en pourcentage pour TVA Déductible
-            if previous_tva["tva_deductible"] != 0 and abs(previous_tva["tva_deductible"]) > 50000:
+            # TVA déductible
+            if previous_tva["tva_deductible"] != 0 and abs(previous_tva["tva_deductible"]) > 10000:
                 variation_deductible = ((current_tva["tva_deductible"] - previous_tva["tva_deductible"]) / abs(previous_tva["tva_deductible"])) * 100
-                # Plafonner la variation à ±1000%
                 if variation_deductible > 1000:
                     variation_deductible = 1000
                 elif variation_deductible < -1000:
                     variation_deductible = -1000
             
-            # Calculer variation en pourcentage pour TVA Nette
-            if previous_tva["tva_nette"] != 0 and abs(previous_tva["tva_nette"]) > 50000:
+            # TVA nette
+            if previous_tva["tva_nette"] != 0 and abs(previous_tva["tva_nette"]) > 10000:
                 variation_nette = ((current_tva["tva_nette"] - previous_tva["tva_nette"]) / abs(previous_tva["tva_nette"])) * 100
-                # Plafonner la variation à ±1000%
                 if variation_nette > 1000:
                     variation_nette = 1000
                 elif variation_nette < -1000:
@@ -3097,15 +3314,12 @@ def tva_view(request):
         except:
             pass
 
-    response_data = {
+    return Response({
         "tva_collectee": current_tva["tva_collectee"],
         "tva_deductible": current_tva["tva_deductible"],
         "tva_nette": current_tva["tva_nette"],
         "variation_collectee": variation_collectee,
         "variation_deductible": variation_deductible,
         "variation_nette": variation_nette
-    }
-    
-    serializer = TVASerializer(response_data)
-    return Response(serializer.data)
+    })
 

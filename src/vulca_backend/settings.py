@@ -34,6 +34,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -91,7 +92,7 @@ DATABASES['default']['OPTIONS'] = {
 }
 
 # Augmenter aussi le timeout des sessions
-DATABASES['default']['CONN_MAX_AGE'] = 0
+DATABASES['default']['CONN_MAX_AGE'] = 600
 # Modèle User personnalisé
 AUTH_USER_MODEL = 'app.User'
 AUTHENTICATION_BACKENDS = ['django.contrib.auth.backends.ModelBackend']
@@ -160,6 +161,12 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'  # ← Ajouter cette ligne
+
+# Pour le développement uniquement
+STATICFILES_DIRS = [
+    BASE_DIR / 'static',
+]
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
@@ -168,4 +175,6 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # OPENAI Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o')
+
+
 

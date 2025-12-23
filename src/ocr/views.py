@@ -573,6 +573,7 @@ def all_pieces_list_view(request):
             "ref": fs.ref_file or "",
             "date": fs.date.isoformat() if fs.date else None,
             "created_at": fs.uploaded_at.isoformat() if fs.uploaded_at else None,
+            # "file_url": request.build_absolute_uri(fs.file.url) if fs.file else None,
         })
     
     # Ajouter FormSource

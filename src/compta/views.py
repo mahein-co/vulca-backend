@@ -24,7 +24,7 @@ from compta.serializers import (
     CafSerializer, LeverageSerializer, AnnuiteCafSerializer, MargeNetteSerializer,
     DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer,
     CurrentRatioSerializer, QuickRatioSerializer, GearingSerializer, RotationStockSerializer,
-    MargeOperationnelleSerializer, MargeBruteSerializer
+    MargeOperationnelleSerializer, MargeBruteSerializer, DelaisClientsSerializer, DelaisFournisseursSerializer
 )
 
 from vulca_backend import settings
@@ -1011,6 +1011,742 @@ def marge_brute_view(request):
         "marge_brute": current_marge,
         "variation": variation
     })
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def marge_nette_view(request):
+    """
+    Calcul de la Marge Nette avec variation par rapport à la période précédente
+    Formule : Marge Nette (%) = (Résultat Net / Chiffre d'Affaires) × 100
+    GET /api/marge-nette/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_marge_nette(start_date, end_date):
+        """Fonction helper pour calculer la Marge Nette pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+        
+        # Calcul du Chiffre d'Affaires (compte 70)
+        ca = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        # Calcul du Résultat Net (Produits classe 7 - Charges classe 6)
+        produits = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="7", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        charges = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="6", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        resultat_net = produits - charges
+        
+        # Calcul de la marge nette en pourcentage
+        if ca != 0 and abs(ca) > 1000:  # Éviter division par zéro et CA trop faible
+            marge_nette = (resultat_net / ca) * 100
+        else:
+            marge_nette = None
+        
+        return ca, resultat_net, marge_nette
+
+    # Calcul période courante
+    current_ca, current_rn, current_marge = calculate_marge_nette(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end and current_marge is not None:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                prev_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                prev_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                prev_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                prev_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                prev_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                prev_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                prev_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                prev_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            prev_ca, prev_rn, prev_marge = calculate_marge_nette(prev_start, prev_end)
+            
+            # Calculer variation en points de pourcentage
+            if prev_marge is not None:
+                variation = current_marge - prev_marge
+                # Plafonner la variation à ±100 points de pourcentage
+                if variation > 100:
+                    variation = 100
+                elif variation < -100:
+                    variation = -100
+        except:
+            pass
+
+    return Response({
+        "resultat_net": current_rn,
+        "chiffre_affaire": current_ca,
+        "marge_nette": current_marge,
+        "variation": variation
+    })
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def tresorerie_view(request):
+    """
+    Calcul de la Trésorerie avec variation par rapport à la période précédente
+    Formule : Trésorerie = Sum(montant_ar) WHERE numero_compte LIKE '5%' AND type_bilan='ACTIF'
+    GET /api/tresorerie/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_tresorerie(start_date, end_date):
+        """Fonction helper pour calculer la Trésorerie pour une période donnée"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+        
+        # Calcul de la trésorerie depuis le Bilan (comptes de classe 5 - Actif)
+        # Classe 5 = Comptes financiers (Caisse, Banques, etc.)
+        tresorerie_total = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", numero_compte__startswith="5", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        # Détail par type de compte
+        caisse = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", numero_compte__startswith="57", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        banques = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", numero_compte__regex=r'^5[0-6]', **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        return tresorerie_total, caisse, banques
+
+    # Calcul période courante
+    current_tresorerie, current_caisse, current_banques = calculate_tresorerie(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                prev_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                prev_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                prev_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                prev_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                prev_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                prev_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                prev_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                prev_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            prev_tresorerie, _, _ = calculate_tresorerie(prev_start, prev_end)
+            
+            # Calculer variation en pourcentage
+            if prev_tresorerie != 0 and abs(prev_tresorerie) > 1000:
+                variation = ((current_tresorerie - prev_tresorerie) / abs(prev_tresorerie)) * 100
+                # Plafonner la variation à ±1000%
+                if variation > 1000:
+                    variation = 1000
+                elif variation < -1000:
+                    variation = -1000
+            else:
+                variation = None
+        except:
+            pass
+
+    return Response({
+        "tresorerie": current_tresorerie,
+        "variation": variation,
+        "caisse": current_caisse,
+        "banques": current_banques
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def evolution_tresorerie_view(request):
+    """
+    Évolution de la trésorerie sur plusieurs mois
+    Par défaut : 6 derniers mois
+    Supporte le filtrage par date (date_start, date_end)
+    GET /api/evolution-tresorerie/?date_start=2024-01-01&date_end=2024-12-31
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum
+    
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    
+    # Si pas de dates fournies, utiliser les 6 derniers mois
+    if not date_start or not date_end:
+        # Récupérer la date max dans le Bilan
+        max_date = Bilan.objects.aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)  # 6 mois au total
+        else:
+            # Fallback si pas de données
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+    
+    # Générer les mois entre start et end
+    evolution_data = []
+    current_date = start_date_obj.replace(day=1)  # Premier jour du mois
+    
+    while current_date <= end_date_obj:
+        # Calculer le dernier jour du mois
+        if current_date.month == 12:
+            next_month = current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            next_month = current_date.replace(month=current_date.month + 1)
+        
+        last_day_of_month = next_month - timedelta(days=1)
+        
+        # Calculer la trésorerie pour ce mois
+        tresorerie_mois = (
+            Bilan.objects
+            .filter(
+                type_bilan="ACTIF",
+                numero_compte__startswith="5",
+                date__range=[current_date, last_day_of_month]
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        # Formater le mois pour l'affichage
+        mois_label = current_date.strftime("%b %Y")  # Ex: "Jan 2025"
+        
+        evolution_data.append({
+            "mois": mois_label,
+            "montant": float(tresorerie_mois),
+            "date": current_date.strftime("%Y-%m-%d")
+        })
+        
+        # Passer au mois suivant
+        current_date = next_month
+    
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def evolution_marges_view(request):
+    """
+    Évolution de la marge brute et marge nette sur plusieurs mois
+    Par défaut : 6 derniers mois
+    Supporte le filtrage par date (date_start, date_end)
+    GET /api/evolution-marges/?date_start=2024-01-01&date_end=2024-12-31
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum
+    
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    
+    # Si pas de dates fournies, utiliser les 6 derniers mois
+    if not date_start or not date_end:
+        # Récupérer la date max dans CompteResultat
+        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)  # 6 mois au total
+        else:
+            # Fallback si pas de données
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+    
+    # Générer les mois entre start et end
+    evolution_data = []
+    current_date = start_date_obj.replace(day=1)  # Premier jour du mois
+    
+    while current_date <= end_date_obj:
+        # Calculer le dernier jour du mois
+        if current_date.month == 12:
+            next_month = current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            next_month = current_date.replace(month=current_date.month + 1)
+        
+        last_day_of_month = next_month - timedelta(days=1)
+        
+        # Calculer CA pour ce mois
+        ca_mois = (
+            CompteResultat.objects
+            .filter(
+                nature="PRODUIT",
+                numero_compte__startswith="70",
+                date__range=[current_date, last_day_of_month]
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        # Calculer Coût d'achat (compte 60) pour marge brute
+        cout_achat = (
+            CompteResultat.objects
+            .filter(
+                nature="CHARGE",
+                numero_compte__startswith="60",
+                date__range=[current_date, last_day_of_month]
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        # Calculer Résultat Net pour marge nette
+        produits = (
+            CompteResultat.objects
+            .filter(
+                nature="PRODUIT",
+                numero_compte__startswith="7",
+                date__range=[current_date, last_day_of_month]
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        charges = (
+            CompteResultat.objects
+            .filter(
+                nature="CHARGE",
+                numero_compte__startswith="6",
+                date__range=[current_date, last_day_of_month]
+            )
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+        
+        resultat_net = produits - charges
+        
+        # Calculer les marges en pourcentage
+        marge_brute = None
+        marge_nette = None
+        
+        if ca_mois != 0 and abs(ca_mois) > 1000:
+            marge_brute_montant = ca_mois - cout_achat
+            marge_brute = float((marge_brute_montant / ca_mois) * 100)
+            marge_nette = float((resultat_net / ca_mois) * 100)
+        
+        # Formater le mois pour l'affichage
+        mois_label = current_date.strftime("%b %Y")  # Ex: "Jan 2025"
+        
+        evolution_data.append({
+            "mois": mois_label,
+            "marge_brute": marge_brute,
+            "marge_nette": marge_nette,
+            "date": current_date.strftime("%Y-%m-%d")
+        })
+        
+        # Passer au mois suivant
+        current_date = next_month
+    
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def evolution_caf_view(request):
+    """
+    Évolution de la CAF sur plusieurs mois
+    Par défaut : 6 derniers mois
+    Supporte le filtrage par date (date_start, date_end)
+    GET /api/evolution-caf/?date_start=2024-01-01&date_end=2024-12-31
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum, Max
+    from decimal import Decimal
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    # Si pas de dates fournies, utiliser les 6 derniers mois
+    if not date_start or not date_end:
+        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)
+        else:
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+
+    def get_caf_for_period(start, end):
+        filters = {"date__range": [start, end]}
+        
+        # Helper variables for EBE
+        c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c71 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="71", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c72 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="72", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c74 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="74", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c60 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="60", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c61 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="61", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c62 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="62", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c63 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="63", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c64 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="64", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        
+        ebe = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+        
+        # CAF specific accounts
+        c75 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="75", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c65 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="65", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c77 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="77", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c67 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="67", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c69 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="69", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        
+        caf = ebe + c75 - c65 + c77 - c67 - c69
+        return caf
+
+    evolution_data = []
+    current_date = start_date_obj.replace(day=1)
+
+    while current_date <= end_date_obj:
+        if current_date.month == 12:
+            next_month = current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            next_month = current_date.replace(month=current_date.month + 1)
+        
+        last_day = next_month - timedelta(days=1)
+        
+        caf_val = get_caf_for_period(current_date, last_day)
+        
+        evolution_data.append({
+            "mois": current_date.strftime("%b %Y"),
+            "montant": float(caf_val),
+            "date": current_date.strftime("%Y-%m-%d")
+        })
+        
+        current_date = next_month
+
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def evolution_marge_operationnelle_view(request):
+    """
+    Évolution de la marge opérationnelle sur plusieurs mois
+    Par défaut : 6 derniers mois
+    Supporte le filtrage par date (date_start, date_end)
+    GET /api/evolution-marge-operationnelle/?date_start=2024-01-01&date_end=2024-12-31
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum, Max
+    from decimal import Decimal
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    # Si pas de dates fournies, utiliser les 6 derniers mois
+    if not date_start or not date_end:
+        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)
+        else:
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+
+    def get_marge_op_for_period(start, end):
+        filters = {"date__range": [start, end]}
+        
+        # CA = 70, 71, 72
+        c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c71 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="71", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c72 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="72", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        ca = c70 + c71 + c72
+
+        # Produits Opérationnels = 70, 71, 72, 74, 75
+        c74 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="74", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c75 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="75", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        prod_op = ca + c74 + c75
+
+        # Charges d'exploitation = 60, 61, 62, 63, 64, 65
+        charges_op = Decimal("0")
+        for p in ["60", "61", "62", "63", "64", "65"]:
+            charges_op += CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith=p, **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        
+        res_op = prod_op - charges_op
+        
+        marge_op = None
+        if ca != 0 and abs(ca) >= 1000:
+            marge_op = float((res_op / ca) * 100)
+            if marge_op > 500: marge_op = 500
+            elif marge_op < -500: marge_op = -500
+            
+        return marge_op
+
+    evolution_data = []
+    current_date = start_date_obj.replace(day=1)
+
+    while current_date <= end_date_obj:
+        if current_date.month == 12:
+            next_month = current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            next_month = current_date.replace(month=current_date.month + 1)
+        
+        last_day = next_month - timedelta(days=1)
+        
+        marge_op_val = get_marge_op_for_period(current_date, last_day)
+        
+        evolution_data.append({
+            "mois": current_date.strftime("%b %Y"),
+            "marge_op": marge_op_val,
+            "date": current_date.strftime("%Y-%m-%d")
+        })
+        
+        current_date = next_month
+
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def evolution_roe_view(request):
+    """
+    Évolution du ROE (Return on Equity) sur plusieurs mois
+    Par défaut : 6 derniers mois
+    Supporte le filtrage par date (date_start, date_end)
+    GET /api/evolution-roe/?date_start=2024-01-01&date_end=2024-12-31
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum, Max, Case, When
+    from decimal import Decimal
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    # Si pas de dates fournies, utiliser les 6 derniers mois
+    if not date_start or not date_end:
+        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)
+        else:
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+
+    def get_roe_for_period(start, end):
+        filters = {"date__range": [start, end]}
+        
+        # 1. Résultat Net : dernière date disponible dans la période
+        latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
+        
+        resultat_net = Decimal("0.00")
+        if latest_res_date:
+            agg_res = CompteResultat.objects.filter(date=latest_res_date).aggregate(
+                prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
+                char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
+            )
+            resultat_net = (agg_res["prod"] or Decimal("0.00")) - (agg_res["char"] or Decimal("0.00"))
+
+        # 2. Fonds propres : dernière date disponible dans la période
+        latest_bilan_date = Bilan.objects.filter(categorie="CAPITAUX_PROPRES", **filters).aggregate(Max('date'))['date__max']
+        
+        fonds_propres = Decimal("0.00")
+        if latest_bilan_date:
+            fonds_propres = (
+                Bilan.objects
+                .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", date=latest_bilan_date)
+                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+            )
+
+        # 3. Calcul du ROE
+        roe = None
+        if fonds_propres != 0 and abs(fonds_propres) >= 100000:
+            roe = float((resultat_net / fonds_propres * 100))
+            # Protection contre les extrêmes
+            if roe > 1000: roe = 1000
+            elif roe < -1000: roe = -1000
+        
+        return roe
+
+    evolution_data = []
+    current_date = start_date_obj.replace(day=1)
+
+    while current_date <= end_date_obj:
+        if current_date.month == 12:
+            next_month = current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            next_month = current_date.replace(month=current_date.month + 1)
+        
+        last_day = next_month - timedelta(days=1)
+        
+        roe_val = get_roe_for_period(current_date, last_day)
+        
+        evolution_data.append({
+            "mois": current_date.strftime("%b %Y"),
+            "roe": roe_val,
+            "date": current_date.strftime("%Y-%m-%d")
+        })
+        
+        current_date = next_month
+
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def evolution_roa_view(request):
+    """
+    Évolution du ROA (Return on Assets) sur plusieurs mois
+    Par défaut : 6 derniers mois
+    Supporte le filtrage par date (date_start, date_end)
+    GET /api/evolution-roa/?date_start=2024-01-01&date_end=2024-12-31
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum, Max, Case, When
+    from decimal import Decimal
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    # Si pas de dates fournies, utiliser les 6 derniers mois
+    if not date_start or not date_end:
+        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)
+        else:
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+
+    def get_roa_for_period(start, end):
+        filters = {"date__range": [start, end]}
+        
+        # 1. Résultat Net : dernière date disponible dans la période
+        latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
+        
+        resultat_net = Decimal("0.00")
+        if latest_res_date:
+            agg_res = CompteResultat.objects.filter(date=latest_res_date).aggregate(
+                prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
+                char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
+            )
+            resultat_net = (agg_res["prod"] or Decimal("0.00")) - (agg_res["char"] or Decimal("0.00"))
+
+        # 2. Total Actif : dernière date disponible dans la période
+        latest_bilan_date = Bilan.objects.filter(type_bilan="ACTIF", **filters).aggregate(Max('date'))['date__max']
+        
+        total_actif = Decimal("0.00")
+        if latest_bilan_date:
+            total_actif = (
+                Bilan.objects
+                .filter(type_bilan="ACTIF", date=latest_bilan_date)
+                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+            )
+
+        # 3. Calcul du ROA
+        roa = None
+        if total_actif != 0 and abs(total_actif) >= 100000:
+            roa = float((resultat_net / total_actif * 100))
+            # Protection contre les extrêmes
+            if roa > 1000: roa = 1000
+            elif roa < -1000: roa = -1000
+        
+        return roa
+
+    evolution_data = []
+    current_date = start_date_obj.replace(day=1)
+
+    while current_date <= end_date_obj:
+        if current_date.month == 12:
+            next_month = current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            next_month = current_date.replace(month=current_date.month + 1)
+        
+        last_day = next_month - timedelta(days=1)
+        
+        roa_val = get_roa_for_period(current_date, last_day)
+        
+        evolution_data.append({
+            "mois": current_date.strftime("%b %Y"),
+            "roa": roa_val,
+            "date": current_date.strftime("%Y-%m-%d")
+        })
+        
+        current_date = next_month
+
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
+
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
@@ -3321,5 +4057,241 @@ def tva_view(request):
         "variation_collectee": variation_collectee,
         "variation_deductible": variation_deductible,
         "variation_nette": variation_nette
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def amortissements_exercice_view(request):
+    """
+    Retourne les amortissements (compte 68) par mois.
+    GET /api/amortissements-exercice/?date_start=2024-01-01&date_end=2024-12-31
+    Par défaut: 6 derniers mois
+    """
+    from django.db.models.functions import TruncMonth
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    
+    # Si pas de dates spécifiées, utiliser les 6 derniers mois
+    if not date_start or not date_end:
+        end_date = datetime.now().date()
+        start_date = end_date - relativedelta(months=6)
+        date_start = start_date.strftime('%Y-%m-%d')
+        date_end = end_date.strftime('%Y-%m-%d')
+    
+    # Filtrer et grouper par mois
+    amortissements = (
+        CompteResultat.objects
+        .filter(
+            nature="CHARGE", 
+            numero_compte__startswith="68",
+            date__range=[date_start, date_end]
+        )
+        .annotate(month=TruncMonth('date'))
+        .values('month')
+        .annotate(total_amortissement=Sum('montant_ar'))
+        .order_by('month')
+    )
+    
+    # Formater les données pour le graphique
+    data = [
+        {
+            "month": item['month'].strftime('%Y-%m') if item['month'] else '',
+            "amount": float(item['total_amortissement'] or 0)
+        }
+        for item in amortissements if item['month'] is not None
+    ]
+    
+    return Response(data)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def delais_clients_view(request):
+    """
+    Calcul des délais clients (DSO - Days Sales Outstanding) avec variation
+    Formule: (Créances Clients / CA) × Nombre de jours
+    GET /api/delais-clients/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_delais_clients(start_date, end_date):
+        """Fonction helper pour calculer les délais clients"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+            
+            # Calculer le nombre de jours dans la période
+            start_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+            nb_jours = (end_obj - start_obj).days + 1
+        else:
+            nb_jours = 365  # Par défaut
+
+        # Créances clients (compte 411 du Bilan)
+        creances_clients = (
+            Bilan.objects
+            .filter(type_bilan="ACTIF", numero_compte__startswith="411", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Chiffre d'affaires (comptes 70x du Compte de Résultat)
+        chiffre_affaire = (
+            CompteResultat.objects
+            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Calcul DSO
+        if chiffre_affaire > 0:
+            delais_jours = (creances_clients / chiffre_affaire) * nb_jours
+        else:
+            delais_jours = None
+
+        return {
+            "creances_clients": creances_clients,
+            "chiffre_affaire": chiffre_affaire,
+            "delais_jours": delais_jours
+        }
+
+    # Calcul période courante
+    current = calculate_delais_clients(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous = calculate_delais_clients(previous_start, previous_end)
+            
+            # Calculer variation en jours
+            if current["delais_jours"] is not None and previous["delais_jours"] is not None:
+                variation = float(current["delais_jours"] - previous["delais_jours"])
+        except:
+            pass
+
+    return Response({
+        "creances_clients": current["creances_clients"],
+        "chiffre_affaire": current["chiffre_affaire"],
+        "delais_jours": float(current["delais_jours"]) if current["delais_jours"] is not None else None,
+        "variation": variation
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def delais_fournisseurs_view(request):
+    """
+    Calcul des délais fournisseurs (DPO - Days Payable Outstanding) avec variation
+    Formule: (Dettes Fournisseurs / Achats) × Nombre de jours
+    GET /api/delais-fournisseurs/?date_start=2025-01-01&date_end=2025-12-31
+    """
+    from datetime import datetime
+    from dateutil.relativedelta import relativedelta
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
+    def calculate_delais_fournisseurs(start_date, end_date):
+        """Fonction helper pour calculer les délais fournisseurs"""
+        filters = {}
+        if start_date and end_date:
+            filters["date__range"] = [start_date, end_date]
+            
+            # Calculer le nombre de jours dans la période
+            start_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+            nb_jours = (end_obj - start_obj).days + 1
+        else:
+            nb_jours = 365  # Par défaut
+
+        # Dettes fournisseurs (compte 401 du Bilan)
+        dettes_fournisseurs = (
+            Bilan.objects
+            .filter(type_bilan="PASSIF", numero_compte__startswith="401", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Achats (comptes 60x du Compte de Résultat)
+        achats = (
+            CompteResultat.objects
+            .filter(nature="CHARGE", numero_compte__startswith="60", **filters)
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        )
+
+        # Calcul DPO
+        if achats > 0:
+            delais_jours = (dettes_fournisseurs / achats) * nb_jours
+        else:
+            delais_jours = None
+
+        return {
+            "dettes_fournisseurs": dettes_fournisseurs,
+            "achats": achats,
+            "delais_jours": delais_jours
+        }
+
+    # Calcul période courante
+    current = calculate_delais_fournisseurs(date_start, date_end)
+    
+    # Calcul période précédente et variation
+    variation = None
+    if date_start and date_end:
+        try:
+            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+            
+            delta_days = (end_date_obj - start_date_obj).days
+            
+            if delta_days >= 360:  # Annuel
+                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
+            elif 28 <= delta_days <= 32:  # Mensuel
+                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
+            elif 88 <= delta_days <= 92:  # Trimestriel
+                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
+            else:
+                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            
+            previous = calculate_delais_fournisseurs(previous_start, previous_end)
+            
+            # Calculer variation en jours
+            if current["delais_jours"] is not None and previous["delais_jours"] is not None:
+                variation = float(current["delais_jours"] - previous["delais_jours"])
+        except:
+            pass
+
+    return Response({
+        "dettes_fournisseurs": current["dettes_fournisseurs"],
+        "achats": current["achats"],
+        "delais_jours": float(current["delais_jours"]) if current["delais_jours"] is not None else None,
+        "variation": variation
     })
 

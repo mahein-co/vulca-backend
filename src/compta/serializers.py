@@ -132,8 +132,8 @@ class DetteLmtCafSerializer(serializers.Serializer):
 class MargeNetteSerializer(serializers.Serializer):
     resultat_net = serializers.DecimalField(max_digits=15, decimal_places=2)
     chiffre_affaire = serializers.DecimalField(max_digits=15, decimal_places=2)
-    ratio = serializers.DecimalField(max_digits=10, decimal_places=4)
-    ratio_pourcent = serializers.DecimalField(max_digits=6, decimal_places=2)
+    marge_nette = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    variation = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
 
 class ChargeEbeSerializer(serializers.Serializer):
     charge_financiere = serializers.DecimalField(max_digits=15, decimal_places=2)
@@ -205,3 +205,15 @@ class MargeBruteSerializer(serializers.Serializer):
     achats = serializers.DecimalField(max_digits=15, decimal_places=2)
     marge_brute = serializers.DecimalField(max_digits=15, decimal_places=2)
     variation = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, allow_null=True)
+
+class DelaisClientsSerializer(serializers.Serializer):
+    creances_clients = serializers.DecimalField(max_digits=15, decimal_places=2)
+    chiffre_affaire = serializers.DecimalField(max_digits=15, decimal_places=2)
+    delais_jours = serializers.DecimalField(max_digits=10, decimal_places=1, required=False, allow_null=True)
+    variation = serializers.DecimalField(max_digits=10, decimal_places=1, required=False, allow_null=True)
+
+class DelaisFournisseursSerializer(serializers.Serializer):
+    dettes_fournisseurs = serializers.DecimalField(max_digits=15, decimal_places=2)
+    achats = serializers.DecimalField(max_digits=15, decimal_places=2)
+    delais_jours = serializers.DecimalField(max_digits=10, decimal_places=1, required=False, allow_null=True)
+    variation = serializers.DecimalField(max_digits=10, decimal_places=1, required=False, allow_null=True)

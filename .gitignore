@@ -92,5 +92,7 @@ yarn.lock
 *.bak
 *.backup
 
-/staticfiles/
 
+src/staticfiles/
+
+src/staticfiles/

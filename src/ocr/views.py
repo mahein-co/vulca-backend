@@ -266,7 +266,7 @@ def file_source_list_create(request):
             gen_data = extracted_json.copy() if isinstance(extracted_json, dict) else {}
             
             # Forcer type_document BANQUE si bancaire
-            if any(k in piece_type.lower() for k in ["banc", "banq", "relev", "virement"]):
+            if any(k in piece_type.lower() for k in ["banc", "banq", "relev", "virement", "salaire", "paiement", "cheque", "chèque", "retrait", "depot", "dépôt"]):
                 gen_data["type_document"] = "BANQUE"
             elif "type_document" not in gen_data:
                 if piece_type == "Facture":

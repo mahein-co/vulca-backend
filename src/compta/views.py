@@ -191,6 +191,10 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
     4. Générer les écritures en respectant le principe de la partie double (débit = crédit)
     
     DÉTECTION DU TYPE DE DOCUMENT :
+    ⚠️ RÈGLE DE PRIORITÉ ABSOLUE ⚠️ : 
+    Si le "DOCUMENT À ANALYSER" contient déjà une clé "type_document" avec une valeur (ex: "BANQUE", "VENTE"...), TU DOIS UTILISER CETTE VALEUR ET NE PAS CHERCHER À LA CHANGER.
+    
+    Sinon, utilise les règles suivantes :
     - Si le document contient "facture" ET un client/nom_client → type_document = "VENTE"
     - Si le document contient "facture" ET un fournisseur/nom_fournisseur → type_document = "ACHAT"
     - Si le document contient "banque", "virement", "relevé bancaire" → type_document = "BANQUE"
@@ -211,18 +215,24 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
     
     EXEMPLES DE RÈGLES COMPTABLES :
     - VENTE : Débit 411 (Clients), Crédit 707 (Ventes), Crédit 4457 (TVA collectée si applicable)
-    - ACHAT : Débit 602/607 (Achats), Débit 4456 (TVA déductible si applicable), Crédit 401 (Fournisseurs)
-    - BANQUE : Utilise 512 (Banques) avec contrepartie appropriée (411 pour encaissement client, 401 pour paiement fournisseur)
+    - ACHAT : Débit 607 (Achats de marchandises), Débit 4456 (TVA déductible si applicable), Crédit 401 (Fournisseurs)
+    - BANQUE : 
+      * Standard: Utilise 512 (Banques) avec contrepartie appropriée (411 pour encaissement client, 401 pour paiement fournisseur)
+      * PAIEMENT SALAIRE : Crédit 512 (Banque), Débit 421 (Personnel - Rémunérations dues). Ne pas utiliser 641 ici (déjà passé en OD).
     - CAISSE : Utilise 531 (Caisse) avec contrepartie appropriée
-    - FICHE DE PAIE (Salaire) : 
+    - FICHE DE PAIE (OD UNIQUEMENT - JAMAIS BANQUE) : 
+      ⚠️ INTERDICTION : N'utilise JAMAIS ces règles si type_document = "BANQUE".
       * Débit 641 (Rémunérations du personnel) = salaire_brut
       * Débit 645 (Charges sociales patronales) = total_cotisation_patronale
       * Crédit 421 (Personnel - Rémunérations dues) = net_a_payer
-      * Crédit 431 (Sécurité sociale) = SOMME(total_cotisation_salariale + total_cotisation_patronale)  <-- TRES IMPORTANT : ADDITIONNER LES DEUX MONTANTS
+      * Crédit 431 (Sécurité sociale) = total_cotisation_salariale + total_cotisation_patronale (ADDITIONNE LES DEUX!)
       * Crédit 442 (État - Impôts et taxes) = retenue_source (IRSA)
-      * IMPORTANT: Total Débit = salaire_brut + cotisation_patronale
-      * IMPORTANT: Total Crédit = net_a_payer + (cotisation_salariale + cotisation_patronale) + retenue_source
-      * Vérifie bien que: salaire_brut + cotisation_patronale = net_a_payer + cotisation_salariale + cotisation_patronale + retenue_source
+      
+      FORMULE D'ÉQUILIBRE OBLIGATOIRE:
+      Total Débit = salaire_brut + total_cotisation_patronale
+      Total Crédit = net_a_payer + (total_cotisation_salariale + total_cotisation_patronale) + retenue_source
+      
+      VERIFICATION: Ces deux totaux DOIVENT être égaux!
     
     
     FORMAT DE SORTIE OBLIGATOIRE (JSON pur, sans markdown) :
@@ -251,8 +261,26 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
             }}
         ]
     }}
-    
-    EXEMPLE FICHE DE PAIE (salaire_brut=400000, cotisation_salariale=4000, cotisation_patronale=52000, retenue_source=2300, net_a_payer=393700):
+    EXEMPLE BANQUE (Paiement Salaire - type_document="BANQUE"):
+    {{
+        "type_document": "BANQUE",
+        "journal": [
+            {{
+                "compte": "421",
+                "libelle": "Personnel - Rémunérations dues",
+                "debit": 100000,
+                "credit": 0
+            }},
+            {{
+                "compte": "512",
+                "libelle": "Banque",
+                "debit": 0,
+                "credit": 100000
+            }}
+        ]
+    }}
+
+    EXEMPLE FICHE DE PAIE (OD UNIQUEMENT - JAMAIS BANQUE):
     {{
         "type_document": "OD",
         "journal": [
@@ -288,7 +316,49 @@ def classify_accounting(document_json: dict, pcg_mapping: dict):
             }}
         ]
     }}
-    Note: Total Débit = 400000 + 52000 = 452000, Total Crédit = 393700 + 56000 + 2300 = 452000 ✓
+    Calcul 431: 4000 + 52000 = 56000
+    Total Débit = 400000 + 52000 = 452000
+    Total Crédit = 393700 + 56000 + 2300 = 452000 ✓
+    
+    EXEMPLE FICHE DE PAIE 2 (salaire_brut=10000000, cotisation_salariale=100000, cotisation_patronale=1300000, retenue_source=1887500, net_a_payer=8012500):
+    {{
+        "type_document": "OD",
+        "journal": [
+            {{
+                "compte": "641",
+                "libelle": "Rémunérations du personnel",
+                "debit": 10000000,
+                "credit": 0
+            }},
+            {{
+                "compte": "645",
+                "libelle": "Charges sociales patronales",
+                "debit": 1300000,
+                "credit": 0
+            }},
+            {{
+                "compte": "421",
+                "libelle": "Personnel - Rémunérations dues",
+                "debit": 0,
+                "credit": 8012500
+            }},
+            {{
+                "compte": "431",
+                "libelle": "Sécurité sociale",
+                "debit": 0,
+                "credit": 1400000
+            }},
+            {{
+                "compte": "442",
+                "libelle": "État - Impôts et taxes",
+                "debit": 0,
+                "credit": 1887500
+            }}
+        ]
+    }}
+    Calcul 431: 100000 + 1300000 = 1400000 (IMPORTANT: additionner salariale ET patronale!)
+    Total Débit = 10000000 + 1300000 = 11300000
+    Total Crédit = 8012500 + 1400000 + 1887500 = 11300000 ✓
     
     IMPORTANT : 
     - Retourne UNIQUEMENT le JSON, sans texte explicatif ni balises markdown
@@ -359,10 +429,19 @@ def generate_journal_from_pcg(document_json):
     date_facture_raw = document_json.get("date") or document_json.get("date_facture") or str(dt_date.today())
     
     # ✅ CONVERSION DE DATE : "5 septembre 2024" → "2024-09-05"
+    # ⚠️ IMPORTANT: Si la date est déjà au format ISO (YYYY-MM-DD), ne pas la re-parser
     try:
         date_facture_raw = date_facture_raw.replace('\xa0', ' ').strip()
-        parsed_date = date_parser.parse(date_facture_raw, dayfirst=True)
-        date_facture = parsed_date.strftime("%Y-%m-%d")
+        
+        # Vérifier si la date est déjà au format ISO (YYYY-MM-DD)
+        import re
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_facture_raw):
+            # Date déjà au format ISO, ne pas la parser
+            date_facture = date_facture_raw
+        else:
+            # Parser la date avec dayfirst=True pour format français
+            parsed_date = date_parser.parse(date_facture_raw, dayfirst=True)
+            date_facture = parsed_date.strftime("%Y-%m-%d")
     except:
         date_facture = str(dt_date.today())
     
@@ -677,6 +756,36 @@ class CompteResultatListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(date__range=[date_start, date_end])
 
         return queryset
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def create_bilan_manual_view(request):
+    """
+    Create a single Bilan entry from manual form input.
+    POST /api/bilans/manual/
+    """
+    serializer = BilanSerializer(data=request.data)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def create_compte_resultat_manual_view(request):
+    """
+    Create a single CompteResultat entry from manual form input.
+    POST /api/CompteResultats/manual/
+    """
+    serializer = CompteResultatSerializer(data=request.data)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
 # GENERATE JOURNAL VIEW
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -1817,78 +1926,42 @@ def resultat_net_view(request):  #partie corriger
 
 
     def calculate_resultat(d_start, d_end):
-        # ✅ OPTIMISATION : Une seule requête au lieu de 8+ requêtes
-        
-        qs = GrandLivre.objects.all()
+        """
+        Calcul du résultat net à partir de CompteResultat
+        (Inclut les saisies manuelles ET les données générées via Balance)
+        """
+        qs = CompteResultat.objects.all()
         if d_start and d_end:
             qs = qs.filter(date__range=[d_start, d_end])
         elif d_end:
             qs = qs.filter(date__lte=d_end)
         
-        # Agrégation par blocs de comptes (PCG 2005)
-        # On sépare les catégories pour pouvoir les afficher en détail si besoin
+        # Agrégation par nature
         data = qs.aggregate(
-            # 1. Exploitation
-            produits_expl_cr=Sum(Case(When(numero_compte__regex=r'^(70|71|72|74|75)', then='credit'), default=0, output_field=DecimalField())),
-            produits_expl_db=Sum(Case(When(numero_compte__regex=r'^(70|71|72|74|75)', then='debit'), default=0, output_field=DecimalField())),
-            charges_expl_db=Sum(Case(When(numero_compte__regex=r'^(60|61|62|63|64|65)', then='debit'), default=0, output_field=DecimalField())),
-            charges_expl_cr=Sum(Case(When(numero_compte__regex=r'^(60|61|62|63|64|65)', then='credit'), default=0, output_field=DecimalField())),
-            
-            # 2. Financier
-            produits_fin_cr=Sum(Case(When(numero_compte__startswith='76', then='credit'), default=0, output_field=DecimalField())),
-            produits_fin_db=Sum(Case(When(numero_compte__startswith='76', then='debit'), default=0, output_field=DecimalField())),
-            charges_fin_db=Sum(Case(When(numero_compte__startswith='66', then='debit'), default=0, output_field=DecimalField())),
-            charges_fin_cr=Sum(Case(When(numero_compte__startswith='66', then='credit'), default=0, output_field=DecimalField())),
-            
-            # 3. Exceptionnel
-            produits_exc_cr=Sum(Case(When(numero_compte__startswith='77', then='credit'), default=0, output_field=DecimalField())),
-            produits_exc_db=Sum(Case(When(numero_compte__startswith='77', then='debit'), default=0, output_field=DecimalField())),
-            charges_exc_db=Sum(Case(When(numero_compte__startswith='67', then='debit'), default=0, output_field=DecimalField())),
-            charges_exc_cr=Sum(Case(When(numero_compte__startswith='67', then='credit'), default=0, output_field=DecimalField())),
-            
-            # 4. Dotations & Reprises (Amortissements/Provisions - 68/78)
-            dotations_db=Sum(Case(When(numero_compte__startswith='68', then='debit'), default=0, output_field=DecimalField())),
-            dotations_cr=Sum(Case(When(numero_compte__startswith='68', then='credit'), default=0, output_field=DecimalField())),
-            reprises_cr=Sum(Case(When(numero_compte__startswith='78', then='credit'), default=0, output_field=DecimalField())),
-            reprises_db=Sum(Case(When(numero_compte__startswith='78', then='debit'), default=0, output_field=DecimalField())),
-            
-            # 5. Impôts (69)
-            impots_db=Sum(Case(When(numero_compte__startswith='69', then='debit'), default=0, output_field=DecimalField())),
-            impots_cr=Sum(Case(When(numero_compte__startswith='69', then='credit'), default=0, output_field=DecimalField())),
+            total_produits=Sum(Case(
+                When(nature='PRODUIT', then='montant_ar'),
+                default=Decimal('0.00'),
+                output_field=DecimalField()
+            )),
+            total_charges=Sum(Case(
+                When(nature='CHARGE', then='montant_ar'),
+                default=Decimal('0.00'),
+                output_field=DecimalField()
+            ))
         )
         
-        # Calcul des soldes nets par catégorie
-        prod_expl = (data["produits_expl_cr"] or 0) - (data["produits_expl_db"] or 0)
-        char_expl = (data["charges_expl_db"] or 0) - (data["charges_expl_cr"] or 0)
-        
-        prod_fin = (data["produits_fin_cr"] or 0) - (data["produits_fin_db"] or 0)
-        char_fin = (data["charges_fin_db"] or 0) - (data["charges_fin_cr"] or 0)
-        
-        prod_exc = (data["produits_exc_cr"] or 0) - (data["produits_exc_db"] or 0)
-        char_exc = (data["charges_exc_db"] or 0) - (data["charges_exc_cr"] or 0)
-        
-        dotations = (data["dotations_db"] or 0) - (data["dotations_cr"] or 0)
-        reprises = (data["reprises_cr"] or 0) - (data["reprises_db"] or 0)
-        
-        impots = (data["impots_db"] or 0) - (data["impots_cr"] or 0)
-
-        # Résultat d'Exploitation = (Produits Expl + Reprises) - (Charges Expl + Dotations)
-        res_expl = (prod_expl + reprises) - (char_expl + dotations)
-        # Résultat Financier
-        res_fin = prod_fin - char_fin
-        # Résultat Exceptionnel
-        res_exc = prod_exc - char_exc
-
-        res_net = res_expl + res_fin + res_exc - impots
+        produits = data['total_produits'] or Decimal('0.00')
+        charges = data['total_charges'] or Decimal('0.00')
+        res_net = produits - charges
         
         return {
-            "produits": prod_expl + prod_fin + prod_exc + reprises,
-            "charges_exploitation": char_expl + dotations,
-            "charges_financieres": char_fin,
-            "produits_financiers": prod_fin,
-            "charges_exceptionnelles": char_exc,
-            "produits_exceptionnels": prod_exc,
-            "impots_benefices": impots,
+            "produits": produits,
+            "charges_exploitation": charges,  # Simplifié pour compatibilité
+            "charges_financieres": Decimal('0.00'),
+            "produits_financiers": Decimal('0.00'),
+            "charges_exceptionnelles": Decimal('0.00'),
+            "produits_exceptionnels": Decimal('0.00'),
+            "impots_benefices": Decimal('0.00'),
             "resultat_net": res_net,
         }
 

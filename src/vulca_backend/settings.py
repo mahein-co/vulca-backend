@@ -88,7 +88,10 @@ DATABASES = {
 
 DATABASES['default']['OPTIONS'] = {
     'connect_timeout': 30,
-    'sslmode': 'require',
+    'keepalives': 1,
+    'keepalives_idle': 30,
+    'keepalives_interval': 10,
+    'keepalives_count': 5,
 }
 
 # Augmenter aussi le timeout des sessions
@@ -164,9 +167,9 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'  # ← Ajouter cette ligne
 
 # Pour le développement uniquement
-STATICFILES_DIRS = [
-    BASE_DIR / 'static',
-]
+# STATICFILES_DIRS = [
+#     BASE_DIR / 'static',
+# ]
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

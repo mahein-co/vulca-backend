@@ -94,5 +94,4 @@ yarn.lock
 
 
 src/staticfiles/
-
-src/staticfiles/
+src/media/

@@ -564,3 +564,190 @@ def generate_financial_statements(sender, instance, **kwargs):
         import traceback
         print(f"❌ ERREUR SIGNAL BILAN pour {instance.numero_compte} : {e}")
         print(traceback.format_exc())
+
+
+@receiver(post_save, sender=Bilan)
+def recalculate_cp_on_manual_bilan(sender, instance, created, **kwargs):
+    """
+    Recalcule les Capitaux Propres temporaires quand un Bilan est ajouté manuellement.
+    Cela garantit que le résultat net est pris en compte même sans passer par Balance.
+    """
+    if not created:
+        return
+    
+    # Si c'est un capital réel (10x), supprimer tout CP temporaire
+    if instance.numero_compte.startswith('10'):
+        Bilan.objects.filter(
+            date=instance.date,
+            numero_compte='101',
+            libelle__icontains='calculé'
+        ).delete()
+        return
+    
+    # Vérifier si un capital réel existe
+    capital_reel_existe = Bilan.objects.filter(
+        date=instance.date,
+        numero_compte__startswith='10',
+        type_bilan='PASSIF'
+    ).exclude(libelle__icontains='calculé').exists()
+    
+    if capital_reel_existe:
+        Bilan.objects.filter(
+            date=instance.date,
+            numero_compte='101',
+            libelle__icontains='calculé'
+        ).delete()
+        return
+    
+    # Recalculer CP temporaire
+    try:
+        # Supprimer l'ancien CP temporaire
+        Bilan.objects.filter(
+            date=instance.date,
+            numero_compte='101',
+            libelle__icontains='calculé'
+        ).delete()
+        
+        # Calculer totaux
+        total_actif = sum([
+            b.montant_ar for b in Bilan.objects.filter(
+                date=instance.date,
+                type_bilan='ACTIF'
+            )
+        ])
+        
+        total_passif = sum([
+            b.montant_ar for b in Bilan.objects.filter(
+                date=instance.date,
+                type_bilan='PASSIF'
+            ).exclude(numero_compte='101')
+        ])
+        
+        # Calculer résultat net
+        resultat_net = Decimal('0.00')
+        cr_items = CompteResultat.objects.filter(date=instance.date)
+        for item in cr_items:
+            if item.nature == 'PRODUIT':
+                resultat_net += item.montant_ar
+            elif item.nature == 'CHARGE':
+                resultat_net -= item.montant_ar
+        
+        passif_avec_resultat = total_passif + resultat_net
+        cp_temp = total_actif - passif_avec_resultat
+        
+        if abs(cp_temp) < Decimal('0.01'):
+            cp_temp = Decimal('0.00')
+        
+        if cp_temp > 0:
+            balance_cp, _ = Balance.objects.get_or_create(
+                numero_compte='101',
+                date=instance.date,
+                defaults={
+                    'libelle': 'Capitaux propres (calculé - encaissement)',
+                    'solde_debit': Decimal('0.00'),
+                    'solde_credit': cp_temp
+                }
+            )
+            
+            Bilan.objects.update_or_create(
+                numero_compte='101',
+                date=instance.date,
+                defaults={
+                    'balance': balance_cp,
+                    'libelle': 'Capitaux propres (calculé - encaissement)',
+                    'montant_ar': cp_temp,
+                    'type_bilan': 'PASSIF',
+                    'categorie': 'CAPITAUX_PROPRES'
+                }
+            )
+    except Exception as e:
+        print(f"❌ Erreur recalcul CP pour Bilan manuel : {e}")
+
+
+@receiver(post_save, sender=CompteResultat)
+def recalculate_cp_on_manual_cr(sender, instance, created, **kwargs):
+    """
+    Recalcule les Capitaux Propres temporaires quand un CompteResultat est ajouté manuellement.
+    Le résultat net doit être inclus dans le passif pour équilibrer le bilan.
+    """
+    if not created:
+        return
+    
+    # Vérifier si un capital réel existe
+    capital_reel_existe = Bilan.objects.filter(
+        date=instance.date,
+        numero_compte__startswith='10',
+        type_bilan='PASSIF'
+    ).exclude(libelle__icontains='calculé').exists()
+    
+    if capital_reel_existe:
+        Bilan.objects.filter(
+            date=instance.date,
+            numero_compte='101',
+            libelle__icontains='calculé'
+        ).delete()
+        return
+    
+    # Recalculer CP temporaire
+    try:
+        # Supprimer l'ancien CP temporaire
+        Bilan.objects.filter(
+            date=instance.date,
+            numero_compte='101',
+            libelle__icontains='calculé'
+        ).delete()
+        
+        # Calculer totaux
+        total_actif = sum([
+            b.montant_ar for b in Bilan.objects.filter(
+                date=instance.date,
+                type_bilan='ACTIF'
+            )
+        ])
+        
+        total_passif = sum([
+            b.montant_ar for b in Bilan.objects.filter(
+                date=instance.date,
+                type_bilan='PASSIF'
+            ).exclude(numero_compte='101')
+        ])
+        
+        # Calculer résultat net
+        resultat_net = Decimal('0.00')
+        cr_items = CompteResultat.objects.filter(date=instance.date)
+        for item in cr_items:
+            if item.nature == 'PRODUIT':
+                resultat_net += item.montant_ar
+            elif item.nature == 'CHARGE':
+                resultat_net -= item.montant_ar
+        
+        passif_avec_resultat = total_passif + resultat_net
+        cp_temp = total_actif - passif_avec_resultat
+        
+        if abs(cp_temp) < Decimal('0.01'):
+            cp_temp = Decimal('0.00')
+        
+        if cp_temp > 0:
+            balance_cp, _ = Balance.objects.get_or_create(
+                numero_compte='101',
+                date=instance.date,
+                defaults={
+                    'libelle': 'Capitaux propres (calculé - encaissement)',
+                    'solde_debit': Decimal('0.00'),
+                    'solde_credit': cp_temp
+                }
+            )
+            
+            Bilan.objects.update_or_create(
+                numero_compte='101',
+                date=instance.date,
+                defaults={
+                    'balance': balance_cp,
+                    'libelle': 'Capitaux propres (calculé - encaissement)',
+                    'montant_ar': cp_temp,
+                    'type_bilan': 'PASSIF',
+                    'categorie': 'CAPITAUX_PROPRES'
+                }
+            )
+    except Exception as e:
+        print(f"❌ Erreur recalcul CP pour CompteResultat manuel : {e}")

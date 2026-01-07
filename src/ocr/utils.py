@@ -5,7 +5,12 @@ from pdf2image import convert_from_path
 import io
 import tempfile
 import os
+import cv2
+import numpy as np
+import time
 
+OCR_HEADER = "--oem 3 --psm 7 -l fra+eng"
+OCR_BODY   = "--oem 3 --psm 6 -l fra+eng"
 
 def clean_ai_json(raw: str) -> str:
     """
@@ -41,9 +46,37 @@ def clean_ai_json(raw: str) -> str:
         return candidate.strip()
     else:
         return raw  
-    
-    
+
+def pil_to_cv2(img: Image.Image):
+    """Convert PIL Image → OpenCV image"""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
+
+def resize_for_ocr(img, max_pixels= 2_000_000):
+    h, w = img.shape[:2]
+    pixels = h * w
+
+    if pixels <= max_pixels:
+        return img
+
+    scale = (max_pixels / pixels) ** 0.5
+    return cv2.resize(
+        img,
+        (int(w * scale), int(h * scale)),
+        interpolation=cv2.INTER_AREA
+    )
+
+
+def preprocess_fast(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+
+
+
 def extract_content(file, file_type):
+    start_time = time.time()
     import platform
 
     text = ""
@@ -68,6 +101,7 @@ def extract_content(file, file_type):
                     pass
 
             if extracted_text.strip():
+                print("⏱ EXTRACTION OCR (PDF texte):", round(time.time() - start_time, 2), "s")
                 return extracted_text
         except:
             pass
@@ -107,8 +141,28 @@ def extract_content(file, file_type):
                 poppler_path=poppler_path
             )
 
+            #for img in images:
+            #    text += pytesseract.image_to_string(img)
+            custom_config = r'--oem 3 --psm 6 -l fra+eng'
+
             for img in images:
-                text += pytesseract.image_to_string(img)
+                # PIL → OpenCV
+                cv_img = pil_to_cv2(img)
+
+                # Resize si trop grand
+                cv_img = resize_if_needed(cv_img)
+
+                # Preprocess OpenCV
+                cv_img = preprocess_for_ocr(cv_img)
+
+                # OCR
+                page_text = pytesseract.image_to_string(cv_img, config=custom_config)
+                text += page_text + "\n"
+
+                # STOP intelligent (évite OCR inutile)
+                if len(text.strip()) > 1200:
+                    break
+
 
         except Exception as e:
             print("Γ¥î OCR PDF ERROR :", e)
@@ -116,14 +170,43 @@ def extract_content(file, file_type):
 
         finally:
             os.remove(tmp_path)
-
+        
+        print("⏱ EXTRACTION OCR:", round(time.time() - start_time, 2), "s")
         return text
 
     # ---- IMAGES ----
     elif file_type in ["png", "jpg", "jpeg"]:
-        image = Image.open(io.BytesIO(file_bytes))
-        text = pytesseract.image_to_string(image)
+        img_start = time.time()
+
+        try:
+            img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+            print("🖼️ IMAGE MODE:", img.mode, "SIZE:", img.size)
+
+            cv_img = pil_to_cv2(img)
+
+            # ✅ resize par nombre de pixels (clé performance)
+            cv_img = resize_for_ocr(cv_img)
+
+            # ✅ prétraitement léger
+            gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+            gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+            text = pytesseract.image_to_string(
+                gray,
+                config="--oem 3 --psm 6 -l fra+eng"
+            )
+
+        except Exception as e:
+            print("❌ OCR IMAGE ERROR:", e)
+            text = ""
+
+        elapsed = round(time.time() - img_start, 2)
+        print(f"⏱ OCR IMAGE: {elapsed} s")
+
         return clean_text_output(text)
+
+   
+
 
     # ---- EXCEL ----
     elif file_type in ["xls", "xlsx"]:
@@ -155,6 +238,7 @@ def clean_text_output(text: str) -> str:
     text = re.sub(r'[ \t]+', ' ', text)
     # Limiter les sauts de ligne consécutifs à 2
     text = re.sub(r'\n\s*\n', '\n\n', text)
+    
     return text.strip()
 
 

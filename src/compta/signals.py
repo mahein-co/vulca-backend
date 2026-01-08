@@ -571,6 +571,10 @@ def recalculate_cp_on_manual_bilan(sender, instance, created, **kwargs):
     """
     Recalcule les Capitaux Propres temporaires quand un Bilan est ajouté manuellement.
     Cela garantit que le résultat net est pris en compte même sans passer par Balance.
+    
+    ⚠️ NOTE : Les données manuelles apparaissent directement dans le Dashboard
+    car celui-ci lit depuis les tables Bilan/CompteResultat.
+    Pas besoin de créer d'écriture Journal (cela causerait des doublons).
     """
     if not created:
         return
@@ -664,11 +668,16 @@ def recalculate_cp_on_manual_bilan(sender, instance, created, **kwargs):
         print(f"❌ Erreur recalcul CP pour Bilan manuel : {e}")
 
 
+
 @receiver(post_save, sender=CompteResultat)
 def recalculate_cp_on_manual_cr(sender, instance, created, **kwargs):
     """
     Recalcule les Capitaux Propres temporaires quand un CompteResultat est ajouté manuellement.
     Le résultat net doit être inclus dans le passif pour équilibrer le bilan.
+    
+    ⚠️ NOTE : Les données manuelles apparaissent directement dans le Dashboard
+    car celui-ci lit depuis les tables Bilan/CompteResultat.
+    Pas besoin de créer d'écriture Journal (cela causerait des doublons).
     """
     if not created:
         return

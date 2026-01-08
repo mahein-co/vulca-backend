@@ -1057,7 +1057,9 @@ def marge_brute_view(request):
     date_end = request.GET.get("date_end")
 
     def calculate_marge_brute(start_date, end_date):
-        """Fonction helper pour calculer la Marge Brute pour une période donnée"""
+        """Fonction helper pour calculer la Marge Brute pour une période donnée
+        Formule PCG 2005 : Marge Brute = (70+71+72) - (60+61+62)
+        """
         filters = {}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
@@ -1069,14 +1071,14 @@ def marge_brute_view(request):
             .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
 
-        # Achats (60)
-        achats = (
+        # Achats et services extérieurs (60, 61, 62)
+        charges = (
             CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="60", **filters)
+            .filter(nature="CHARGE", numero_compte__regex=r"^(60|61|62)", **filters)
             .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
 
-        return produits, achats
+        return produits, charges
 
     # Calcul période courante
     current_prod, current_ach = calculate_marge_brute(date_start, date_end)
@@ -1425,23 +1427,23 @@ def evolution_marges_view(request):
         
         last_day_of_month = next_month - timedelta(days=1)
         
-        # Calculer CA pour ce mois
-        ca_mois = (
+        # Calculer Produits (70, 71, 72) pour marge brute
+        produits_marge = (
             CompteResultat.objects
             .filter(
                 nature="PRODUIT",
-                numero_compte__startswith="70",
+                numero_compte__regex=r"^(70|71|72)",
                 date__range=[current_date, last_day_of_month]
             )
             .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
         
-        # Calculer Coût d'achat (compte 60) pour marge brute
-        cout_achat = (
+        # Calculer Charges (60, 61, 62) pour marge brute
+        charges_marge = (
             CompteResultat.objects
             .filter(
                 nature="CHARGE",
-                numero_compte__startswith="60",
+                numero_compte__regex=r"^(60|61|62)",
                 date__range=[current_date, last_day_of_month]
             )
             .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
@@ -1474,10 +1476,10 @@ def evolution_marges_view(request):
         marge_brute = None
         marge_nette = None
         
-        if ca_mois != 0 and abs(ca_mois) > 1000:
-            marge_brute_montant = ca_mois - cout_achat
-            marge_brute = float((marge_brute_montant / ca_mois) * 100)
-            marge_nette = float((resultat_net / ca_mois) * 100)
+        if produits_marge != 0 and abs(produits_marge) > 1000:
+            marge_brute_montant = produits_marge - charges_marge
+            marge_brute = float((marge_brute_montant / produits_marge) * 100)
+            marge_nette = float((resultat_net / produits_marge) * 100)
         
         # Formater le mois pour l'affichage
         mois_label = current_date.strftime("%b %Y")  # Ex: "Jan 2025"

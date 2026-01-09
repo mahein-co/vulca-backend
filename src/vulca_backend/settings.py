@@ -134,7 +134,6 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://vulca-compta.onrender.com",  # Correct frontend URL
-    "https://vulca-backend.onrender.com",
     "https://vulca-backend-2bqc.onrender.com",
     'http://localhost:8000', 
     'http://127.0.0.1:8000'
@@ -143,7 +142,6 @@ CORS_ALLOWED_ORIGINS = [
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "https://vulca-compta.onrender.com",  # Correct frontend URL
-    "https://vulca-backend.onrender.com",
     "https://vulca-backend-2bqc.onrender.com",
     'http://localhost:8000', 
     'http://127.0.0.1:8000'

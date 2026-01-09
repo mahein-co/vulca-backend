@@ -41,6 +41,7 @@ urlpatterns = [
     path("evolution-marge-operationnelle/",views.evolution_marge_operationnelle_view,name="evolution-marge-operationnelle"),
     path("evolution-roe/",views.evolution_roe_view,name="evolution-roe"),
     path("evolution-roa/",views.evolution_roa_view,name="evolution-roa"),
+    path('evolution-ca-resultat/', views.evolution_ca_resultat_view, name='evolution-ca-resultat'), # NEW OPTIMIZED ENDPOINT
     path("top-comptes-mouvementes/",views.top_comptes_mouvementes_view,name="top-comptes-mouvementes"),
     # path("chiffre-affaire-mensuel/",views.chiffre_affaire_mensuel_view,name="chiffre-affaire-mensuel"),
     # path("chiffre-affaire-annuel/",views.chiffre_affaire_annuel_view,name="chiffre-affaire-annuel"),

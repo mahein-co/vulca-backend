@@ -1,25 +1,26 @@
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView
-from . import views
+from django.urls import path
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenObtainPairView
 
-router = DefaultRouter()
-router.register(r'users', views.UserViewSet, basename='user')
-router.register(r'projects', views.ProjectViewSet, basename='project')
-router.register(r'tasks', views.TaskViewSet, basename='task')
+from app import views
+
+
 
 urlpatterns = [
-    # Authentication
-    path('signup/', views.SignupAPI.as_view(), name='signup'),
-    path('login/', views.LoginAPI.as_view(), name='login'),
-    path('logout/', views.LogoutAPI.as_view(), name='logout'),
-    path('me/', views.MeAPI.as_view(), name='me'),
-    path('check-approval/', views.CheckApprovalAPI.as_view(), name='check_approval'),
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path("users/", view=views.get_users, name="users"),
+    path("users/profile/", view=views.UserProfileView.as_view(), name="users-profile"),
+    path("users/register/", view=views.register_user, name="users-register"),
+    path("users/<int:pk>/update/", view=views.update_user, name="user-update"),
+    path("users/<int:pk>/delete/", view=views.delete_user, name="user-delete"),
     
-    # Page d'attente
-    path('pending/', views.pending_approval_view, name='pending_approval'),
+    path('users/login/', views.MyTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('users/token/refresh/', views.CookieTokenRefreshView.as_view(), name='token_refresh'),
     
-    # REST API
-    path('', include(router.urls)),
+    path("users/verify-otp/", views.verify_otp, name="verify_otp"),
+    path("users/resend-otp/", views.ResendOtpAPIView.as_view(), name="resend-otp"),
+
+    path("password-reset/request/", views.request_password_reset, name="request-password-reset"),
+    path("password-reset/verify/", views.verify_reset_otp, name="verify-reset-otp"),
+    path("password-reset/confirm/", views.reset_password, name="reset-password"),
+    path("users/change-password/", views.change_password, name="change-password"),
 ]
+

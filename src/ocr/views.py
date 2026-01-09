@@ -550,10 +550,23 @@ def all_pieces_list_view(request):
     Retourne la liste combinée de FileSource et FormSource
     pour affichage dans GestionPiecesBoard
     """
+    # Récupérer les paramètres de date
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+
     # Récupérer tous les FileSource
     file_sources = FileSource.objects.all().order_by('-uploaded_at')
     # Récupérer tous les FormSource
     form_sources = FormSource.objects.all().order_by('-created_at')
+    
+    # FILTRAGE PAR DATE (Optimisation Performance)
+    if date_start:
+        file_sources = file_sources.filter(date__gte=date_start)
+        form_sources = form_sources.filter(date__gte=date_start)
+        
+    if date_end:
+        file_sources = file_sources.filter(date__lte=date_end)
+        form_sources = form_sources.filter(date__lte=date_end)
     
     pieces = []
     

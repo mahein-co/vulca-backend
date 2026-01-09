@@ -6,7 +6,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/auth/', include('app.urls')),
+    path('', include('app.urls')), # Authentication & Users matched at root (e.g. /users/...)
     path('api/', include('ocr.urls')),
     path('api/', include('compta.urls')),
     # re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),

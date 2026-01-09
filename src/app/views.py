@@ -348,7 +348,7 @@ def verify_otp(request):
 
     if not username or not otp_code:
         data["error"] = True
-        data["message"] = "Username and OTP code are required."
+        data["message"] = "Le nom d'utilisateur et le code OTP sont requis."
         return Response({"data": data}, status=400)
 
     User = get_user_model()
@@ -356,26 +356,26 @@ def verify_otp(request):
         user = User.objects.get(username=username)
     except User.DoesNotExist:
         data["error"] = True
-        data["message"] = "User does not exist."
+        data["message"] = "L'utilisateur n'existe pas."
         return Response({"data": data}, status=404)
 
     # Récupérer le dernier OTP
     otp_token = OtpToken.objects.filter(user=user).order_by('-otp_expires_at').first()
     if not otp_token:
         data["error"] = True
-        data["message"] = "OTP not found. Please request a new one."
+        data["message"] = "Code OTP introuvable. Veuillez en demander un nouveau."
         return Response({"data": data}, status=404)
 
     # Vérifier l'OTP
     if otp_token.otp_code != otp_code:
         data["error"] = True
-        data["message"] = "Invalid OTP code."
+        data["message"] = "Code OTP invalide."
         return Response({"data": data}, status=400)
 
     # Vérifier l'expiration
     if otp_token.otp_expires_at < timezone.now():
         data["error"] = True
-        data["message"] = "OTP has expired. Please request a new one."
+        data["message"] = "Le code OTP a expiré. Veuillez en demander un nouveau."
         return Response({"data": data}, status=400)
 
     # Activer l'utilisateur
@@ -384,7 +384,7 @@ def verify_otp(request):
     user.save()
 
     data["error"] = False
-    data["message"] = "Account verified successfully! You can now log in."
+    data["message"] = "Compte vérifié avec succès ! Vous pouvez maintenant vous connecter."
     return Response({"data": data}, status=200)
 
 

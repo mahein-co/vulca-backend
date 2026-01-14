@@ -129,20 +129,37 @@ SIMPLE_JWT = {
 # CORS Configuration
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
+CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
 # CSRF Configuration
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
-    "https://vulca-compta.onrender.com",  # Correct frontend URL
-    "https://vulca-backend-2bqc.onrender.com",
+    "https://vulca-front.onrender.com",
+    # "https://vulca-compta.onrender.com",  # Correct frontend URL
+    # "https://vulca-backend-2bqc.onrender.com",
+    "https://vulca-back.onrender.com",
     'http://localhost:8000', 
     'http://127.0.0.1:8000'
 ]
 
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
-    "https://vulca-compta.onrender.com",  # Correct frontend URL
-    "https://vulca-backend-2bqc.onrender.com",
+    "https://vulca-front.onrender.com",
+    # "https://vulca-compta.onrender.com",  # Correct frontend URL
+    "https://vulca-back.onrender.com",
+    # "https://vulca-backend-2bqc.onrender.com",
     'http://localhost:8000', 
     'http://127.0.0.1:8000'
 ]
@@ -188,17 +205,26 @@ OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o')
 
 
 
-# Email 
+# Environment
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
+# Email Configuration
+if ENVIRONMENT == "production":
+    EMAIL_BACKEND = "sendgrid_backend.SendgridBackend"
+    SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+else:
+    # Gmail SMTP for development
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_HOST = "smtp.gmail.com"
+    EMAIL_PORT = 587
+    EMAIL_USE_TLS = True
+    EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER_GMAIL")
+    EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD_GMAIL")
 
-DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL')
-EMAIL_HOST = os.getenv('EMAIL_HOST')
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER')
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD')
-EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
-EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
-EMAIL_BACKEND = os.getenv('EMAIL_BACKEND')
-SENDGRID_API_KEY = EMAIL_HOST_PASSWORD  # Required for django-sendgrid-v5
+DEFAULT_FROM_EMAIL = os.getenv(
+    "DEFAULT_FROM_EMAIL",
+    "VulcaIA <yurihoussen@gmail.com>"
+)
 
 
 # SMTP

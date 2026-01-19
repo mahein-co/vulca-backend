@@ -11,10 +11,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv('SECRET_KEY')
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
+
+# === FRONTEND URL ===
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
-
-ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS").split(",")
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 APPEND_SLASH = False
 
 # Application definition
@@ -126,9 +128,19 @@ SIMPLE_JWT = {
     'SIGNING_KEY': SECRET_KEY,
 }
 
-# CORS Configuration
-CORS_ALLOW_ALL_ORIGINS = False
+# === CORS & CSRF Configuration ===
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+
+# Allow specific origins (for production, you can add regex patterns)
+CORS_ALLOW_ALL_ORIGINS = False
+
+# Regex patterns for allowed origins (for subdomains)
+# This allows https://www.lexaiq.com, https://api.lexaiq.com, and https://lexaiq.com
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://(\w+\.)?lexaiq\.com$",  # Allows all subdomains of lexaiq.com
+]
+
 CORS_ALLOW_HEADERS = [
     'accept',
     'accept-encoding',
@@ -141,28 +153,31 @@ CORS_ALLOW_HEADERS = [
     'x-requested-with',
 ]
 
-CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-
-# CSRF Configuration
+# Explicit allowed origins
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "https://vulca-front.onrender.com",
-    # "https://vulca-compta.onrender.com",  # Correct frontend URL
-    # "https://vulca-backend-2bqc.onrender.com",
-    "https://vulca-back.onrender.com",
-    'http://localhost:8000', 
-    'http://127.0.0.1:8000'
+    "http://localhost:3000",  # Local development
+    "https://www.lexaiq.com",  # Production frontend
+    "https://lexaiq.com",  # Production frontend (without www)
+    "https://api.lexaiq.com",  # Production backend API
+    'http://localhost:8000',  # Local backend
+    'http://127.0.0.1:8000'  # Local backend alternative
 ]
 
+# CSRF trusted origins
 CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "https://vulca-front.onrender.com",
-    # "https://vulca-compta.onrender.com",  # Correct frontend URL
-    "https://vulca-back.onrender.com",
-    # "https://vulca-backend-2bqc.onrender.com",
-    'http://localhost:8000', 
-    'http://127.0.0.1:8000'
+    "http://localhost:3000",  # Local development
+    "https://www.lexaiq.com",  # Production frontend
+    "https://lexaiq.com",  # Production frontend (without www)
+    "https://api.lexaiq.com",  # Production backend API
+    'http://localhost:8000',  # Local backend
+    'http://127.0.0.1:8000'  # Local backend alternative
 ]
+
+# Security settings for cookies (important for production)
+CSRF_COOKIE_SECURE = not DEBUG  # True in production, False in development
+CSRF_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = not DEBUG  # True in production, False in development
+SESSION_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"  # "None" for cross-origin in production
 
 # Désactiver la redirection vers /login/
 LOGIN_URL = None

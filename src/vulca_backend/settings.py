@@ -32,9 +32,11 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    "pgvector",
     'app.apps.AppConfig',  # ← APPLICATION ACCOUNT USER
     'compta.apps.ComptaConfig',  # APPLICATION COMPTA
     "ocr.apps.OcrConfig",  # APPLICATION OCR
+    "chatbot.apps.ChatbotConfig",
 ]
 
 MIDDLEWARE = [
@@ -215,8 +217,8 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o')
 
 # Configuration des fichiers médias (Uploads)
-# MEDIA_URL = '/media/'
-# MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 
 

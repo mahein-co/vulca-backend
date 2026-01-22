@@ -1366,167 +1366,6 @@ def bfr_view(request):
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
-def leverage_brut_view(request):
-    """
-    Calcul du Leverage Brut avec variation par rapport à la période précédente
-    Formule : Leverage Brut = Total Endettement / EBE
-    GET /api/leverage-brut/?date_start=2025-01-01&date_end=2025-12-31
-    """
-    from datetime import datetime
-    from dateutil.relativedelta import relativedelta
-
-    date_start = request.GET.get("date_start")
-    date_end = request.GET.get("date_end")
-
-    def calculate_leverage(start_date, end_date):
-        """Fonction helper pour calculer le Leverage Brut pour une période donnée"""
-        filters = {}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-        
-        # Total Endettement = Passif Courant + Passif Non Courant (Dettes financières)
-        # Comptes 16* (Emprunts et dettes assimilées) + 40* (Fournisseurs) + 42* (Personnel) + 43* (Sécurité sociale) + 44* (État)
-        total_endettement = (
-            Bilan.objects
-            .filter(
-                type_bilan="PASSIF",
-                numero_compte__regex=r'^(16|40|42|43|44)',
-                **filters
-            )
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        # Calcul de l'EBE depuis CompteResultat
-        # Formule PCG 2005 : EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
-        
-        # Ventes de marchandises (70)
-        compte_70 = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Production stockée (71)
-        compte_71 = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="71", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Production immobilisée (72)
-        compte_72 = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="72", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Subventions d'exploitation (74)
-        compte_74 = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="74", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Achats de marchandises (60)
-        compte_60 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="60", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Services extérieurs (61)
-        compte_61 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="61", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Autres services extérieurs (62)
-        compte_62 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="62", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Impôts et taxes (63)
-        compte_63 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="63", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Charges de personnel (64)
-        compte_64 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="64", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Calcul de l'EBE
-        ebe = (compte_70 + compte_71 + compte_72 + compte_74) - (compte_60 + compte_61 + compte_62 + compte_63 + compte_64)
-        
-        # Calcul du Leverage Brut
-        if ebe != 0 and abs(ebe) >= 10000:  # Seuil minimum pour éviter les divisions aberrantes
-            leverage_brut = total_endettement / ebe
-        else:
-            leverage_brut = None
-        
-        return {
-            "total_endettement": total_endettement,
-            "ebe": ebe,
-            "leverage_brut": leverage_brut
-        }
-
-    # Calcul période courante
-    current_data = calculate_leverage(date_start, date_end)
-    
-    # Calcul période précédente et variation
-    variation = None
-    if date_start and date_end and current_data["leverage_brut"] is not None:
-        try:
-            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
-            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
-            
-            delta_days = (end_date_obj - start_date_obj).days
-            
-            if delta_days >= 360:  # Annuel
-                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
-                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
-            elif 28 <= delta_days <= 32:  # Mensuel
-                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
-                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
-            elif 88 <= delta_days <= 92:  # Trimestriel
-                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
-                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
-            else:
-                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
-                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
-            
-            previous_data = calculate_leverage(previous_start, previous_end)
-            
-            # Calculer variation en pourcentage
-            # Pour le leverage, on utilise un seuil plus bas (0.01) car c'est un ratio
-            if previous_data["leverage_brut"] is not None and previous_data["leverage_brut"] != 0 and abs(previous_data["leverage_brut"]) > 0.01:
-                variation = ((current_data["leverage_brut"] - previous_data["leverage_brut"]) / abs(previous_data["leverage_brut"])) * 100
-                # Plafonner la variation à ±1000%
-                if variation > 1000:
-                    variation = 1000
-                elif variation < -1000:
-                    variation = -1000
-            else:
-                variation = None
-        except:
-            pass
-
-    return Response({
-        "leverage_brut": current_data["leverage_brut"],
-        "variation": variation,
-        "total_endettement": current_data["total_endettement"],
-        "ebe": current_data["ebe"]
-    })
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
 def tresorerie_view(request):
     """
     Calcul de la Trésorerie avec variation par rapport à la période précédente
@@ -2578,7 +2417,7 @@ def caf_view(request):
 def leverage_brut_view(request):
     """
     Calcul du Leverage Brut avec variation par rapport à la période précédente
-    GET /api/leverage-brut/?date_start=2025-01-01&date_end=2025-12-31
+    Formule : Leverage Brut = Total Dettes / EBE
     """
     from datetime import datetime
     from dateutil.relativedelta import relativedelta
@@ -2587,78 +2426,57 @@ def leverage_brut_view(request):
     date_end = request.GET.get("date_end")
 
     def calculate_leverage(start_date, end_date):
-        """Fonction helper pour calculer le Leverage pour une période donnée"""
-        filters = {}
+        base_filters = {}
         if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
+            base_filters["date__range"] = [start_date, end_date]
 
-        # Total endettement
-        total_endettement = (
+        # 1. Endettement (Bilan Passif 16*)
+        dettes = (
             Bilan.objects
-            .filter(
-                type_bilan="PASSIF",
-                categorie__in=["PASSIFS_COURANTS", "PASSIFS_NON_COURANTS"],
-                numero_compte__regex=r"^16|^17|^19",
-                **filters
-            )
+            .filter(type_bilan="PASSIF", numero_compte__startswith="16", **base_filters)
             .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
 
-        # Calcul EBE
-        produits = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__regex=r"^70|^71|^72|^74", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
+        # 2. EBE (CompteResultat)
+        # EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
+        filters = base_filters
+        c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c71 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="71", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c72 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="72", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c74 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="74", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
         
-        charges = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__regex=r"^60|^61|^62|^63|^64", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        ebe = produits - charges
+        c60 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="60", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c61 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="61", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c62 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="62", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c63 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="63", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c64 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="64", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
         
-        leverage = None
-        if ebe != 0 and abs(ebe) >= 1000: # éviter division par zéro
-             leverage = float(total_endettement / ebe)
-             
-        return leverage
+        ebe = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
 
-    # Calcul période courante
+        if ebe != 0:
+            return float(dettes / ebe)
+        return 0.0
+
     current_lev = calculate_leverage(date_start, date_end)
     
-    # Calcul période précédente et variation
     variation = None
     if date_start and date_end:
         try:
             start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
             end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
-            
             delta_days = (end_date_obj - start_date_obj).days
             
-            if delta_days >= 360:
-                prev_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
-                prev_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
-            elif 28 <= delta_days <= 32:
-               prev_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
-               prev_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
-            elif 88 <= delta_days <= 92:
-                prev_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
-                prev_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
-            else:
-                 prev_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
-                 prev_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
+            # Période précédente
+            prev_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
+            prev_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
             
             prev_lev = calculate_leverage(prev_start, prev_end)
-            
-            if prev_lev is not None:
-                variation = current_lev - prev_lev
-        except:
-            pass
+            if prev_lev != 0:
+                variation = ((current_lev - prev_lev) / abs(prev_lev)) * 100
+        except: pass
 
     return Response({
-        "leverage": current_lev,
+        "leverage_brut": current_lev,
         "variation": variation
     })
 
@@ -2722,49 +2540,6 @@ def evolution_ca_resultat_view(request):
     
     return Response(evolution_data)
 
-
-    # Calcul période courante
-    current_leverage = calculate_leverage(date_start, date_end)
-    
-    # Calcul période précédente et variation
-    variation = None
-    if date_start and date_end and current_leverage is not None:
-        try:
-            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
-            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
-            
-            delta_days = (end_date_obj - start_date_obj).days
-            
-            if delta_days >= 360:  # Annuel
-                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
-                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
-            elif 28 <= delta_days <= 32:  # Mensuel
-                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
-                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
-            elif 88 <= delta_days <= 92:  # Trimestriel
-                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
-                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
-            else:
-                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
-                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
-            
-            previous_leverage = calculate_leverage(previous_start, previous_end)
-            
-            # Calculer variation en pourcentage
-            # Pour le leverage, on utilise un seuil plus bas (0.01) car c'est un ratio
-            if previous_leverage is not None and previous_leverage != 0 and abs(previous_leverage) > 0.01:
-                variation = ((current_leverage - previous_leverage) / abs(previous_leverage)) * 100
-            else:
-                variation = None
-        except:
-            pass
-
-    return Response({
-        "leverage_brut": current_leverage,
-        "variation": variation,
-        "total_endettement": Decimal("0.00"),
-        "ebe": Decimal("0.00")
-    })
 
 
 
@@ -2957,8 +2732,12 @@ def dashboard_indicators_view(request):
     dettes_fournisseurs = get_solde("401") + get_solde("408") + get_solde("419")
     bfr = stocks + creances - dettes_fournisseurs 
 
-    # 6. LEVERAGE
-    endettement = get_solde("16") + get_solde("17") + get_solde("19")
+    # 6. LEVERAGE (Via Bilan et CompteResultat pour plus de robustesse)
+    dettes = Bilan.objects.filter(type_bilan="PASSIF", numero_compte__startswith="16")
+    if date_start and date_end: 
+        dettes = dettes.filter(date__range=[date_start, date_end])
+    endettement = dettes.aggregate(t=Sum("montant_ar"))["t"] or Decimal("0.00")
+    
     leverage = Decimal("0.00")
     if ebe != 0:
         leverage = endettement / ebe
@@ -3031,6 +2810,10 @@ def dashboard_indicators_view(request):
             "gearing": {
                  "value": ratio_gearing.quantize(Decimal("0.01")),
                  "alerte": ratio_gearing >= Decimal("1.3")
+            },
+            "leverage": {
+                 "value": leverage.quantize(Decimal("0.01")),
+                 "alerte": leverage >= Decimal("3.5") # Seuil classique pour Leverage Brut
             }
         }
     })

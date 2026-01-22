@@ -9,7 +9,8 @@ urlpatterns = [
     path('', include('app.urls')), # Authentication & Users matched at root (e.g. /users/...)
     path('api/', include('ocr.urls')),
     path('api/', include('compta.urls')),
-    # re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
+    path('api/', include('chatbot.urls')),
+    re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
 ]
 
 # urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)

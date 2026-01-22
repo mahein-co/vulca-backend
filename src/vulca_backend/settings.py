@@ -32,7 +32,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
-    "pgvector",
+    # "pgvector",
     'app.apps.AppConfig',  # ← APPLICATION ACCOUNT USER
     'compta.apps.ComptaConfig',  # APPLICATION COMPTA
     "ocr.apps.OcrConfig",  # APPLICATION OCR

@@ -9,7 +9,7 @@ urlpatterns = [
     path('', include('app.urls')), # Authentication & Users matched at root (e.g. /users/...)
     path('api/', include('ocr.urls')),
     path('api/', include('compta.urls')),
-    path('api/', include('chatbot.urls')),
+    # path('api/', include('chatbot.urls')),
     re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
 ]
 

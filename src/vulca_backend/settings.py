@@ -36,7 +36,7 @@ INSTALLED_APPS = [
     'app.apps.AppConfig',  # ← APPLICATION ACCOUNT USER
     'compta.apps.ComptaConfig',  # APPLICATION COMPTA
     "ocr.apps.OcrConfig",  # APPLICATION OCR
-    "chatbot.apps.ChatbotConfig",
+    # "chatbot.apps.ChatbotConfig",
 ]
 
 MIDDLEWARE = [

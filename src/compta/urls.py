@@ -1,11 +1,12 @@
 from compta import views
+from compta.dashboard_view_optimized import dashboard_indicators_view
 from django.urls import path
 
 urlpatterns = [
     path("journals/generate/", views.generate_journal_view, name="generate-journal"),
     path("journals/", views.list_journals_view, name="list-journals"),
     path("journals/repartition/", views.journal_repartition_view, name="journal-repartition"),
-    path("dashboard/indicators/", views.dashboard_indicators_view, name="dashboard-indicators"),
+    path("dashboard/indicators/", dashboard_indicators_view, name="dashboard-indicators"),
     path("journals/date-range/", views.journal_date_range_view, name="journal-date-range"),
     path("balance/generale/", views.balance_generale_view, name="balance-generale"),
     path("bilans/", views.BilanListCreateView.as_view(), name="list-bilan"),

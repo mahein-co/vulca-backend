@@ -12,7 +12,8 @@ from rest_framework import status
 
 from ocr.models import FileSource, FormSource
 from ocr.serializers import FileSourceSerializer, FormSourceSerializer
-from ocr.utils import detect_file_type, extract_content, clean_ai_json, generate_description
+from ocr.utils import detect_file_type, clean_ai_json, generate_description
+from ocr.openai_vision_ocr import extract_content_with_vision
 from ocr.constants import EXTRACTION_FIELDS_PROMPT
 
 from openai import OpenAI
@@ -207,18 +208,18 @@ def file_source_list_create(request):
     
     has_banque_field = bool(extracted_json.get("banque") or extracted_json.get("nom_banque"))
     
-    if extracted_json.get("numero_facture") or type_doc in ["vente", "achat", "facture"]:
-        piece_type = "Facture"
-    elif has_banque_field or any(k in type_doc for k in ["banc", "banq", "relev", "virement"]):
+    if has_banque_field or any(k in type_doc for k in ["banc", "banq", "relev", "virement"]):
         ref_bancaire = str(extracted_json.get("reference", ""))
         if ref_bancaire.upper().startswith("VIRM") or "virement" in type_doc:
             piece_type = "Virement bancaire"
         else:
             piece_type = "Relevé bancaire"
-    elif "bon" in type_doc and "caisse" in type_doc:
-        piece_type = "Bon d'achat"
     elif "fiche" in type_doc and "paie" in type_doc:
         piece_type = "Fiche de paie"
+    elif "bon" in type_doc and "caisse" in type_doc:
+        piece_type = "Bon d'achat"
+    elif extracted_json.get("numero_facture") or type_doc in ["vente", "achat", "facture"]:
+        piece_type = "Facture"
 
     # Extraire référence
     ref_file = request.data.get("ref_file") or extracted_json.get("numero_facture") or extracted_json.get("reference")
@@ -401,8 +402,8 @@ def extract_content_file_view(request):
     if file_type == "unknown":
         return Response({"error": "Type de fichier non supporté."}, status=400)
 
-    # OCR BRUT
-    content = extract_content(file, file_type)
+    # OCR avec OpenAI Vision API
+    content = extract_content_with_vision(file, file_type, client, settings.OPENAI_MODEL)
     if not content:
         return Response({"error": "Impossible d'extraire le texte."}, status=400)
 
@@ -418,7 +419,7 @@ def extract_content_file_view(request):
             model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "Tu es expert comptable. Réponds uniquement OUI ou NON."},
-                {"role": "user", "content": f"Voici un document : {content[:5000]}\nEst-ce une pièce comptable ?"}
+                {"role": "user", "content": f"Voici un document : {content[:5000]}\n\nEst-ce un document professionnel ou administratif valide (lié à une activité d'entreprise : facture, reçu, document bancaire, RH, fiscal, juridique, etc.) ? Réponds OUI sauf s'il s'agit manifestement d'un document personnel sans lien (ex: photo de vacances, poème) ou illisible."}
             ],
             temperature=0
         )
@@ -426,7 +427,7 @@ def extract_content_file_view(request):
     except Exception as e:
         return Response({"error": f"Erreur OpenAI vérification : {str(e)}"}, status=500)
 
-    if decision not in ["oui", "yes"]:
+    if "oui" not in decision and "yes" not in decision:
         return Response({"error": "Document non reconnu comme pièce comptable."}, status=400)
 
     # ÉTAPE 2 : Type de document
@@ -436,7 +437,7 @@ def extract_content_file_view(request):
             messages=[
                 {
                     "role": "system",
-                    "content": "Tu dois répondre STRICTEMENT par un seul mot parmi : ACHAT, VENTE, BANQUE, CAISSE, OD."
+                    "content": "Tu dois répondre STRICTEMENT par un seul mot parmi : ACHAT, VENTE, BANQUE, CAISSE, OD, PAIE.\n\nRÈGLES IMPÉRATIVES :\n1. Si le document est un Relevé Bancaire, un Reçu de Virement ou un Avis de Virement -> C'EST 'BANQUE'.\n2. Si c'est une Facture Client, un Bon de commande ou un Bon de livraison -> 'VENTE'.\n3. Si c'est une Facture Fournisseur ou un Bon d'achat -> 'ACHAT'.\n4. Si c'est un ticket de caisse ou espèces -> 'CAISSE'.\n5. Si c'est une Fiche de Paie ou Bulletin de Salaire -> 'PAIE'.\n6. Pour tout autre document (juridique, fiscal, divers) -> 'OD'."
                 },
                 {
                     "role": "user",
@@ -576,6 +577,13 @@ def all_pieces_list_view(request):
         if ptype == "Bon de caisse":
             ptype = "Bon d'achat"
             
+        # Conversion safe de la date pour le JSON
+        piece_date = fs.date
+        if piece_date and hasattr(piece_date, 'isoformat'):
+            piece_date = piece_date.isoformat()
+        elif piece_date:
+            piece_date = str(piece_date)
+
         pieces.append({
             "id": f"file_{fs.id}",
             "source_type": "file",
@@ -584,9 +592,8 @@ def all_pieces_list_view(request):
             "nom": fs.file_name or "Sans nom",
             "description": fs.description or "",
             "ref": fs.ref_file or "",
-            "date": fs.date.isoformat() if fs.date else None,
+            "date": piece_date,
             "created_at": fs.uploaded_at.isoformat() if fs.uploaded_at else None,
-            # "file_url": request.build_absolute_uri(fs.file.url) if fs.file else None,
         })
     
     # Ajouter FormSource
@@ -594,6 +601,13 @@ def all_pieces_list_view(request):
         ptype = fs.piece_type or "Autres"
         if ptype == "Bon de caisse":
             ptype = "Bon d'achat"
+
+        # Conversion safe de la date pour le JSON
+        piece_date = fs.date
+        if piece_date and hasattr(piece_date, 'isoformat'):
+            piece_date = piece_date.isoformat()
+        elif piece_date:
+            piece_date = str(piece_date)
 
         pieces.append({
             "id": f"form_{fs.id}",
@@ -603,7 +617,7 @@ def all_pieces_list_view(request):
             "nom": fs.ref_file or f"Document {fs.id}",
             "description": fs.description or "",
             "ref": fs.ref_file or "",
-            "date": fs.date.isoformat() if fs.date else None,
+            "date": piece_date,
             "created_at": fs.created_at.isoformat() if fs.created_at else None,
         })
     

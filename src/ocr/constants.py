@@ -8,6 +8,18 @@ Analyse le texte fourni et :
 
 1. Identifie automatiquement tous les champs pertinents (numéro facture, Montant TTC, Montant HT (Hors Taxe), TVA, client, dates, identifiants, devise, Objet/Description, etc.) ainsi que les details possible. Ne mets pas d'espace entre les nombres puis stock toujours l'unité monétaire dans le champs devise et mets en MGA pour l'Ar et autre pour les autres devises d'un autre pays.
 
+⚠️ DATES - TRÈS IMPORTANT :
+   - Extrais TOUTES les dates présentes dans le document
+   - Pour les factures de services (électricité, eau, téléphone), il peut y avoir plusieurs dates de service
+   - Utilise les clés suivantes selon le contexte :
+     * "date_facture" ou "date_emission" ou "date" : date principale du document
+     * "date_echeance" : date limite de paiement
+     * "date_electricite" : date de relevé électricité (si applicable)
+     * "date_eau" : date de relevé eau (si applicable)
+     * "date_service" : date de prestation de service
+   - Format des dates : TOUJOURS en YYYY-MM-DD (ex: "2025-12-24" pour 24/12/25)
+   - Si une date est au format DD/MM/YY ou DD/MM/YYYY, convertis-la en YYYY-MM-DD
+
 2. Donne-moi un JSON propre
 3. Utilise des clés JSON standardisées en snake_case (ex: montant_ht, montant_tva, montant_ttc)
 4. Inclus uniquement les champs réellement présents dans le texte
@@ -19,13 +31,21 @@ Analyse le texte fourni et :
    Le numéro de facture est LE champ le plus important pour identifier un document.
    
    ⚠️ ATTENTION : Ne confonds PAS le numéro de facture avec :
-   - Le numéro de client (N°Client, Client ID)
+   - Le numéro de client (N°Client, Client ID, Référence client)
    - Le numéro de compte
    - Le numéro de téléphone
+   - Le numéro de compteur (N° Compteur électrique, N° Compteur eau)
+   
+   Pour les factures de services publics (JIRAMA, TELMA, etc.) :
+   - Cherche "Numéro :", "Numéro de facture :", "N° facture :", "Facture N°", "Votre facture mois de : XXX Numéro :"
+   - Le numéro de facture est généralement un LONG numéro (10+ chiffres)
+   - Exemple JIRAMA : "Votre facture mois de : Décembre 2025 Numéro : 250 251 225 432 672"
+     → "numero_facture": "250251225432672" (enlève les espaces)
    
    Cherche ACTIVEMENT dans TOUT le texte les patterns suivants :
    - "NeFacure XXX" ou "N°Facture XXX" (ex: "NeFacure 0000636289")
    - "Facture N°XXX" ou "FACTURE N°XXX"
+   - "Numéro : XXX" (après mention de "facture")
    - "N°XXX" ou "N° XXX" (ex: "N°001", "N° 2024-123")
    - "Invoice #XXX" ou "Invoice: XXX"
    - "Ref: XXX" ou "REF: XXX" ou "Référence: XXX"
@@ -39,7 +59,7 @@ Analyse le texte fourni et :
    → "numero_facture": "0000636289" (PAS "1.00391850" qui est le N°Client)
    
    Le numéro peut contenir : chiffres, lettres, tirets, slashes
-   Exemples valides : "001", "0000636289", "FAC-2024-001", "2024/001", "INV-12345"
+   Exemples valides : "001", "0000636289", "FAC-2024-001", "2024/001", "INV-12345", "250251225432672"
    
    TOUJOURS inclure "numero_facture" dans le JSON.
    Si vraiment aucun numéro trouvé après recherche exhaustive, utilise null.

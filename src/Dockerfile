@@ -16,7 +16,11 @@ WORKDIR /app
 
 COPY . /app
 
-RUN pip install --no-cache-dir -r requirements.txt
+# RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    -r requirements.txt
 
 CMD sh -c "gunicorn vulca_backend.wsgi:application -w 2 -k gthread --threads 4 --timeout 120 --bind 0.0.0.0:$PORT"
 

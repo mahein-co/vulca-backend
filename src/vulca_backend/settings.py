@@ -38,7 +38,8 @@ INSTALLED_APPS = [
     'app.apps.AppConfig',  # ← APPLICATION ACCOUNT USER
     'compta.apps.ComptaConfig',  # APPLICATION COMPTA
     "ocr.apps.OcrConfig",  # APPLICATION OCR
-    # "chatbot.apps.ChatbotConfig",
+    'chatbot.apps.ChatbotConfig',
+    'rest_framework.authtoken',
 ]
 
 
@@ -114,7 +115,8 @@ AUTHENTICATION_BACKENDS = ['django.contrib.auth.backends.ModelBackend']
 # Configuration REST Framework avec JWT
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'app.authentication.JWTAuthenticationFromCookie',
+        #'app.authentication.JWTAuthenticationFromCookie',
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
@@ -139,7 +141,7 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
 # Allow specific origins (for production, you can add regex patterns)
-CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOW_ALL_ORIGINS = True
 
 # Regex patterns for allowed origins (for subdomains)
 # This allows https://www.lexaiq.com, https://api.lexaiq.com, and https://lexaiq.com
@@ -163,6 +165,7 @@ CORS_ALLOW_HEADERS = [
 # Explicit allowed origins
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",  # Local development
+    "http://127.0.0.1:3000",
     "https://www.lexaiq.com",  # Production frontend
     "https://lexaiq.com",  # Production frontend (without www)
     "https://api.lexaiq.com",  # Production backend API
@@ -174,6 +177,7 @@ CORS_ALLOWED_ORIGINS = [
 # CSRF trusted origins
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",  # Local development
+    "http://127.0.0.1:3000",
     "https://www.lexaiq.com",  # Production frontend
     "https://lexaiq.com",  # Production frontend (without www)
     "https://api.lexaiq.com",  # Production backend API
@@ -182,9 +186,9 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 
 # Security settings for cookies (important for production)
-CSRF_COOKIE_SECURE = not DEBUG  # True in production, False in development
+CSRF_COOKIE_SECURE = False  # True in production, False in development
 CSRF_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SECURE = not DEBUG  # True in production, False in development
+SESSION_COOKIE_SECURE = False  # True in production, False in development
 SESSION_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"  # "None" for cross-origin in production
 
 if not DEBUG:

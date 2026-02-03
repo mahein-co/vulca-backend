@@ -320,7 +320,7 @@ class CookieTokenRefreshView(TokenRefreshView):
 
         # Créer une réponse vide ou avec un message
         response = Response({"message": "Access token refreshed"}, status=status.HTTP_200_OK)
-
+        
         # Cookie settings based on environment
         cookie_params = {
             "httponly": True,

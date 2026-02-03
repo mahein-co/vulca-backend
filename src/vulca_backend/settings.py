@@ -11,6 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv('SECRET_KEY')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 # === FRONTEND URL ===
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -185,6 +186,10 @@ CSRF_COOKIE_SECURE = not DEBUG  # True in production, False in development
 CSRF_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = not DEBUG  # True in production, False in development
 SESSION_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"  # "None" for cross-origin in production
+
+if not DEBUG:
+    SESSION_COOKIE_DOMAIN = ".lexaiq.com"
+    CSRF_COOKIE_DOMAIN = ".lexaiq.com"
 
 # Désactiver la redirection vers /login/
 LOGIN_URL = None

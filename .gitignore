@@ -32,6 +32,13 @@ env/
 # source file
 */source_files/
 
+# Django migrations
+**/migrations/
+!**/migrations/__init__.py
+
+# Chatbot module (temporaire ou expérimental)
+src/chatbot/
+
 # Django
 *.log
 local_settings.py

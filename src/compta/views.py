@@ -1,4 +1,5 @@
 import json
+from openai import OpenAI
 from decimal import Decimal
 from datetime import datetime, date
 
@@ -7,25 +8,26 @@ from django.db.models import Sum, Max, Min, DecimalField, Case, When, Q
 
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
-
-from openai import OpenAI
-from ocr.pcg_loader import get_pcg_label
-from ocr.constants import PCG_MAPPING
+from vulca_backend import settings
 from ocr.utils import clean_ai_json
 from ocr.models import FileSource, FormSource
+# from chatbot.models import ChatMessage, MessageHistory, RAGContent
 
-from compta.models import Journal, GrandLivre, Bilan, CompteResultat, Balance
+from compta.models import Journal, GrandLivre, Bilan, CompteResultat, Balance, Project, ProjectAccess
 from compta.serializers import (
     JournalSerializer, BilanSerializer, BalanceSerializer, CompteResultatSerializer,
     ChiffreAffaireSerializer, EbeSerializer, ResultatNetSerializer, BfrSerializer,
     CafSerializer, LeverageSerializer, AnnuiteCafSerializer, MargeNetteSerializer,
     DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer,
     CurrentRatioSerializer, QuickRatioSerializer, GearingSerializer, RotationStockSerializer,
-    MargeOperationnelleSerializer, MargeBruteSerializer, DelaisClientsSerializer, DelaisFournisseursSerializer
+    MargeOperationnelleSerializer, MargeBruteSerializer, DelaisClientsSerializer, DelaisFournisseursSerializer,
+    ProjectSerializer, ProjectAccessSerializer, ProjectListSerializer
 )
+from compta.permissions import HasProjectAccess
+from ocr.pcg_loader import PCG_MAPPING, get_pcg_label
 
 from vulca_backend import settings
 
@@ -34,14 +36,17 @@ client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def list_journals_view(request):
     journal_type = request.GET.get("type")
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
     search_term = request.GET.get("search")
 
-    queryset = Journal.objects.all().order_by("-date", "numero_piece")
+    # PROJECT FILTER (STRICT)
+    project_id = getattr(request, 'project_id', None)
+
+    queryset = Journal.objects.filter(project_id=project_id).order_by("-date", "numero_piece")
 
     if journal_type:
         queryset = queryset.filter(type_journal=journal_type)
@@ -91,7 +96,7 @@ def list_journals_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def journal_repartition_view(request):
     """
     Retourne la répartition des montants par type de journal.
@@ -100,64 +105,89 @@ def journal_repartition_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
     
-    queryset = Journal.objects.all()
+    # PROJECT FILTER (STRICT)
+    project_id = getattr(request, 'project_id', None)
+    
+    queryset = Journal.objects.filter(project_id=project_id)
     
     if date_start and date_end:
         queryset = queryset.filter(date__range=[date_start, date_end])
         
     from django.db.models import Count, Sum
     
-    # Agrégation par type de journal
-    repartition = queryset.values('type_journal').annotate(
-        total_amount=Sum('debit_ar'), # On utilise le débit comme référence de volume
-        count=Count('id')
-    ).order_by('-total_amount')
+    from decimal import Decimal, InvalidOperation
     
-    # Calcul du total global pour les pourcentages
-    total_global = sum((item['total_amount'] or 0) for item in repartition)
-    if total_global == 0:
-        total_global = 1 # Eviter division par zéro
+    try:
+        # Agrégation par type de journal
+        # ⚡ [BUGFIX] : Certains journaux ont le nom complet ('Journal des achats') au lieu du code ('ACHAT')
+        repartition_qs = queryset.values('type_journal').annotate(
+            total_amount=Sum('debit_ar'),
+            count=Count('id')
+        )
 
-    data = []
-    
-    # Mapping pour les labels et couleurs (optionnel, le frontend peut aussi le gérer)
-    LABELS = {
-        'ACHAT': 'Achats',
-        'VENTE': 'Ventes',
-        'BANQUE': 'Banques',
-        'CAISSE': 'Caisses',
-        'OD': 'Opérations diverses',
-        'AN': 'À Nouveaux'
-    }
-    
-    COLORS = {
-        'ACHAT': 'bg-red-800',
-        'VENTE': 'bg-emerald-900',
-        'BANQUE': 'bg-blue-900',
-        'CAISSE': 'bg-amber-800',
-        'OD': 'bg-gray-600',
-        'AN': 'bg-purple-800'
-    }
-
-    for item in repartition:
-        amount = item['total_amount'] or 0
-        percentage = (amount / total_global) * 100
-        journal_code = item['type_journal']
+        # Normalisation des résultats agrégés
+        normalized_repartition = {}
         
-        data.append({
-            "code": journal_code,
-            "name": LABELS.get(journal_code, journal_code),
-            "amount": float(amount),
-            "percentage": round(percentage, 1),
-            "value": round(percentage, 1),
-            "count": item['count'],
-            "color": COLORS.get(journal_code, 'bg-gray-500')
+        DISPLAY_TO_CODE = {
+            'Journal des achats': 'ACHAT',
+            'Journal des ventes': 'VENTE',
+            'Journal de banque': 'BANQUE',
+            'Journal de caisse': 'CAISSE',
+            'Journal des opérations diverses': 'OD',
+            'Journal des à-nouveaux': 'AN'
+        }
+
+        for item in repartition_qs:
+            raw_type = item['type_journal']
+            code = DISPLAY_TO_CODE.get(raw_type, raw_type)
+            
+            if code not in normalized_repartition:
+                normalized_repartition[code] = {'total_amount': Decimal('0.00'), 'count': 0}
+            
+            # Cast safe to Decimal to avoid TypeError with float
+            amount_val = item['total_amount'] or 0
+            try:
+                amount_dec = Decimal(str(amount_val))
+            except (InvalidOperation, TypeError):
+                amount_dec = Decimal('0.00')
+                
+            normalized_repartition[code]['total_amount'] += amount_dec
+            normalized_repartition[code]['count'] += item['count']
+
+        # Calcul du total global pour les pourcentages
+        total_global = sum(item['total_amount'] for item in normalized_repartition.values())
+        if total_global == 0:
+            total_global = Decimal('1') 
+
+        # Transformer le dictionnaire normalisé en liste triée
+        sorted_repartition = sorted(normalized_repartition.items(), key=lambda x: x[1]['total_amount'], reverse=True)
+
+        data = []
+        LABELS = {'ACHAT': 'Achats', 'VENTE': 'Ventes', 'BANQUE': 'Banques', 'CAISSE': 'Caisses', 'OD': 'Opérations diverses', 'AN': 'À Nouveaux'}
+        COLORS = {'ACHAT': 'bg-red-800', 'VENTE': 'bg-emerald-900', 'BANQUE': 'bg-blue-900', 'CAISSE': 'bg-amber-800', 'OD': 'bg-gray-600', 'AN': 'bg-purple-800'}
+
+        for journal_code, stats in sorted_repartition:
+            amount = stats['total_amount']
+            percentage = (amount / total_global) * 100
+            
+            data.append({
+                "code": journal_code,
+                "name": LABELS.get(journal_code, journal_code),
+                "amount": float(amount),
+                "percentage": round(percentage, 1),
+                "value": round(percentage, 1),
+                "count": stats['count'],
+                "color": COLORS.get(journal_code, 'bg-gray-500')
+            })
+            
+        return Response({
+            "total_global": float(total_global) if total_global > 1 else 0,
+            "journals": data
         })
-        
-    return Response({
-        "total_global": float(total_global) if total_global > 1 else 0,
-        "journals": data
-    })
+
+    except Exception as e:
+        # En cas d'erreur imprévue, on retourne l'erreur pour débugger au lieu d'un 500 muet
+        return Response({"error": "Internal Server Error", "details": str(e)}, status=500)
 
 # CLASSIFICATION 
 def classify_accounting(document_json: dict, pcg_mapping: dict):
@@ -494,11 +524,10 @@ def generate_journal_from_pcg(document_json):
 
 
 # REFACTORED LOGIC FOR REUSE
-def process_journal_generation(document_json, file_source=None, form_source=None):
+def process_journal_generation(document_json, project_id=None, file_source=None, form_source=None):
     """
-    Fonction utilitaire pour générer le journal sans dépendre de 'request'.
-    Peut être appelée par la vue ou par d'autres processus (ex: après OCR).
-    Retourne un dict avec le résultat ou lève une exception.
+    Fonction utilitaire pour générer le journal.
+    project_id: ID du projet auquel assigner les écritures.
     """
     
     # ===================================================
@@ -546,6 +575,7 @@ def process_journal_generation(document_json, file_source=None, form_source=None
                 
                 # Générer le journal pour cette transaction
                 ai_result = generate_journal_from_pcg(transaction_doc)
+                ai_result["project_id"] = project_id
                 
                 return {
                     "success": True,
@@ -612,6 +642,7 @@ def process_journal_generation(document_json, file_source=None, form_source=None
                     libelle = line.get("libelle", f"Compte {numero_compte}")
                 
                 entry = Journal(
+                    project_id=project_id,
                     date=date_val,
                     numero_piece=numero_piece,
                     type_journal=type_journal,
@@ -691,6 +722,7 @@ def process_journal_generation(document_json, file_source=None, form_source=None
             libelle = line.get("libelle", f"Compte {numero_compte}")
 
         entry = Journal(
+            project_id=project_id,
             date=date_val,
             numero_piece=numero_piece,
             type_journal=type_journal,
@@ -739,7 +771,7 @@ def process_journal_generation(document_json, file_source=None, form_source=None
             
             # Si solde pas encore chargé en mémoire, le chercher
             if compte not in current_soldes:
-                last_gl = GrandLivre.objects.filter(numero_compte=compte).order_by('-date', '-id').first()
+                last_gl = GrandLivre.objects.filter(project_id=project_id, numero_compte=compte).order_by('-date', '-id').first()
                 current_soldes[compte] = last_gl.solde if last_gl else Decimal('0.00')
             
             # Calcul nouveau solde
@@ -747,6 +779,7 @@ def process_journal_generation(document_json, file_source=None, form_source=None
             current_soldes[compte] = new_solde
             
             gl_entries_to_create.append(GrandLivre(
+                project_id=project_id,
                 journal=entry,
                 numero_compte=compte,
                 date=entry.date,
@@ -781,6 +814,7 @@ def process_journal_generation(document_json, file_source=None, form_source=None
             
             # Appel manuel à la logique du signal generate_balance
             balance, _ = Balance.objects.get_or_create(
+                project_id=project_id,
                 numero_compte=compte, 
                 date=date_val,
                 defaults={"libelle": get_pcg_label(compte)}
@@ -843,11 +877,15 @@ class StandardPagination(PageNumberPagination):
 
 class BilanListCreateView(generics.ListCreateAPIView):
     serializer_class = BilanSerializer
-    permission_classes = [AllowAny]
-    pagination_class = StandardPagination
+    permission_classes = [IsAuthenticated, HasProjectAccess]
+    pagination_class = None  # Disable pagination to return array for frontend
 
     def get_queryset(self):
-        queryset = Bilan.objects.all()
+        project_id = getattr(self.request, 'project_id', None)
+        if not project_id:
+            return Bilan.objects.none()
+            
+        queryset = Bilan.objects.filter(project_id=project_id)
         # Filtres
         date = self.request.query_params.get('date')
         date_start = self.request.query_params.get('date_start')
@@ -865,11 +903,15 @@ class BilanListCreateView(generics.ListCreateAPIView):
 
 class CompteResultatListCreateView(generics.ListCreateAPIView):
     serializer_class = CompteResultatSerializer
-    permission_classes = [AllowAny]
-    pagination_class = StandardPagination
+    permission_classes = [IsAuthenticated, HasProjectAccess]
+    pagination_class = None  # Disable pagination
 
     def get_queryset(self):
-        queryset = CompteResultat.objects.all()
+        project_id = getattr(self.request, 'project_id', None)
+        if not project_id:
+            return CompteResultat.objects.none()
+
+        queryset = CompteResultat.objects.filter(project_id=project_id)
         # Filtres
         date = self.request.query_params.get('date')
 
@@ -885,36 +927,38 @@ class CompteResultatListCreateView(generics.ListCreateAPIView):
 
 
 @api_view(["POST"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def create_bilan_manual_view(request):
     """
     Create a single Bilan entry from manual form input.
     POST /api/bilans/manual/
     """
+    project_id = getattr(request, "project_id", None)
     serializer = BilanSerializer(data=request.data)
     if serializer.is_valid():
-        serializer.save()
+        serializer.save(project_id=project_id)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(["POST"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def create_compte_resultat_manual_view(request):
     """
     Create a single CompteResultat entry from manual form input.
     POST /api/CompteResultats/manual/
     """
+    project_id = getattr(request, "project_id", None)
     serializer = CompteResultatSerializer(data=request.data)
     if serializer.is_valid():
-        serializer.save()
+        serializer.save(project_id=project_id)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # GENERATE JOURNAL VIEW
 @api_view(["POST"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def generate_journal_view(request):
     document_json = request.data
     
@@ -936,8 +980,10 @@ def generate_journal_view(request):
         except FormSource.DoesNotExist:
             pass
 
+    project_id = getattr(request, 'project_id', None)
+    
     try:
-        result = process_journal_generation(document_json, file_source, form_source)
+        result = process_journal_generation(document_json, project_id, file_source, form_source)
         return Response(result, status=status.HTTP_201_CREATED)
     except ValidationError as e:
         return Response({"error": str(e)}, status=400)
@@ -946,7 +992,7 @@ def generate_journal_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def chiffre_affaire_view(request):
     """
     Calcul du Chiffre d'Affaires avec variation par rapport à la période précédente
@@ -958,9 +1004,12 @@ def chiffre_affaire_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     def calculate_ca(start_date, end_date):
         """Fonction helper pour calculer le CA pour une période donnée"""
-        filters = {}
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         
@@ -1025,7 +1074,7 @@ def chiffre_affaire_view(request):
     })
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def ebe_view(request):
     """
     Calcul de l'EBE avec variation par rapport à la période précédente
@@ -1042,7 +1091,9 @@ def ebe_view(request):
         Fonction helper pour calculer l'EBE pour une période donnée
         Formule PCG 2005 : EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
         """
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
 
@@ -1169,7 +1220,7 @@ def ebe_view(request):
     })
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def marge_brute_view(request):
     """
     Calcul de la Marge Brute selon PCG 2005
@@ -1186,7 +1237,9 @@ def marge_brute_view(request):
         """Fonction helper pour calculer la Marge Brute pour une période donnée
         Formule PCG 2005 : Marge Brute = (70+71+72) - (60+61+62)
         """
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
 
@@ -1250,7 +1303,7 @@ def marge_brute_view(request):
     })
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def marge_nette_view(request):
     """
     Calcul de la Marge Nette avec variation par rapport à la période précédente
@@ -1265,7 +1318,9 @@ def marge_nette_view(request):
 
     def calculate_marge_nette(start_date, end_date):
         """Fonction helper pour calculer la Marge Nette pour une période donnée"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         
@@ -1345,7 +1400,7 @@ def marge_nette_view(request):
     })
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def bfr_view(request):
     """
     Calcul du BFR (Besoin en Fonds de Roulement) avec variation par rapport à la période précédente
@@ -1360,7 +1415,9 @@ def bfr_view(request):
 
     def calculate_bfr(start_date, end_date):
         """Fonction helper pour calculer le BFR pour une période donnée"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         
@@ -1472,7 +1529,7 @@ def bfr_view(request):
     })
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def tresorerie_view(request):
     """
     Calcul de la Trésorerie avec variation par rapport à la période précédente
@@ -1487,7 +1544,9 @@ def tresorerie_view(request):
 
     def calculate_tresorerie(start_date, end_date):
         """Fonction helper pour calculer la Trésorerie pour une période donnée"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         
@@ -1563,7 +1622,7 @@ def tresorerie_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_tresorerie_view(request):
     """
     Évolution de la trésorerie sur plusieurs mois
@@ -1578,10 +1637,13 @@ def evolution_tresorerie_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
     
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     # Si pas de dates fournies, utiliser les 6 derniers mois
     if not date_start or not date_end:
         # Récupérer la date max dans le Bilan
-        max_date = Bilan.objects.aggregate(max_date=Max("date"))["max_date"]
+        max_date = Bilan.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
         if max_date:
             end_date_obj = max_date
             start_date_obj = end_date_obj - relativedelta(months=5)  # 6 mois au total
@@ -1610,6 +1672,7 @@ def evolution_tresorerie_view(request):
         tresorerie_mois = (
             Bilan.objects
             .filter(
+                project_id=project_id,
                 type_bilan="ACTIF",
                 numero_compte__startswith="5",
                 date__range=[current_date, last_day_of_month]
@@ -1637,7 +1700,7 @@ def evolution_tresorerie_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_marges_view(request):
     """
     Évolution de la marge brute et marge nette sur plusieurs mois
@@ -1652,10 +1715,13 @@ def evolution_marges_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
     
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     # Si pas de dates fournies, utiliser les 6 derniers mois
     if not date_start or not date_end:
         # Récupérer la date max dans CompteResultat
-        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        max_date = CompteResultat.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
         if max_date:
             end_date_obj = max_date
             start_date_obj = end_date_obj - relativedelta(months=5)  # 6 mois au total
@@ -1684,6 +1750,7 @@ def evolution_marges_view(request):
         produits_marge = (
             CompteResultat.objects
             .filter(
+                project_id=project_id,
                 nature="PRODUIT",
                 numero_compte__regex=r"^(70|71|72)",
                 date__range=[current_date, last_day_of_month]
@@ -1695,6 +1762,7 @@ def evolution_marges_view(request):
         charges_marge = (
             CompteResultat.objects
             .filter(
+                project_id=project_id,
                 nature="CHARGE",
                 numero_compte__regex=r"^(60|61|62)",
                 date__range=[current_date, last_day_of_month]
@@ -1706,6 +1774,7 @@ def evolution_marges_view(request):
         produits = (
             CompteResultat.objects
             .filter(
+                project_id=project_id,
                 nature="PRODUIT",
                 numero_compte__startswith="7",
                 date__range=[current_date, last_day_of_month]
@@ -1755,7 +1824,7 @@ def evolution_marges_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_caf_view(request):
     """
     Évolution de la CAF sur plusieurs mois
@@ -1771,9 +1840,12 @@ def evolution_caf_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     # Si pas de dates fournies, utiliser les 6 derniers mois
     if not date_start or not date_end:
-        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        max_date = CompteResultat.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
         if max_date:
             end_date_obj = max_date
             start_date_obj = end_date_obj - relativedelta(months=5)
@@ -1785,7 +1857,7 @@ def evolution_caf_view(request):
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
     def get_caf_for_period(start, end):
-        filters = {"date__range": [start, end]}
+        filters = {"project_id": project_id, "date__range": [start, end]}
         
         # Helper variables for EBE
         c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
@@ -1839,7 +1911,7 @@ def evolution_caf_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_marge_operationnelle_view(request):
     """
     Évolution de la marge opérationnelle sur plusieurs mois
@@ -1855,9 +1927,12 @@ def evolution_marge_operationnelle_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     # Si pas de dates fournies, utiliser les 6 derniers mois
     if not date_start or not date_end:
-        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        max_date = CompteResultat.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
         if max_date:
             end_date_obj = max_date
             start_date_obj = end_date_obj - relativedelta(months=5)
@@ -1869,7 +1944,7 @@ def evolution_marge_operationnelle_view(request):
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
     def get_marge_op_for_period(start, end):
-        filters = {"date__range": [start, end]}
+        filters = {"project_id": project_id, "date__range": [start, end]}
         
         # CA = 70, 71, 72
         c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
@@ -1926,7 +2001,7 @@ def evolution_marge_operationnelle_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_roe_view(request):
     """
     Évolution du ROE (Return on Equity) sur plusieurs mois
@@ -1940,11 +2015,18 @@ def evolution_roe_view(request):
     from decimal import Decimal
 
     date_start = request.GET.get("date_start")
+    from django.db.models import DecimalField # Added this import
+    from decimal import Decimal
+
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
+    date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
     # Si pas de dates fournies, utiliser les 6 derniers mois
     if not date_start or not date_end:
-        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        max_date = CompteResultat.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
         if max_date:
             end_date_obj = max_date
             start_date_obj = end_date_obj - relativedelta(months=5)
@@ -1956,14 +2038,14 @@ def evolution_roe_view(request):
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
     def get_roe_for_period(start, end):
-        filters = {"date__range": [start, end]}
+        filters = {"project_id": project_id, "date__range": [start, end]}
         
         # 1. Résultat Net : dernière date disponible dans la période
         latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
         
         resultat_net = Decimal("0.00")
         if latest_res_date:
-            agg_res = CompteResultat.objects.filter(date=latest_res_date).aggregate(
+            agg_res = CompteResultat.objects.filter(project_id=project_id, date=latest_res_date).aggregate(
                 prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
                 char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
             )
@@ -1976,7 +2058,7 @@ def evolution_roe_view(request):
         if latest_bilan_date:
             fonds_propres = (
                 Bilan.objects
-                .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", date=latest_bilan_date)
+                .filter(project_id=project_id, type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", date=latest_bilan_date)
                 .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
             )
 
@@ -2019,7 +2101,7 @@ def evolution_roe_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_roa_view(request):
     """
     Évolution du ROA (Return on Assets) sur plusieurs mois
@@ -2030,14 +2112,18 @@ def evolution_roa_view(request):
     from datetime import datetime, timedelta
     from dateutil.relativedelta import relativedelta
     from django.db.models import Sum, Max, Case, When
+    from django.db.models import DecimalField # Added this import
     from decimal import Decimal
+
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
 
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
     # Si pas de dates fournies, utiliser les 6 derniers mois
     if not date_start or not date_end:
-        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        max_date = CompteResultat.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
         if max_date:
             end_date_obj = max_date
             start_date_obj = end_date_obj - relativedelta(months=5)
@@ -2049,14 +2135,14 @@ def evolution_roa_view(request):
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
     def get_roa_for_period(start, end):
-        filters = {"date__range": [start, end]}
+        filters = {"project_id": project_id, "date__range": [start, end]}
         
         # 1. Résultat Net : dernière date disponible dans la période
         latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
         
         resultat_net = Decimal("0.00")
         if latest_res_date:
-            agg_res = CompteResultat.objects.filter(date=latest_res_date).aggregate(
+            agg_res = CompteResultat.objects.filter(project_id=project_id, date=latest_res_date).aggregate(
                 prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
                 char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
             )
@@ -2069,7 +2155,7 @@ def evolution_roa_view(request):
         if latest_bilan_date:
             total_actif = (
                 Bilan.objects
-                .filter(type_bilan="ACTIF", date=latest_bilan_date)
+                .filter(project_id=project_id, type_bilan="ACTIF", date=latest_bilan_date)
                 .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
             )
 
@@ -2113,7 +2199,7 @@ def evolution_roa_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def resultat_net_view(request):  #partie corriger
     """
     Calcul du Résultat Net avec variation par rapport à la période précédente
@@ -2180,12 +2266,15 @@ def resultat_net_view(request):  #partie corriger
             return Response({"error": "Format de date invalide (YYYY-MM-DD)"}, status=400)
 
 
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     def calculate_resultat(d_start, d_end):
         """
         Calcul du résultat net à partir de CompteResultat
         (Inclut les saisies manuelles ET les données générées via Balance)
         """
-        qs = CompteResultat.objects.all()
+        qs = CompteResultat.objects.filter(project_id=project_id)
         if d_start and d_end:
             qs = qs.filter(date__range=[d_start, d_end])
         elif d_end:
@@ -2252,7 +2341,7 @@ def resultat_net_view(request):  #partie corriger
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def bfr_view(request):
     """
     Calcul du BFR avec variation par rapport à la période précédente
@@ -2339,7 +2428,7 @@ def bfr_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def caf_view(request):
     """
     Calcul de la CAF avec variation par rapport à la période précédente
@@ -2520,7 +2609,7 @@ def caf_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def leverage_brut_view(request):
     """
     Calcul du Leverage Brut avec variation par rapport à la période précédente
@@ -2533,7 +2622,9 @@ def leverage_brut_view(request):
     date_end = request.GET.get("date_end")
 
     def calculate_leverage(start_date, end_date):
-        base_filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        base_filters = {"project_id": project_id}
         if start_date and end_date:
             base_filters["date__range"] = [start_date, end_date]
 
@@ -2588,7 +2679,7 @@ def leverage_brut_view(request):
     })
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_ca_resultat_view(request):
     """
     Évolution combinée CA et Résultat Net sur plusieurs mois (Optimisé en 1 appel)
@@ -2597,9 +2688,12 @@ def evolution_ca_resultat_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
     
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     # Si pas de dates fournies, utiliser les 6 derniers mois
     if not date_start or not date_end:
-        max_date = CompteResultat.objects.aggregate(max_date=Max("date"))["max_date"]
+        max_date = CompteResultat.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
         if max_date:
             end_date_obj = max_date
             start_date_obj = end_date_obj - relativedelta(months=5)
@@ -2623,6 +2717,7 @@ def evolution_ca_resultat_view(request):
         
         # Optimisation : Une seule requête aggregée pour CA et CHARGES sur la période
         stats = CompteResultat.objects.filter(
+            project_id=project_id,
             date__range=[current_date, last_day]
         ).aggregate(
             ca=Sum(Case(When(nature="PRODUIT", numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
@@ -2651,7 +2746,7 @@ def evolution_ca_resultat_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def annuite_caf_view(request):
     """
     GET /api/annuite-caf/?date_debut=2025-01-01&date_fin=2025-12-31
@@ -2664,7 +2759,9 @@ def annuite_caf_view(request):
     date_debut = request.GET.get("date_debut")
     date_fin = request.GET.get("date_fin")
 
-    base_filter = {}
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+    base_filter = {"project_id": project_id}
     if date_debut and date_fin:
         base_filter["date__range"] = [date_debut, date_fin]
 
@@ -2781,7 +2878,7 @@ def annuite_caf_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def dashboard_indicators_view(request):
     """
     ENDPOINT OPTIMISÉ POUR DASHBOARD
@@ -2791,12 +2888,27 @@ def dashboard_indicators_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     # --- HELPER INTERNE OPTIMISÉ ---
     
-    def get_solde(prefix, sens="credit-debit"):
-        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
-        if date_start and date_end:
-            qs = qs.filter(date__range=[date_start, date_end])
+    def get_solde(prefix, sens="credit-debit", mode="periode"):
+        # Initial queryset
+        if prefix == "":
+            qs = GrandLivre.objects.filter(project_id=project_id)
+        else:
+            qs = GrandLivre.objects.filter(project_id=project_id, numero_compte__startswith=str(prefix))
+            
+        # Filtre de date:
+        # - "periode" : Flux entre date_start et date_end (Compte de Résultat)
+        # - "cumulative" : Solde à l'instant T (Bilan: Trésorerie, Stocks, Dettes)
+        if mode == "periode":
+            if date_start and date_end:
+                qs = qs.filter(date__range=[date_start, date_end])
+        elif mode == "cumulative":
+            if date_end:
+                qs = qs.filter(date__lte=date_end)
             
         agg = qs.aggregate(
             d=Sum("debit"), 
@@ -2808,56 +2920,58 @@ def dashboard_indicators_view(request):
         if sens == "debit": return d
         if sens == "credit": return c
         if sens == "debit-credit": return d - c
-        return c - d # Default: Crédit - Débit (Produits, Passif)
+        return c - d # Default: Crédit - Débit (Produits, Passif, CAP)
 
-    # 1. CHIFFRE D'AFFAIRES (Classe 70)
-    ca = get_solde("70")
+    # 1. CHIFFRE D'AFFAIRES (Classe 70) -> Période
+    ca = get_solde("70", mode="periode")
     
-    # 2. EBE
-    produits_7 = get_solde("7") # Total classe 7
-    subventions = get_solde("74")
-    achats = get_solde("60", sens="debit-credit") # Charges = Debit - Credit
-    charges_ext = get_solde("61", sens="debit-credit") + get_solde("62", sens="debit-credit")
-    impots = get_solde("63", sens="debit-credit")
-    personnel = get_solde("64", sens="debit-credit")
+    # 2. EBE (Charges et Produits) -> Période
+    # Simplification : On prend les classes 6 et 7 de la période
+    achats = get_solde("60", sens="debit-credit", mode="periode") 
+    charges_ext = get_solde("61", sens="debit-credit", mode="periode") + get_solde("62", sens="debit-credit", mode="periode")
+    impots = get_solde("63", sens="debit-credit", mode="periode")
+    personnel = get_solde("64", sens="debit-credit", mode="periode")
     
-    ebe = get_solde("70") + get_solde("74") - (achats + charges_ext + impots + personnel)
+    ebe = get_solde("70", mode="periode") + get_solde("74", mode="periode") - (achats + charges_ext + impots + personnel)
 
-    # 3. RÉSULTAT NET
-    total_produits = get_solde("7")
-    total_charges = get_solde("6", sens="debit-credit")
+    # 3. RÉSULTAT NET -> Période
+    total_produits = get_solde("7", mode="periode")
+    total_charges = get_solde("6", sens="debit-credit", mode="periode")
     resultat_net = total_produits - total_charges
 
-    # 4. CAF
-    dotations = get_solde("68", sens="debit-credit")
-    reprises = get_solde("78")
+    # 4. CAF -> Période
+    dotations = get_solde("68", sens="debit-credit", mode="periode")
+    reprises = get_solde("78", mode="periode")
     caf = resultat_net + dotations - reprises
 
-    # 5. BFR
-    stocks = get_solde("3", sens="debit-credit")
-    creances = get_solde("411", sens="debit-credit") + get_solde("409", sens="debit-credit") + get_solde("418", sens="debit-credit")
-    dettes_fournisseurs = get_solde("401") + get_solde("408") + get_solde("419")
+    # 5. BFR -> Cumulative (Position au date_end)
+    stocks = get_solde("3", sens="debit-credit", mode="cumulative")
+    creances = get_solde("411", sens="debit-credit", mode="cumulative") + get_solde("409", sens="debit-credit", mode="cumulative") + get_solde("418", sens="debit-credit", mode="cumulative")
+    dettes_fournisseurs = get_solde("401", mode="cumulative") + get_solde("408", mode="cumulative") + get_solde("419", mode="cumulative")
     bfr = stocks + creances - dettes_fournisseurs 
 
-    # 6. LEVERAGE (Via Bilan et CompteResultat pour plus de robustesse)
-    dettes = Bilan.objects.filter(type_bilan="PASSIF", numero_compte__startswith="16")
-    if date_start and date_end: 
-        dettes = dettes.filter(date__range=[date_start, date_end])
-    endettement = dettes.aggregate(t=Sum("montant_ar"))["t"] or Decimal("0.00")
+    # 6. LEVERAGE (Dettes 16 / EBE)
+    # Dettes = Cumulative, EBE = Période
+    endettement = get_solde("16", mode="cumulative") 
     
     leverage = Decimal("0.00")
     if ebe != 0:
         leverage = endettement / ebe
 
-    # 7. RATIOS DIVERS
-    remboursement_k = get_solde("164", sens="debit") + get_solde("168", sens="debit")
-    frais_fi = get_solde("661", sens="debit-credit")
+    # 7. TRÉSORERIE NETTE
+    # Classe 5 : Cumulative (Position réelle à l'instant T)
+    tresorerie = get_solde("5", sens="debit-credit", mode="cumulative")
+
+    # 8. RATIOS DIVERS
+    remboursement_k = get_solde("164", sens="debit", mode="periode") + get_solde("168", sens="debit", mode="periode")
+    frais_fi = get_solde("661", sens="debit-credit", mode="periode")
     annuite = remboursement_k + frais_fi
     ratio_annuite_caf = Decimal("0")
     if caf != 0:
         ratio_annuite_caf = annuite / caf
 
-    dette_lmt = get_solde("16")
+    # Dette LMT vs CAF -> Dette = Cumulative, CAF = Période
+    dette_lmt = get_solde("16", mode="cumulative")
     ratio_dette_caf = Decimal("0")
     if caf != 0:
         ratio_dette_caf = dette_lmt / caf
@@ -2874,16 +2988,19 @@ def dashboard_indicators_view(request):
     if ca != 0:
         ratio_fi_ca = frais_fi / ca
 
-    capitaux_propres_base = sum(get_solde(str(c)) for c in range(101, 107))
+    # Capitaux Propres = Cumulative
+    capitaux_propres_base = sum(get_solde(str(c), mode="cumulative") for c in range(101, 107))
+    # Approximation : Fonds propres = Capital historique (cumulative) + résultat de la période
     fonds_propres = capitaux_propres_base + resultat_net
+    
     ratio_gearing = Decimal("0")
     if fonds_propres != 0:
         ratio_gearing = dette_lmt / fonds_propres
 
+    # 9. TOTAL BALANCE (Total Actif pour ROA)
+    # On prend le total des débits du bilan (Classes 1 à 5) cumulativement
+    total_balance = get_solde("", sens="debit", mode="cumulative")
 
-    # 8. TOTAL BALANCE (Total Débit ou Crédit de la période)
-    # Pour afficher "X Ar" sur la carte Balance si équilibrée.
-    total_balance = get_solde("", sens="debit") # Total de tous les débits
     
     # --- ASSEMBLAGE RÉPONSE ---
     return Response({
@@ -2893,6 +3010,7 @@ def dashboard_indicators_view(request):
         "caf": caf,
         "bfr": bfr,
         "leverage": leverage.quantize(Decimal("0.01")),
+        "tresorerie": tresorerie,
         "total_balance": total_balance,
         "ratios": {
             "annuite_caf": {
@@ -2904,7 +3022,7 @@ def dashboard_indicators_view(request):
                  "alerte": ratio_dette_caf >= Decimal("3.50")
             },
             "marge_nette": {
-                "value": ratio_marge_nette.quantize(Decimal("0.01")), # Pourcentage
+                "value": ratio_marge_nette.quantize(Decimal("0.01")), 
             },
             "fi_ebe": {
                 "value": ratio_fi_ebe.quantize(Decimal("0.01")),
@@ -2920,19 +3038,56 @@ def dashboard_indicators_view(request):
             },
             "leverage": {
                  "value": leverage.quantize(Decimal("0.01")),
-                 "alerte": leverage >= Decimal("3.5") # Seuil classique pour Leverage Brut
+                 "alerte": leverage >= Decimal("3.5")
             }
+        },
+        # --- DETAILS MANQUANTS ---
+        "roe_data": {
+            "roe": (resultat_net / fonds_propres * 100) if fonds_propres != 0 else 0,
+            "resultat_net": resultat_net,
+            "fonds_propres": fonds_propres,
+            "variation": None
+        },
+        "roa_data": {
+             "roa": (resultat_net / total_balance * 100) if total_balance != 0 else 0,
+             "resultat_net": resultat_net,
+             "total_actif": total_balance,
+             "variation": None
+        },
+        "gearing_data": {
+            "gearing": ratio_gearing,
+            "dettes_financieres": dette_lmt,
+            "fonds_propres": fonds_propres,
+            "variation": None
+        },
+        "rotation_stock_data": {
+            "rotation_stock": (get_solde("60", sens="debit-credit") / get_solde("3", sens="debit-credit")) if get_solde("3", sens="debit-credit") != 0 else 0,
+            "cout_ventes": get_solde("60", sens="debit-credit"),
+            "stocks": get_solde("3", sens="debit-credit"),
+            "variation": None
+        },
+        "marge_operationnelle_data": {
+            "marge_operationnelle": ((ebe / ca) * 100) if ca != 0 else 0,
+            "chiffre_affaire": ca,
+            "variation": None
+        },
+        "variations": {
+            "ca": None, "caf": None, "ebe": None, "leverage": None, "bfr": None, "marge_brute": None, "marge_nette": None, "tresorerie": None
         }
     })
 
 
+
+
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def journal_date_range_view(request):
     """
     Retourne la plage de dates (min, max) des écritures comptables.
     """
-    agg = Journal.objects.aggregate(min_date=Min('date'), max_date=Max('date'))
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+    agg = Journal.objects.filter(project_id=project_id).aggregate(min_date=Min('date'), max_date=Max('date'))
     
     return Response({
         "min_date": agg['min_date'],
@@ -2940,63 +3095,77 @@ def journal_date_range_view(request):
     })
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def balance_generale_view(request):
     """
     Retourne la balance générale (agrégée par compte) pour une plage de dates.
+    🔥 UTILISE LA TABLE BALANCE (V2)
     Paramètres: ?date_start=YYYY-MM-DD&date_end=YYYY-MM-DD
     """
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
-    qs = GrandLivre.objects.all()
-    if date_start and date_end:
-        qs = qs.filter(date__range=[date_start, date_end])
+    # PROJECT FILTER
+    project_id = getattr(request, 'project_id', None)
+    
+    # On filtre sur Balance qui est déjà agrégé par compte/date
+    from compta.models import Balance
+    qs = Balance.objects.filter(project_id=project_id)
 
-    # Agrégation par compte
-    balance_lines = qs.values("numero_compte").annotate(
-        total_debit=Sum("debit"),
-        total_credit=Sum("credit"),
-        # On prend le libellé le plus fréquent ou le premier/dernier trouvé
-        # Max est une heuristique acceptable si le libellé est constant par compte
-        libelle=Max("libelle") 
-    ).order_by("numero_compte")
+    try:
+        if date_start and date_end:
+            qs = qs.filter(date__range=[date_start, date_end])
 
-    results = []
-    for line in balance_lines:
-        d = line["total_debit"] or Decimal("0.00")
-        c = line["total_credit"] or Decimal("0.00")
-        solde = d - c
-        
-        # On ne renvoie que les comptes mouvementés ou avec solde non nul ? 
-        # Généralement Balance inclut tout ce qui a bougé dans la période ou qui a un solde.
-        # Ici on filtre sur les mouvements de la période, donc d et c > 0.
-        
-        nature = "Soldé"
-        if solde > 0: nature = "Débiteur"
-        elif solde < 0: nature = "Créditeur"
-        
-        results.append({
-            "compte": line["numero_compte"],
-            "libelle": line["libelle"] or f"Compte {line['numero_compte']}",
-            "debit": float(d),
-            "credit": float(c),
-            "solde": float(abs(solde)), # Le front gère le signe ou la colonne, ici magnitude
-            "nature": nature
-        })
+        # Même si c'est déjà agrégé dans Balance, si on a plusieurs dates dans la plage,
+        # il faut ré-agréger par numéro_compte
+        balance_lines = qs.values("numero_compte").annotate(
+            total_debit=Sum("total_debit"),
+            total_credit=Sum("total_credit"),
+            libelle=Max("libelle") 
+        ).order_by("numero_compte")
 
-    return Response(results)
+        results = []
+        for line in balance_lines:
+            d = line["total_debit"]
+            if d is None: d = Decimal("0.00")
+            
+            c = line["total_credit"]
+            if c is None: c = Decimal("0.00")
+                
+            solde = d - c
+            
+            nature = "Soldé"
+            if solde > 0: nature = "Débiteur"
+            elif solde < 0: nature = "Créditeur"
+            
+            results.append({
+                "compte": line["numero_compte"],
+                "libelle": line["libelle"] or f"Compte {line['numero_compte']}",
+                "debit": float(d),
+                "credit": float(c),
+                "solde": float(abs(solde)),
+                "nature": nature
+            })
+
+        return Response(results)
+    except Exception as e:
+        print(f"ERROR in balance_generale_view: {e}")
+        return Response({"error": str(e)}, status=500)
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def dette_lmt_caf_view(request):
     """
     Ratio : Dette LMT / CAF
     """
 
+    # PROJECT FILTER
+    project_id = getattr(request, 'project_id', None)
+
     def solde(prefix):
         data = GrandLivre.objects.filter(
+            project_id=project_id,
             numero_compte__startswith=prefix
         ).aggregate(
             credit=Sum("credit"),
@@ -3010,6 +3179,7 @@ def dette_lmt_caf_view(request):
     # 🔹 CAF
     def solde_net(prefix):
         data = GrandLivre.objects.filter(
+            project_id=project_id,
             numero_compte__startswith=prefix
         ).aggregate(
             credit=Sum("credit"),
@@ -3057,7 +3227,7 @@ def dette_lmt_caf_view(request):
     return Response(serializer.data)
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def resultat_net_ca_view(request):
     """
     Ratio : Résultat net / Chiffre d'affaires
@@ -3066,8 +3236,11 @@ def resultat_net_ca_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, 'project_id', None)
+
     def solde(prefix):
-        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+        qs = GrandLivre.objects.filter(project_id=project_id, numero_compte__startswith=prefix)
         if date_start and date_end:
             qs = qs.filter(date__range=[date_start, date_end])
 
@@ -3117,7 +3290,7 @@ def resultat_net_ca_view(request):
     return Response(serializer.data)
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def charge_ebe_view(request):
     """
     Ratio : Charge financière / EBE
@@ -3126,8 +3299,11 @@ def charge_ebe_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, 'project_id', None)
+
     def solde(prefix):
-        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+        qs = GrandLivre.objects.filter(project_id=project_id, numero_compte__startswith=prefix)
         if date_start and date_end:
             qs = qs.filter(date__range=[date_start, date_end])
 
@@ -3167,7 +3343,7 @@ def charge_ebe_view(request):
     return Response(serializer.data)
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def charge_ca_view(request):
     """
     Ratio : Charge financière / Chiffre d'affaires
@@ -3176,8 +3352,11 @@ def charge_ca_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, 'project_id', None)
+
     def solde(prefix):
-        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+        qs = GrandLivre.objects.filter(project_id=project_id, numero_compte__startswith=prefix)
         if date_start and date_end:
             qs = qs.filter(date__range=[date_start, date_end])
 
@@ -3210,7 +3389,7 @@ def charge_ca_view(request):
     return Response(serializer.data)
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def marge_endettement_view(request):
     """
     Ratio : Dette CMLT / Fonds Propres
@@ -3219,8 +3398,11 @@ def marge_endettement_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, 'project_id', None)
+
     def solde(prefix):
-        qs = GrandLivre.objects.filter(numero_compte__startswith=prefix)
+        qs = GrandLivre.objects.filter(project_id=project_id, numero_compte__startswith=prefix)
         if date_start and date_end:
             qs = qs.filter(date__range=[date_start, date_end])
         
@@ -3258,14 +3440,16 @@ def marge_endettement_view(request):
     return Response(serializer.data)
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def get_min_journal_date_view(request):
     """
     Retourne la date de la toute première écriture comptable.
     Utile pour initialiser les filtres de date par défaut.
     """
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
     from django.db.models import Min
-    min_date = Journal.objects.aggregate(Min('date'))['date__min']
+    min_date = Journal.objects.filter(project_id=project_id).aggregate(Min('date'))['date__min']
     
     if min_date:
          return Response({"min_date": min_date})
@@ -3275,7 +3459,7 @@ def get_min_journal_date_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def get_available_years_view(request):
     """
     Retourne la liste des années disponibles dans les écritures comptables.
@@ -3284,8 +3468,11 @@ def get_available_years_view(request):
     from django.db.models.functions import ExtractYear
     from datetime import date
     
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
     years = (
         Journal.objects
+        .filter(project_id=project_id)
         .annotate(year=ExtractYear('date'))
         .values_list('year', flat=True)
         .distinct()
@@ -3303,7 +3490,7 @@ def get_available_years_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def top_comptes_mouvementes_view(request):
     """
     Retourne les 5 comptes les plus mouvementés (débit + crédit).
@@ -3311,7 +3498,9 @@ def top_comptes_mouvementes_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
-    qs = GrandLivre.objects.all()
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+    qs = GrandLivre.objects.filter(project_id=project_id)
     if date_start and date_end:
         qs = qs.filter(date__range=[date_start, date_end])
 
@@ -3336,7 +3525,7 @@ def top_comptes_mouvementes_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def roe_view(request):
     """
     Calcul du ROE (Return on Equity) : (Résultat Net / Fonds Propres) * 100
@@ -3349,9 +3538,12 @@ def roe_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     def calculate_roe(start_date, end_date):
         """Fonction helper pour calculer le ROE pour une période donnée"""
-        filters = {}
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         elif end_date:
@@ -3438,7 +3630,7 @@ def roe_view(request):
     })
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def roa_view(request):
     """
     Calcul du ROA (Return on Assets) : (Résultat Net / Total Actif) * 100
@@ -3451,9 +3643,12 @@ def roa_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     def calculate_roa(start_date, end_date):
         """Fonction helper pour calculer le ROA pour une période donnée"""
-        filters = {}
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         elif end_date:
@@ -3539,7 +3734,7 @@ def roa_view(request):
     })
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def current_ratio_view(request):
     """
     Calcul du Current Ratio : (Actifs Courants / Passifs Courants)
@@ -3554,7 +3749,9 @@ def current_ratio_view(request):
 
     def calculate_current_ratio(start_date, end_date):
         """Fonction helper pour calculer le Current Ratio pour une période donnée"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         
@@ -3621,7 +3818,7 @@ def current_ratio_view(request):
     return Response(serializer.data)
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def quick_ratio_view(request):
     """
     Calcul du Quick Ratio : ((Actifs Courants - Stocks) / Passifs Courants)
@@ -3636,7 +3833,9 @@ def quick_ratio_view(request):
 
     def calculate_quick_ratio(start_date, end_date):
         """Fonction helper pour calculer le Quick Ratio pour une période donnée"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
 
@@ -3719,7 +3918,7 @@ def quick_ratio_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def gearing_view(request):
     """
     Calcul du Gearing : (Dettes Financières / Fonds Propres) * 100
@@ -3734,7 +3933,9 @@ def gearing_view(request):
 
     def calculate_gearing(start_date, end_date):
         """Fonction helper pour calculer le Gearing pour une période donnée"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
 
@@ -3808,7 +4009,7 @@ def gearing_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def rotation_stock_view(request):
     """
     Calcul de la Rotation des stocks : Coût des ventes / Stock moyen
@@ -3823,7 +4024,9 @@ def rotation_stock_view(request):
 
     def calculate_rotation_stock(start_date, end_date):
         """Fonction helper pour calculer la Rotation des stocks pour une période donnée"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
 
@@ -3905,7 +4108,7 @@ def rotation_stock_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def marge_operationnelle_view(request):
     """
     Calcul de la Marge opérationnelle : (Résultat opérationnel / CA) * 100
@@ -3920,7 +4123,9 @@ def marge_operationnelle_view(request):
 
     def calculate_marge_operationnelle(start_date, end_date):
         """Fonction helper pour calculer la Marge opérationnelle pour une période donnée"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         elif end_date:
@@ -4037,7 +4242,7 @@ def marge_operationnelle_view(request):
     return Response(serializer.data)
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def repartition_produits_charges_view(request):
     """
     Retourne 3 jeux de données pour les camemberts:
@@ -4051,7 +4256,9 @@ def repartition_produits_charges_view(request):
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
-    filters = {}
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+    filters = {"project_id": project_id}
     if date_start and date_end:
         filters["date__range"] = [date_start, date_end]
 
@@ -4125,7 +4332,7 @@ def repartition_produits_charges_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def bilan_kpis_with_variations_view(request):
     """
     Calcule tous les KPIs du Bilan avec variations par rapport à la période précédente.
@@ -4166,9 +4373,12 @@ def bilan_kpis_with_variations_view(request):
     except ValueError:
         return Response({"error": "Format de date invalide (YYYY-MM-DD)"}, status=400)
     
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     def calculate_bilan_kpis(d_start, d_end):
         """Calcule tous les KPIs du Bilan en une seule requête optimisée"""
-        qs = Bilan.objects.filter(date__range=[d_start, d_end])
+        qs = Bilan.objects.filter(project_id=project_id, date__range=[d_start, d_end])
         
         # Agrégation conditionnelle pour tous les montants
         data = qs.aggregate(
@@ -4205,7 +4415,7 @@ def bilan_kpis_with_variations_view(request):
         )
         
         # Calcul du Résultat Net de la période (depuis CompteResultat)
-        cr_data = CompteResultat.objects.filter(date__range=[d_start, d_end]).aggregate(
+        cr_data = CompteResultat.objects.filter(project_id=project_id, date__range=[d_start, d_end]).aggregate(
             produits=Sum(Case(When(nature='PRODUIT', then='montant_ar'), default=0, output_field=DecimalField())),
             charges=Sum(Case(When(nature='CHARGE', then='montant_ar'), default=0, output_field=DecimalField())),
         )
@@ -4275,7 +4485,7 @@ def bilan_kpis_with_variations_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def get_available_years_view(request):
     """
     Retourne la liste des années disponibles dans les écritures comptables,
@@ -4323,7 +4533,7 @@ def get_available_years_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def tva_view(request):
     """
     Calcul de la TVA (TVA collectée, TVA déductible, TVA nette) avec variation par rapport à la période précédente
@@ -4338,6 +4548,10 @@ def tva_view(request):
     def calculate_tva(start_date, end_date):
         """Fonction helper pour calculer la TVA pour une période donnée"""
         filters = {}
+        project_id = getattr(request, "project_id", None)
+        if project_id:
+            filters["project_id"] = project_id
+            
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         
@@ -4435,7 +4649,7 @@ def tva_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def amortissements_exercice_view(request):
     """
     Retourne les amortissements (compte 68) par mois.
@@ -4456,10 +4670,14 @@ def amortissements_exercice_view(request):
         date_start = start_date.strftime('%Y-%m-%d')
         date_end = end_date.strftime('%Y-%m-%d')
     
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
+
     # Filtrer et grouper par mois
     amortissements = (
         CompteResultat.objects
         .filter(
+            project_id=project_id,
             nature="CHARGE", 
             numero_compte__startswith="68",
             date__range=[date_start, date_end]
@@ -4483,7 +4701,7 @@ def amortissements_exercice_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def delais_clients_view(request):
     """
     Calcul des délais clients (DSO - Days Sales Outstanding) avec variation
@@ -4498,7 +4716,9 @@ def delais_clients_view(request):
 
     def calculate_delais_clients(start_date, end_date):
         """Fonction helper pour calculer les délais clients"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
             
@@ -4577,7 +4797,7 @@ def delais_clients_view(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def delais_fournisseurs_view(request):
     """
     Calcul des délais fournisseurs (DPO - Days Payable Outstanding) avec variation
@@ -4592,7 +4812,9 @@ def delais_fournisseurs_view(request):
 
     def calculate_delais_fournisseurs(start_date, end_date):
         """Fonction helper pour calculer les délais fournisseurs"""
-        filters = {}
+        # PROJECT FILTER
+        project_id = getattr(request, "project_id", None)
+        filters = {"project_id": project_id}
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
             
@@ -4668,4 +4890,149 @@ def delais_fournisseurs_view(request):
         "delais_jours": float(current["delais_jours"]) if current["delais_jours"] is not None else None,
         "variation": variation
     })
+
+
+# =========================================================
+# GESTION DES PROJETS (MULTI-TENANT)
+# =========================================================
+
+class ProjectListCreateView(generics.ListCreateAPIView):
+    """
+    GET: Liste tous les projets (Admin) ou les projets accessibles (User)
+    POST: Crée un nouveau projet (Admin ou User, l'utilisateur devient créateur et admin du projet)
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.request.method == 'GET':
+            return ProjectListSerializer
+        return ProjectSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        # All authenticated users can see the list of active projects
+        # This allows them to request access to projects they don't belong to yet
+        return Project.objects.filter(is_active=True)
+
+    def perform_create(self, serializer):
+        project = serializer.save(created_by=self.request.user)
+        # Créer automatiquement l'accès admin pour le créateur
+        ProjectAccess.objects.create(
+            user=self.request.user,
+            project=project,
+            status='approved',
+            approved_by=self.request.user, # Auto-approuvé
+            approved_at=datetime.now()
+        )
+
+class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET, PUT, DELETE un projet spécifique.
+    Nécessite d'être admin ou d'avoir accès au projet.
+    """
+    queryset = Project.objects.all()
+    serializer_class = ProjectSerializer
+    permission_classes = [IsAuthenticated, HasProjectAccess]
+    lookup_field = 'id'
+
+class UserProjectsView(generics.ListAPIView):
+    """
+    Liste les projets accessibles pour l'utilisateur connecté avec leur statut.
+    Utilisé pour la page de sélection de projet.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProjectListSerializer
+
+    def get_queryset(self):
+        # On retourne tous les projets actifs pour que l'utilisateur puisse demander l'accès
+        # Le serializer enrichira avec le statut d'accès
+        return Project.objects.filter(is_active=True)
+
+class ProjectAccessRequestView(generics.CreateAPIView):
+    """
+    Demande d'accès à un projet.
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProjectAccessSerializer
+
+    def create(self, request, *args, **kwargs):
+        project_id = request.data.get('project_id')
+        if not project_id:
+            return Response({"error": "project_id requis"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            project = Project.objects.get(id=project_id)
+        except Project.DoesNotExist:
+            return Response({"error": "Projet introuvable"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Vérifier si demande existe déjà
+        existing_access = ProjectAccess.objects.filter(user=request.user, project=project).first()
+        
+        if existing_access:
+            if existing_access.status == 'approved':
+                return Response({"error": "Accès déjà accordé"}, status=status.HTTP_400_BAD_REQUEST)
+            elif existing_access.status == 'pending':
+                return Response({"error": "Demande déjà en attente"}, status=status.HTTP_400_BAD_REQUEST)
+            elif existing_access.status == 'rejected':
+                # Re-passer à pending pour redemander
+                existing_access.status = 'pending'
+                existing_access.save()
+                return Response(ProjectAccessSerializer(existing_access).data, status=status.HTTP_200_OK)
+
+        access = ProjectAccess.objects.create(
+            user=request.user,
+            project=project,
+            status='pending'
+        )
+        
+        return Response(ProjectAccessSerializer(access).data, status=status.HTTP_201_CREATED)
+
+class ManageAccessRequestsView(generics.ListAPIView):
+    """
+    Admin: Liste les demandes en attente et permet d'approuver/rejeter.
+    """
+    permission_classes = [IsAuthenticated] # Devrait être AdminOnly idéalement
+    serializer_class = ProjectAccessSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if not (user.is_superuser or user.role == 'admin'):
+            # Si pas admin global, peut-être admin d'un projet ? (Implémentation future)
+            return ProjectAccess.objects.none()
+            
+        status_filter = self.request.query_params.get('status', 'pending')
+        return ProjectAccess.objects.filter(status=status_filter)
+
+    def post(self, request):
+        """Approuver ou rejeter une demande"""
+        access_id = request.data.get('access_id')
+        action = request.data.get('action') # 'approve' or 'reject'
+        
+        if not access_id or not action:
+             return Response({"error": "access_id et action requis"}, status=status.HTTP_400_BAD_REQUEST)
+             
+        try:
+            access = ProjectAccess.objects.get(id=access_id)
+        except ProjectAccess.DoesNotExist:
+            return Response({"error": "Demande introuvable"}, status=status.HTTP_404_NOT_FOUND)
+
+        user = self.request.user
+        if not (user.is_superuser or user.role == 'admin'):
+             return Response({"error": "Non autorisé"}, status=status.HTTP_403_FORBIDDEN)
+
+        if action == 'approve':
+            access.status = 'approved'
+            access.approved_by = user
+            access.approved_at = datetime.now()
+            access.save()
+        elif action == 'reject':
+            access.status = 'rejected'
+            access.approved_by = user # On note qui a rejeté
+            access.save() # Ou delete() ? Gardons trace pour l'instant
+        else:
+            return Response({"error": "Action invalide"}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(ProjectAccessSerializer(access).data)
+
 

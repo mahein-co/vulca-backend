@@ -1,11 +1,61 @@
 from rest_framework import serializers
-from .models import Balance, Bilan, GrandLivre, Journal, CompteResultat
+from .models import Balance, Bilan, GrandLivre, Journal, CompteResultat, Project, ProjectAccess
+
+
+class ProjectSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Project
+        fields = ['id', 'name', 'description', 'created_by', 'is_active', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+
+
+class ProjectAccessSerializer(serializers.ModelSerializer):
+    user_name = serializers.SerializerMethodField()
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+
+    class Meta:
+        model = ProjectAccess
+        fields = ['id', 'user', 'user_name', 'user_email', 'project', 'project_name', 'status', 'requested_at', 'approved_at', 'approved_by']
+        read_only_fields = ['id', 'user', 'project', 'requested_at', 'approved_at', 'approved_by']
+
+    def get_user_name(self, obj):
+        return obj.user.name or obj.user.username or obj.user.email
+
+
+class ProjectListSerializer(serializers.ModelSerializer):
+    """Serializer pour lister les projets avec statut d'accès pour l'utilisateur courant"""
+    access_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Project
+        fields = ['id', 'name', 'description', 'created_at', 'access_status']
+
+    def get_access_status(self, obj):
+        user = self.context['request'].user
+        
+        # Check if user has admin role
+        if user.role == 'admin':
+            return 'admin'
+        
+        # Check if user created this project
+        if obj.created_by == user:
+            return 'admin'
+            
+        # Check ProjectAccess for regular users
+        try:
+            access = ProjectAccess.objects.get(user=user, project=obj)
+            return access.status  # 'approved', 'pending', or 'rejected'
+        except ProjectAccess.DoesNotExist:
+            return None  # No access requested yet
+
 
 class JournalSerializer(serializers.ModelSerializer):
     class Meta:
         model = Journal
         fields = [
             'id',
+            'project',
             'date',
             'numero_piece',
             'type_journal',
@@ -16,7 +66,7 @@ class JournalSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'project', 'created_at', 'updated_at']
 
 class BilanSerializer(serializers.ModelSerializer):
     categorie = serializers.CharField()
@@ -24,7 +74,7 @@ class BilanSerializer(serializers.ModelSerializer):
     class Meta:
         model = Bilan
         fields = "__all__"
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'project', 'created_at', 'updated_at']
 
     def validate_categorie(self, value):
         # Supprime espaces invisibles
@@ -38,6 +88,7 @@ class GrandLivreSerializer(serializers.ModelSerializer):
         model = GrandLivre
         fields = [
             'date',
+            'project',
             'journal_source',
             'numero_piece',
             'libelle',
@@ -45,6 +96,7 @@ class GrandLivreSerializer(serializers.ModelSerializer):
             'credit',
             'solde_cumule',
         ]
+        read_only_fields = ['project']
 
         
 class CompteSerializer(serializers.Serializer):
@@ -56,13 +108,14 @@ class BalanceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Balance
         fields = "__all__"
+        read_only_fields = ['project']
 
 
 class CompteResultatSerializer(serializers.ModelSerializer):
     class Meta:
         model = CompteResultat
         fields = "__all__"
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'project', 'created_at', 'updated_at']
 
 class ChiffreAffaireSerializer(serializers.Serializer):
     numero_compte = serializers.CharField()
@@ -152,7 +205,6 @@ class MargeEndettementSerializer(serializers.Serializer):
     fonds_propres = serializers.DecimalField(max_digits=15, decimal_places=2)
     ratio = serializers.DecimalField(max_digits=5, decimal_places=2)
     alerte = serializers.BooleanField()
-    fields = '__all__'
 
 class CurrentRatioSerializer(serializers.Serializer):
     actifs_courants = serializers.DecimalField(max_digits=15, decimal_places=2)

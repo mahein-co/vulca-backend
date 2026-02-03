@@ -4,6 +4,6 @@ class DisableCSRFMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        if request.path.startswith('/app/'):
+        if request.path.startswith('/app/') or request.path.startswith('/users/'):
             setattr(request, '_dont_enforce_csrf_checks', True)
         return self.get_response(request)

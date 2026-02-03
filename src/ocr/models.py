@@ -1,7 +1,16 @@
 from django.db import models
+from compta.models import Project
 
 # SOURCE FILE MODEL =====================================
 class FileSource(models.Model):
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='file_sources',
+        verbose_name="Projet",
+        null=True,  # Temporaire pour migration
+        blank=True
+    )
     journal = models.ForeignKey(
         'compta.Journal',
         on_delete=models.SET_NULL,
@@ -19,6 +28,13 @@ class FileSource(models.Model):
     description = models.TextField(blank=True, null=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=['project', 'date']),
+            models.Index(fields=['project', 'piece_type']),
+            models.Index(fields=['project', 'uploaded_at']),
+        ]
+
     def save(self, *args, **kwargs):
         if self.description:
             self.is_ocr_processed = True
@@ -34,6 +50,14 @@ class FileSource(models.Model):
 
 
 class FormSource(models.Model):
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='form_sources',
+        verbose_name="Projet",
+        null=True,  # Temporaire pour migration
+        blank=True
+    )
     journal = models.ForeignKey(
         'compta.Journal',
         on_delete=models.SET_NULL,
@@ -47,6 +71,12 @@ class FormSource(models.Model):
     date = models.DateField(db_index=True, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['project', 'date']),
+            models.Index(fields=['project', 'piece_type']),
+        ]
     
     def __str__(self):
         return self.piece_type

@@ -80,8 +80,8 @@ def convertir_dates_longues(data):
     Ex : 06/09/2024 a 6 septembre 2024
     """
     fr_months = [
-        "janvier", "f├⌐vrier", "mars", "avril", "mai", "juin",
-        "juillet", "ao├╗t", "septembre", "octobre", "novembre", "d├⌐cembre"
+        "janvier", "fevrier", "mars", "avril", "mai", "juin",
+        "juillet", "août", "septembre", "octobre", "novembre", "decembre"
     ]
 
     for key, value in data.items():

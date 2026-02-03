@@ -3,6 +3,13 @@ from compta.dashboard_view_optimized import dashboard_indicators_view
 from django.urls import path
 
 urlpatterns = [
+    # === PROJECTS ===
+    path("projects/", views.ProjectListCreateView.as_view(), name="project-list-create"),
+    path("projects/<int:id>/", views.ProjectDetailView.as_view(), name="project-detail"),
+    path("projects/user-active/", views.UserProjectsView.as_view(), name="user-projects"),
+    path("projects/request-access/", views.ProjectAccessRequestView.as_view(), name="request-project-access"),
+    path("projects/manage-access/", views.ManageAccessRequestsView.as_view(), name="manage-project-access"),
+
     path("journals/generate/", views.generate_journal_view, name="generate-journal"),
     path("journals/", views.list_journals_view, name="list-journals"),
     path("journals/repartition/", views.journal_repartition_view, name="journal-repartition"),

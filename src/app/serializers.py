@@ -17,8 +17,9 @@ class UserSerializer(serializers.ModelSerializer):
     
 
     def get_is_admin(self, obj):
-        is_admin = obj.is_staff
-        return is_admin
+        # User is admin ONLY if they have role='admin'
+        # We don't check is_superuser because we use role-based access control
+        return obj.role == 'admin'
         
     def get_full_name(self, obj):
         if obj.name:
@@ -32,7 +33,7 @@ class UserSerializerWithToken(UserSerializer):
     
     class Meta:
         model = CustomUser
-        fields = ["id", "username", "email" , "full_name", "is_admin", "profile_picture", "token"]
+        fields = ["id", "username", "email" , "full_name", "is_admin", "profile_picture", "token", "role"]
      
     def get_token(self, obj):
         token = AccessToken.for_user(obj)
@@ -54,7 +55,7 @@ class RegisterUserSerializer(serializers.ModelSerializer):
         }
     
     def get_is_admin(self, obj):
-        return obj.is_staff
+        return obj.role == 'admin'
     
     def get_token(self, obj):
         token = AccessToken.for_user(obj)

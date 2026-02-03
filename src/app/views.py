@@ -51,6 +51,13 @@ def update_user(request, pk):
 
     data = request.data
     
+    # Check admin quota if changing role to admin
+    new_role = data.get("role", user.role)
+    if new_role == "admin" and user.role != "admin":
+        admin_count = CustomUser.objects.filter(role="admin").count()
+        if admin_count >= 3:
+            return Response({"error": "Le quota de 3 administrateurs est atteint"}, status=status.HTTP_400_BAD_REQUEST)
+    
     # Update fields
     user.name = data.get("name", user.name)
     user.email = data.get("email", user.email)
@@ -78,6 +85,65 @@ def delete_user(request, pk):
 
     user.delete()
     return Response({"message": "Utilisateur supprimé avec succès"}, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_admin_count(request):
+    """
+    Returns the current number of admin users
+    """
+    admin_count = CustomUser.objects.filter(role="admin").count()
+    return Response({"admin_count": admin_count}, status=status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def create_user_by_admin(request):
+    """
+    Create a new user by admin - auto-activated without OTP
+    """
+    data = request.data
+    
+    # Validate required fields
+    if not all([data.get("username"), data.get("name"), data.get("email"), data.get("role")]):
+        return Response({"error": "Nom d'utilisateur, nom, email et rôle sont requis"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Check admin quota if role is admin
+    if data.get("role") == "admin":
+        admin_count = CustomUser.objects.filter(role="admin").count()
+        if admin_count >= 3:
+            return Response({"error": "Le quota de 3 administrateurs est atteint"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Get username from request
+    username = data.get("username")
+    email = data.get("email")
+    
+    # Check if username already exists
+    if CustomUser.objects.filter(username=username).exists():
+        return Response({"error": "Ce nom d'utilisateur existe déjà"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Check if email already exists
+    if CustomUser.objects.filter(email=email).exists():
+        return Response({"error": "Un utilisateur avec cet email existe déjà"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        # Create user with auto-activation
+        user = CustomUser.objects.create_user(
+            username=username,
+            email=email,
+            name=data.get("name"),
+            role=data.get("role"),
+            is_active=True,
+            is_verified=True,
+            password=CustomUser.objects.make_random_password()  # Generate random password
+        )
+        
+        serializer = UserSerializer(user, many=False)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 # 2.2. get user profile

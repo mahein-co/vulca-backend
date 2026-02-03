@@ -6,7 +6,7 @@ from vulca_backend import settings
 
 from rest_framework import generics
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
@@ -15,6 +15,7 @@ from ocr.serializers import FileSourceSerializer, FormSourceSerializer
 from ocr.utils import detect_file_type, clean_ai_json, generate_description
 from ocr.openai_vision_ocr import extract_content_with_vision
 from ocr.constants import EXTRACTION_FIELDS_PROMPT
+from compta.permissions import HasProjectAccess
 
 from openai import OpenAI
 client = OpenAI(api_key=settings.OPENAI_API_KEY) 
@@ -150,14 +151,23 @@ def translate_keys(obj, mapping):
 
 
 class FileSourceListCreateView(generics.ListCreateAPIView):
-    queryset = FileSource.objects.all().order_by('-uploaded_at')
     serializer_class = FileSourceSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, HasProjectAccess]
+
+    def get_queryset(self):
+        project_id = getattr(self.request, 'project_id', None)
+        if not project_id:
+            return FileSource.objects.none()
+        return FileSource.objects.filter(project_id=project_id).order_by('-uploaded_at')
 
 
 @api_view(["POST"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def file_source_list_create(request):
+    project_id = getattr(request, 'project_id', None)  # Injecté par middleware
+    if not project_id:
+        return Response({"error": "Project non fourni (middleware absent ou non autorisé)."}, status=400)
+
     file = request.FILES.get("file")
     if not file:
         return Response({"error": "Aucun fichier envoyé."}, status=400)
@@ -167,15 +177,16 @@ def file_source_list_create(request):
     file_content = file.read()
     file_hash = hashlib.sha256(file_content).hexdigest()
     file.seek(0)
-    
-    print(f"\n🔐 HASH FICHIER: {file_hash}")
-    
-    existing_file = FileSource.objects.filter(hash_ocr=file_hash).first()
+
+    # Vérifier doublons DANS LE MÊME PROJET
+    existing_file = FileSource.objects.filter(
+        hash_ocr=file_hash,
+        project_id=project_id
+    ).first()
     if existing_file:
-        print(f"   ⚠️  Fichier déjà existant (ID: {existing_file.id})")
         return Response({
             "status": "duplicate",
-            "message": "Ce fichier a déjà été importé.",
+            "message": "Ce fichier a déjà été importé pour ce projet.",
             "file_source": FileSourceSerializer(existing_file).data,
             "duplicate": True
         }, status=200)
@@ -197,17 +208,12 @@ def file_source_list_create(request):
         model=settings.OPENAI_MODEL
     )
 
-    # Déterminer type de pièce
+    # Déterminer type de pièce (logique inchangée)
     piece_type = "Autres"
     type_doc = extracted_json.get("type_document", "").lower()
     type_field = extracted_json.get("type", "").lower()
-    
-    print(f"\n🔍 DÉTECTION TYPE DE PIÈCE:")
-    print(f"   type_document: '{type_doc}'")
-    print(f"   type: '{type_field}'")
-    
     has_banque_field = bool(extracted_json.get("banque") or extracted_json.get("nom_banque"))
-    
+
     if has_banque_field or any(k in type_doc for k in ["banc", "banq", "relev", "virement"]):
         ref_bancaire = str(extracted_json.get("reference", ""))
         if ref_bancaire.upper().startswith("VIRM") or "virement" in type_doc:
@@ -221,12 +227,11 @@ def file_source_list_create(request):
     elif extracted_json.get("numero_facture") or type_doc in ["vente", "achat", "facture"]:
         piece_type = "Facture"
 
-    # Extraire référence
     ref_file = request.data.get("ref_file") or extracted_json.get("numero_facture") or extracted_json.get("reference")
-    
-    # Extraire date en donnant la priorité aux champs spécifiques puis génériques
+
+    # Extraire date
     date_keys = [
-        "date", "date_facture", "date_emission", "date_document", 
+        "date", "date_facture", "date_emission", "date_document",
         "date_paie", "date_bon", "date_operation", "date_valeur", "date_transaction"
     ]
     date_val = request.data.get("date")
@@ -236,13 +241,9 @@ def file_source_list_create(request):
                 date_val = extracted_json.get(k)
                 break
 
-    print(f"\n📋 RÉSULTAT:")
-    print(f"   piece_type = '{piece_type}'")
-    print(f"   ref_file = '{ref_file}'")
-    print(f"   date = '{date_val}'")
-
     data_to_save = {
         "file": file,
+        "project": project_id,  # utiliser 'project' pour le serializer
         "file_name": getattr(file, "name", ""),
         "description": description,
         "piece_type": piece_type,
@@ -253,145 +254,124 @@ def file_source_list_create(request):
     }
 
     serializer = FileSourceSerializer(data=data_to_save)
-    if serializer.is_valid():
-        saved_file = serializer.save()
-
-        # Génération automatique du journal (SYNCHRONE)
-        # L'utilisateur veut que le chargement reste visible jusqu'à la fin
-        try:
-            from compta.views import generate_journal_view
-            from rest_framework.test import APIRequestFactory
-
-            print(f"🔄 Génération journal pour fichier {saved_file.id}...")
-            
-            gen_data = extracted_json.copy() if isinstance(extracted_json, dict) else {}
-            
-            # Forcer type_document BANQUE si bancaire
-            if any(k in piece_type.lower() for k in ["banc", "banq", "relev", "virement", "salaire", "paiement", "cheque", "chèque", "retrait", "depot", "dépôt"]):
-                gen_data["type_document"] = "BANQUE"
-            elif "type_document" not in gen_data:
-                if piece_type == "Facture":
-                    if gen_data.get("fournisseur"):
-                        gen_data["type_document"] = "ACHAT"
-                    else:
-                        gen_data["type_document"] = "VENTE"
-                elif "caisse" in piece_type.lower():
-                    gen_data["type_document"] = "CAISSE"
-                else:
-                    gen_data["type_document"] = "OD"
-            
-            gen_data["file_source"] = saved_file.id
-
-            # Calcul HT si manquant
-            if not gen_data.get("montant_ht"):
-                try:
-                    ttc = float(gen_data.get("montant_ttc") or 0)
-                    tva = float(gen_data.get("montant_tva") or 0)
-                    if ttc > 0 and tva > 0:
-                        gen_data["montant_ht"] = round(ttc - tva, 2)
-                except:
-                    pass
-            
-            factory = APIRequestFactory()
-            internal_request = factory.post('/api/compta/journals/generate/', gen_data, format='json')
-            response = generate_journal_view(internal_request)
-            
-            if response.status_code in [200, 201]:
-                print("✅ Journal généré avec succès")
-                print("   ⚡ Les signals Django ont généré automatiquement :")
-                print("      → GrandLivre (post_save Journal)")
-                print("      → Balance (post_save GrandLivre)")
-                print("      → Bilan + CompteResultat (post_save Balance)")
-            else:
-                print(f"❌ Échec génération journal: {response.data}")
-
-        except Exception as e:
-            print(f"❌ Erreur génération journal: {e}")
-            import traceback
-            print(traceback.format_exc())
-
-        # ✅ RETOUR APRÈS GÉNÉRATION COMPLÈTE
-        # Le chargement reste visible jusqu'à ce que tout soit terminé
-        return Response({
-            "status": "success",
-            "message": "Document et journal enregistrés avec succès.",
-            "file_source": serializer.data
-        }, status=201)
-    else:
+    if not serializer.is_valid():
         return Response(serializer.errors, status=400)
 
+    saved_file = serializer.save()
+
+    # Génération automatique du journal (SYNCHRONE)
+    try:
+        from compta.views import process_journal_generation
+
+        gen_data = extracted_json.copy() if isinstance(extracted_json, dict) else {}
+
+        # Forcer type_document BANQUE si bancaire
+        if any(k in piece_type.lower() for k in ["banc", "banq", "relev", "virement", "salaire", "paiement", "cheque", "chèque", "retrait", "depot", "dépôt"]):
+            gen_data["type_document"] = "BANQUE"
+        elif "type_document" not in gen_data:
+            if piece_type == "Facture":
+                if gen_data.get("fournisseur"):
+                    gen_data["type_document"] = "ACHAT"
+                else:
+                    gen_data["type_document"] = "VENTE"
+            elif "caisse" in piece_type.lower():
+                gen_data["type_document"] = "CAISSE"
+            else:
+                gen_data["type_document"] = "OD"
+
+        gen_data["file_source"] = saved_file.id
+
+        # Calcul HT si manquant
+        if not gen_data.get("montant_ht"):
+            try:
+                ttc = float(gen_data.get("montant_ttc") or 0)
+                tva = float(gen_data.get("montant_tva") or 0)
+                if ttc > 0 and tva > 0:
+                    gen_data["montant_ht"] = round(ttc - tva, 2)
+            except:
+                pass
+
+        result = process_journal_generation(
+            document_json=gen_data,
+            project_id=project_id,
+            file_source=saved_file,
+            form_source=None
+        )
+    except Exception as e:
+        import traceback
+        print("❌ Erreur génération journal:", e)
+        print(traceback.format_exc())
+
+    return Response({
+        "status": "success",
+        "message": "Document et journal enregistrés avec succès.",
+        "file_source": FileSourceSerializer(saved_file).data
+    }, status=201)
 
 @api_view(["GET", "POST"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def form_source_list_create(request):
+    project_id = getattr(request, 'project_id', None)  # Injecté par middleware
+    if not project_id:
+        return Response({"error": "Project non fourni (middleware absent ou non autorisé)."}, status=400)
+
     if request.method == "GET":
-        form_sources = FormSource.objects.all().order_by("-updated_at")
+        form_sources = FormSource.objects.filter(project_id=project_id).order_by("-updated_at")
         serializer = FormSourceSerializer(form_sources, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-    if request.method == "POST":
-        raw_json = request.data.get("description_json")
+    # POST
+    raw_json = request.data.get("description_json")
+    if raw_json is None:
+        return Response({"error": "Le champ 'description_json' est manquant"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if raw_json is None:
-            return Response(
-                {"error": "Le champ 'description_json' est manquant"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if isinstance(raw_json, dict):
-            description_json = raw_json
-        else:
-            try:
-                description_json = json.loads(raw_json)
-            except json.JSONDecodeError:
-                return Response(
-                    {"error": "description_json doit être un JSON valide"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+    if isinstance(raw_json, dict):
+        description_json = raw_json
+    else:
+        try:
+            description_json = json.loads(raw_json)
+        except json.JSONDecodeError:
+            return Response({"error": "description_json doit être un JSON valide"}, status=status.HTTP_400_BAD_REQUEST)
 
-        description = generate_description(
-            client=client,
-            data=description_json,
-            json=json,
-            model=settings.OPENAI_MODEL
-        )
+    description = generate_description(
+        client=client,
+        data=description_json,
+        json=json,
+        model=settings.OPENAI_MODEL
+    )
 
-        data = dict(request.data) 
-        data["description"] = description
-        
-        # Extraire date si manquante
-        date_val = data.get("date")
-        
-        if not date_val and isinstance(description_json, dict):
-             date_keys = [
-                "date_facture", "date_emission", "date_document", 
-                "date_paie", "date_bon", "date_operation", "date_valeur", "date_transaction", "date"
-             ]
-             for k in date_keys:
-                 if description_json.get(k):
-                     date_val = description_json.get(k)
-                     break
-        
-        if date_val:
-            data["date"] = normalize_date_to_iso(date_val)
+    data = dict(request.data)
+    data["description"] = description
+    data["project"] = project_id  # utiliser 'project' pour le serializer
 
-        serializer = FormSourceSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(
-                {
-                    "status": "success",
-                    "message": "Sauvegarde avec succès.",
-                    "form_source": serializer.data,
-                },
-                status=status.HTTP_201_CREATED,
-            )
+    # Extraire date si manquante
+    date_val = data.get("date")
+    if not date_val and isinstance(description_json, dict):
+        date_keys = [
+            "date_facture", "date_emission", "date_document",
+            "date_paie", "date_bon", "date_operation", "date_valeur", "date_transaction", "date"
+        ]
+        for k in date_keys:
+            if description_json.get(k):
+                date_val = description_json.get(k)
+                break
 
+    if date_val:
+        data["date"] = normalize_date_to_iso(date_val)
+
+    serializer = FormSourceSerializer(data=data)
+    if not serializer.is_valid():
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    saved = serializer.save()
+    return Response({
+        "status": "success",
+        "message": "Sauvegarde avec succès.",
+        "form_source": FormSourceSerializer(saved).data,
+    }, status=status.HTTP_201_CREATED)
 
 @api_view(["POST"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def extract_content_file_view(request):
     file = request.FILES.get("file")
 
@@ -543,41 +523,44 @@ def extract_content_file_view(request):
         "extracted_json": extracted_json
     }, status=201)
 
-
+# ...existing code...
 @api_view(["GET"])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def all_pieces_list_view(request):
     """
-    Retourne la liste combinée de FileSource et FormSource
-    pour affichage dans GestionPiecesBoard
+    Retourne la liste combinée de FileSource et FormSource pour affichage dans GestionPiecesBoard
+    Filtrée STRICTEMENT par project_id injecté par le middleware.
     """
+    project_id = getattr(request, 'project_id', None)  # Injecté par middleware
+    if not project_id:
+        return Response({"status": "success", "count": 0, "pieces": []}, status=200)
+
     # Récupérer les paramètres de date
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
 
-    # Récupérer tous les FileSource
-    file_sources = FileSource.objects.all().order_by('-uploaded_at')
-    # Récupérer tous les FormSource
-    form_sources = FormSource.objects.all().order_by('-created_at')
-    
-    # FILTRAGE PAR DATE (Optimisation Performance)
+    # Récupérer tous les FileSource DU PROJET
+    file_sources = FileSource.objects.filter(project_id=project_id).order_by('-uploaded_at')
+
+    # Récupérer tous les FormSource DU PROJET
+    form_sources = FormSource.objects.filter(project_id=project_id).order_by('-created_at')
+
+    # FILTRAGE PAR DATE
     if date_start:
         file_sources = file_sources.filter(date__gte=date_start)
         form_sources = form_sources.filter(date__gte=date_start)
-        
+
     if date_end:
         file_sources = file_sources.filter(date__lte=date_end)
         form_sources = form_sources.filter(date__lte=date_end)
-    
+
     pieces = []
-    
-    # Ajouter FileSource
+
     for fs in file_sources:
         ptype = fs.piece_type or "Autres"
         if ptype == "Bon de caisse":
             ptype = "Bon d'achat"
-            
-        # Conversion safe de la date pour le JSON
+
         piece_date = fs.date
         if piece_date and hasattr(piece_date, 'isoformat'):
             piece_date = piece_date.isoformat()
@@ -595,14 +578,12 @@ def all_pieces_list_view(request):
             "date": piece_date,
             "created_at": fs.uploaded_at.isoformat() if fs.uploaded_at else None,
         })
-    
-    # Ajouter FormSource
+
     for fs in form_sources:
         ptype = fs.piece_type or "Autres"
         if ptype == "Bon de caisse":
             ptype = "Bon d'achat"
 
-        # Conversion safe de la date pour le JSON
         piece_date = fs.date
         if piece_date and hasattr(piece_date, 'isoformat'):
             piece_date = piece_date.isoformat()
@@ -620,12 +601,14 @@ def all_pieces_list_view(request):
             "date": piece_date,
             "created_at": fs.created_at.isoformat() if fs.created_at else None,
         })
-    
+
     # Trier par date (plus récent en premier)
     pieces.sort(key=lambda x: x.get('date') or x.get('created_at') or '', reverse=True)
-    
+
     return Response({
         "status": "success",
         "count": len(pieces),
         "pieces": pieces
     }, status=200)
+
+

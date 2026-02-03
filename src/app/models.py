@@ -12,7 +12,7 @@ def generate_numeric_otp():
 class CustomUser(AbstractUser):
     # Ajoute des champs personnalisés si besoin
     ROLE_CHOICES = (
-        ("user", "Utilisateur"),
+        ("expert_comptable", "Expert Comptable"),
         ("admin", "Administrateur"),
         ("assistant", "Assistant"),
     )
@@ -21,7 +21,7 @@ class CustomUser(AbstractUser):
     email = models.EmailField(unique=True, blank=False, null=False, )
     name = models.CharField(max_length=150, blank=True, null=True)
     username = models.CharField(max_length=150, unique=True)  # username obligatoire
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="user")
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="expert_comptable")
     is_verified = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     # Username_field: email field for authentication
@@ -37,7 +37,9 @@ class OtpToken(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name="otps"
+        related_name="otps",
+        null=True,
+        blank=True
     )
     otp_code = models.CharField(max_length=6, default=generate_numeric_otp)
     otp_created_at = models.DateTimeField(auto_now_add=True)

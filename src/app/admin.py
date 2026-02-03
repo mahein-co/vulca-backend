@@ -10,7 +10,7 @@ from app.models import CustomUser, OtpToken
 @admin.register(CustomUser)
 class CustomUserAdmin(UserAdmin):
     model = CustomUser
-    list_display = ['username', 'email', 'role', 'is_verified', 'is_active']
+    list_display = ['username', 'email', 'role', 'is_verified', 'is_active', 'profile_picture', 'name']
     fieldsets = UserAdmin.fieldsets + (
         (None, {'fields': ('role', 'is_verified', 'profile_picture', 'name')}),
     )

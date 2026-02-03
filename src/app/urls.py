@@ -7,6 +7,8 @@ from app import views
 
 urlpatterns = [
     path("users/", view=views.get_users, name="users"),
+    path("users/admin-count/", view=views.get_admin_count, name="admin-count"),
+    path("users/create/", view=views.create_user_by_admin, name="create-user-by-admin"),
     path("users/profile/", view=views.UserProfileView.as_view(), name="users-profile"),
     path("users/register/", view=views.register_user, name="users-register"),
     path("users/<int:pk>/update/", view=views.update_user, name="user-update"),

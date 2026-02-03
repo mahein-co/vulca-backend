@@ -10,7 +10,7 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv('SECRET_KEY')
-DEBUG = os.getenv('DEBUG', 'False') == 'True'
+DEBUG = os.getenv('DEBUG', 'True') == 'True'
 
 # === FRONTEND URL ===
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -32,12 +32,14 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
-    # "pgvector",
+    "pgvector",
+    'django_extensions',
     'app.apps.AppConfig',  # ← APPLICATION ACCOUNT USER
     'compta.apps.ComptaConfig',  # APPLICATION COMPTA
     "ocr.apps.OcrConfig",  # APPLICATION OCR
     # "chatbot.apps.ChatbotConfig",
 ]
+
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -48,6 +50,7 @@ MIDDLEWARE = [
     'app.middleware.DisableCSRFMiddleware',  # ← CHANGÉ de 'projet.middleware' à 'app.middleware'
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'app.project_middleware.ProjectMiddleware',  # ✅ NOUVEAU - Multi-tenant validation
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -153,6 +156,7 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'x-project-id',
 ]
 
 # Explicit allowed origins
@@ -162,7 +166,8 @@ CORS_ALLOWED_ORIGINS = [
     "https://lexaiq.com",  # Production frontend (without www)
     "https://api.lexaiq.com",  # Production backend API
     'http://localhost:8000',  # Local backend
-    'http://127.0.0.1:8000'  # Local backend alternative
+    'http://127.0.0.1:8000',  # Local backend alternative
+    "http://127.0.0.1:3000",  # Frontend alternative IP
 ]
 
 # CSRF trusted origins

@@ -1,11 +1,101 @@
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
+from django.conf import settings
 from decimal import Decimal
+
+# --------------------------------------------------------
+# PROJET (Multi-tenant accounting)
+# --------------------------------------------------------
+
+class Project(models.Model):
+    """
+    Représente un projet comptable indépendant.
+    Chaque projet a ses propres données comptables isolées.
+    """
+    name = models.CharField(max_length=255, unique=True, verbose_name="Nom du projet")
+    description = models.TextField(blank=True, null=True, verbose_name="Description")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='created_projects',
+        verbose_name="Créé par"
+    )
+    is_active = models.BooleanField(default=True, verbose_name="Actif")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'project'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['name']),
+            models.Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class ProjectAccess(models.Model):
+    """
+    Gère les accès utilisateurs aux projets.
+    Status: pending (en attente), approved (approuvé), rejected (rejeté)
+    """
+    STATUS_CHOICES = [
+        ('pending', 'En attente'),
+        ('approved', 'Approuvé'),
+        ('rejected', 'Rejeté'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='project_accesses',
+        verbose_name="Utilisateur"
+    )
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='user_accesses',
+        verbose_name="Projet"
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending',
+        verbose_name="Statut"
+    )
+    requested_at = models.DateTimeField(auto_now_add=True, verbose_name="Demandé le")
+    approved_at = models.DateTimeField(null=True, blank=True, verbose_name="Approuvé le")
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approved_accesses',
+        verbose_name="Approuvé par"
+    )
+
+    class Meta:
+        db_table = 'project_access'
+        ordering = ['-requested_at']
+        unique_together = ('user', 'project')  # Un utilisateur ne peut demander qu'une fois par projet
+        indexes = [
+            models.Index(fields=['user', 'project']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.project.name} ({self.status})"
+
+
 # --------------------------------------------------------
 # JOURNAL COMPTABLE (Source de vérité)
 # --------------------------------------------------------
 class Journal(models.Model):
+    # Relations vers les sources (fichier ou formulaire)
     # file_source = models.ForeignKey(
         # 'ocr.FileSource',
         # on_delete=models.SET_NULL,
@@ -20,6 +110,17 @@ class Journal(models.Model):
         # blank=True,
         # related_name='journal_entries'
     # )
+    
+    # Projet auquel appartient cette écriture
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='journals',
+        verbose_name="Projet",
+        null=True,
+        blank=True
+    )
+    
     TYPE_JOURNAL_CHOICES = [
         ('ACHAT', 'Journal des achats'),
         ('VENTE', 'Journal des ventes'),
@@ -49,8 +150,10 @@ class Journal(models.Model):
 
     class Meta:
         db_table = 'journal'
-        ordering = ['date', 'numero_piece']
+        ordering = ['project', 'date', 'numero_piece']
         indexes = [
+            models.Index(fields=['project', 'date', 'type_journal']),
+            models.Index(fields=['project', 'numero_compte', 'date']),
             models.Index(fields=['date', 'type_journal']),
             models.Index(fields=['numero_compte', 'date']),
         ]
@@ -68,6 +171,14 @@ class Journal(models.Model):
 
 
 class GrandLivre(models.Model):
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='grand_livres',
+        verbose_name="Projet",
+        null=True,
+        blank=True
+    )
     journal = models.ForeignKey(
         'Journal', on_delete=models.CASCADE,
         related_name='grand_livre_entries',
@@ -88,8 +199,10 @@ class GrandLivre(models.Model):
 
     class Meta:
         db_table = 'grand_livre'
-        ordering = ['numero_compte', 'date', 'numero_piece']
+        ordering = ['project', 'numero_compte', 'date', 'numero_piece']
         indexes = [
+            models.Index(fields=['project', 'numero_compte', 'date']),
+            models.Index(fields=['project', 'date']),
             models.Index(fields=['numero_compte', 'date']),
             models.Index(fields=['date']),
         ]
@@ -102,6 +215,14 @@ class GrandLivre(models.Model):
 # BALANCE (Synthèse par compte depuis Grand Livre)
 
 class Balance(models.Model):
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='balances',
+        verbose_name="Projet",
+        null=True,
+        blank=True
+    )
     numero_compte = models.CharField(max_length=20, db_index=True)
     libelle = models.CharField(max_length=255, blank=True, null=True)
     total_debit = models.DecimalField(max_digits=15, decimal_places=2, default=Decimal('0.00'),
@@ -116,9 +237,11 @@ class Balance(models.Model):
 
     class Meta:
         db_table = 'balance'
-        ordering = ['numero_compte','date']
-        unique_together = ('numero_compte', 'date') 
+        ordering = ['project', 'numero_compte', 'date']
+        unique_together = ('project', 'numero_compte', 'date') 
         indexes = [
+            models.Index(fields=['project', 'date']),
+            models.Index(fields=['project', 'numero_compte', 'date']),
             models.Index(fields=['date']),
             models.Index(fields=['numero_compte', 'date']),
         ]
@@ -129,6 +252,7 @@ class Balance(models.Model):
         from .models import GrandLivre
 
         data = GrandLivre.objects.filter(
+            project=self.project,
             numero_compte=self.numero_compte,
             date=self.date   # ✅ FILTRE PAR DATE OBLIGATOIRE
         ).aggregate(
@@ -155,6 +279,14 @@ class Balance(models.Model):
 class CompteResultat(models.Model):
     NATURE_CHOICES = [('CHARGE', 'Charge'), ('PRODUIT', 'Produit')]
 
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='comptes_resultat',
+        verbose_name="Projet",
+        null=True,
+        blank=True
+    )
     balance = models.ForeignKey(Balance, on_delete=models.CASCADE,
                                 related_name='comptes_resultat', verbose_name='Balance source',
                                 null=True, blank=True)
@@ -171,8 +303,10 @@ class CompteResultat(models.Model):
 
     class Meta:
         db_table = 'compte_resultat'
-        ordering = ['date', 'nature', 'numero_compte']
+        ordering = ['project', 'date', 'nature', 'numero_compte']
         indexes = [
+            models.Index(fields=['project', 'date', 'nature']),
+            models.Index(fields=['project', 'numero_compte']),
             models.Index(fields=['date', 'nature']),
             models.Index(fields=['numero_compte']),
         ]
@@ -182,6 +316,9 @@ class CompteResultat(models.Model):
             self.numero_compte = self.balance.numero_compte
             self.libelle = self.balance.libelle
             self.date = self.balance.date
+            # ✅ COPIE DU PROJET DEPUIS LA BALANCE
+            if not self.project_id:
+                self.project_id = self.balance.project_id
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -201,6 +338,14 @@ class Bilan(models.Model):
         
     ]
 
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name='bilans',
+        verbose_name="Projet",
+        null=True,
+        blank=True
+    )
     balance = models.ForeignKey(Balance, on_delete=models.CASCADE,
                                 related_name='bilans', verbose_name='Balance source',
                                 null=True, blank=True)
@@ -218,8 +363,10 @@ class Bilan(models.Model):
 
     class Meta:
         db_table = 'bilan'
-        ordering = ['date', 'type_bilan', 'categorie', 'numero_compte']
+        ordering = ['project', 'date', 'type_bilan', 'categorie', 'numero_compte']
         indexes = [
+            models.Index(fields=['project', 'date', 'type_bilan']),
+            models.Index(fields=['project', 'type_bilan', 'categorie']),
             models.Index(fields=['date', 'type_bilan']),
             models.Index(fields=['type_bilan', 'categorie']),
         ]
@@ -229,6 +376,9 @@ class Bilan(models.Model):
             self.numero_compte = self.balance.numero_compte
             self.libelle = self.balance.libelle
             self.date = self.balance.date
+            # ✅ COPIE DU PROJET DEPUIS LA BALANCE
+            if not self.project_id:
+                self.project_id = self.balance.project_id
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -239,7 +389,7 @@ class Bilan(models.Model):
 # ANNEXE COMPTABLE (Lié au Bilan)
 
 class AnnexeComptable(models.Model):
-    bilan = models.ForeignKey(Bilan, on_delete=models.SET_NULL,
+    bilan = models.ForeignKey(Bilan, on_delete=models.CASCADE,
                               null=True, blank=True, related_name='annexes',
                               verbose_name='Bilan associé')
 

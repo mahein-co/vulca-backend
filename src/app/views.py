@@ -205,6 +205,10 @@ class MyTokenObtainPairView(TokenObtainPairView):
             "samesite": "Lax" if settings.DEBUG else "None",
             "path": "/",
         }
+        
+        # Add domain for production to enable cross-subdomain cookie sharing
+        if not settings.DEBUG:
+            cookie_params["domain"] = ".lexaiq.com"
 
         # Stockage des tokens en cookies HttpOnly (invisible côté JS)
         response.set_cookie(key="access", value=access_token, **cookie_params)
@@ -328,6 +332,10 @@ class CookieTokenRefreshView(TokenRefreshView):
             "samesite": "Lax" if settings.DEBUG else "None",
             "path": "/",
         }
+        
+        # Add domain for production to enable cross-subdomain cookie sharing
+        if not settings.DEBUG:
+            cookie_params["domain"] = ".lexaiq.com"
 
         # Réinjecter le nouvel access token dans un cookie HttpOnly
         response.set_cookie(key="access", value=access_token, **cookie_params)

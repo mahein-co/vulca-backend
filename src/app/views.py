@@ -200,20 +200,26 @@ class MyTokenObtainPairView(TokenObtainPairView):
 
         # Cookie settings based on environment
         print(f"DEBUG: settings.DEBUG is {settings.DEBUG}")
-        cookie_params = {
-            "httponly": True,
-            "secure": not settings.DEBUG,  # False in dev (http), True in prod (https)
-            "samesite": "Lax",  # Lax car même domaine racine (.lexaiq.com)
-            "path": "/",
-        }
         
-        # IMPORTANT: Définir 'domain' pour partager les cookies entre sous-domaines
-        # Frontend: www.lexaiq.com, Backend: api.lexaiq.com
-        # En définissant domain=".lexaiq.com", les cookies sont partagés entre tous les sous-domaines
+        # Production configuration (Robust)
         if not settings.DEBUG:
-            cookie_params["domain"] = ".lexaiq.com"
+            cookie_params = {
+                "httponly": True,
+                "secure": True,      # Always Secure in prod
+                "samesite": "None",  # None is most robust for cross-subdomain/site
+                "path": "/",
+                "domain": ".lexaiq.com" # Share between api.lexaiq.com and lexaiq.com
+            }
+        else:
+            # Development configuration
+            cookie_params = {
+                "httponly": True,
+                "secure": False,
+                "samesite": "Lax",
+                "path": "/",
+            }
             
-        print(f"DEBUG: Cookie params being set: {cookie_params}")
+        print(f"DEBUG: Authentication Cookie params being set: {cookie_params}")
 
         # Stockage des tokens en cookies HttpOnly (invisible côté JS)
         response.set_cookie(key="access", value=access_token, **cookie_params)
@@ -331,16 +337,21 @@ class CookieTokenRefreshView(TokenRefreshView):
         response = Response({"message": "Access token refreshed"}, status=status.HTTP_200_OK)
         
         # Cookie settings based on environment
-        cookie_params = {
-            "httponly": True,
-            "secure": not settings.DEBUG,
-            "samesite": "Lax",  # Lax car même domaine racine (.lexaiq.com)
-            "path": "/",
-        }
-        
-        # Définir domain pour partager les cookies entre sous-domaines
         if not settings.DEBUG:
-            cookie_params["domain"] = ".lexaiq.com"
+            cookie_params = {
+                "httponly": True,
+                "secure": True,
+                "samesite": "None",
+                "path": "/",
+                "domain": ".lexaiq.com"
+            }
+        else:
+            cookie_params = {
+                "httponly": True,
+                "secure": False,
+                "samesite": "Lax",
+                "path": "/",
+            }
 
         # Réinjecter le nouvel access token dans un cookie HttpOnly
         response.set_cookie(key="access", value=access_token, **cookie_params)

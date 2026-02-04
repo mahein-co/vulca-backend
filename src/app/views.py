@@ -198,6 +198,8 @@ class MyTokenObtainPairView(TokenObtainPairView):
             "access": access_token,   # <-- Return token for localStorage
             "refresh": refresh_token, # <-- Return refresh for localStorage
         }
+        
+        print(f"DEBUG LOGIN: Returning user_info keys: {user_info.keys()}")
 
         response = Response(user_info, status=status.HTTP_200_OK)
 

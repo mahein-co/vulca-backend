@@ -4,8 +4,12 @@ from rest_framework.exceptions import AuthenticationFailed
 class JWTAuthenticationFromCookie(JWTAuthentication):
     def authenticate(self, request):
         # DEBUGGING: Print all cookies to see what we are receiving
-        print(f"DEBUG AUTH: Cookies received: {request.COOKIES.keys()}")
+        # print(f"DEBUG AUTH: Cookies received: {request.COOKIES.keys()}")
         
+        # DEBUGGING: Check for Authorization Header
+        auth_header = request.META.get('HTTP_AUTHORIZATION')
+        print(f"DEBUG AUTH: Raw Authorization Header: {auth_header}")
+
         header = self.get_header(request)
         if header is None:
             raw_token = request.COOKIES.get("access")

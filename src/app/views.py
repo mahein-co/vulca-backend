@@ -186,7 +186,8 @@ class MyTokenObtainPairView(TokenObtainPairView):
         access_token = data.get("access")
         refresh_token = data.get("refresh")
 
-        # JSON: USER INFO 
+        # JSON: USER INFO AND TOKENS
+        # Fallback to Header-based auth if cookies fail
         user_info = {
             "id": data.get("id"),
             "username": data.get("username"),
@@ -194,6 +195,8 @@ class MyTokenObtainPairView(TokenObtainPairView):
             "full_name": data.get("full_name"),
             "profile_picture": data.get("profile_picture"),
             "is_admin": data.get("is_admin"),
+            "access": access_token,   # <-- Return token for localStorage
+            "refresh": refresh_token, # <-- Return refresh for localStorage
         }
 
         response = Response(user_info, status=status.HTTP_200_OK)
@@ -327,8 +330,13 @@ Merci,
 # REFRESH TOKEN
 class CookieTokenRefreshView(TokenRefreshView):
     def post(self, request, *args, **kwargs):
-        # Lire le cookie HttpOnly refresh
+        # Allow reading from Body if cookie missing
         refresh = request.COOKIES.get("refresh")
+        
+        # Fallback: Check body
+        if refresh is None:
+            refresh = request.data.get("refresh")
+
         if refresh is None:
             return Response({"error": "No refresh token"}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -341,8 +349,11 @@ class CookieTokenRefreshView(TokenRefreshView):
         # Récupérer le nouvel access token
         access_token = serializer.validated_data["access"]
 
-        # Créer une réponse vide ou avec un message
-        response = Response({"message": "Access token refreshed"}, status=status.HTTP_200_OK)
+        # Return new access token in body
+        response = Response({
+            "message": "Access token refreshed",
+            "access": access_token
+        }, status=status.HTTP_200_OK)
         
         # Cookie settings based on environment
         

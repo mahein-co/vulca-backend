@@ -36,15 +36,11 @@ env/
 **/migrations/
 !**/migrations/__init__.py
 
-# Chatbot module (temporaire ou expérimental)
-src/chatbot/
-
 # Django
 *.log
 local_settings.py
 db.sqlite3
-db.sqlite3-journal
-/media
+db.sqlite3-journal/media
 /staticfiles
 .env
 .env.local

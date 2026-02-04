@@ -236,10 +236,10 @@ USE_TZ = True
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'  # ← Ajouter cette ligne
 
-# Pour le développement uniquement
-# STATICFILES_DIRS = [
-#     BASE_DIR / 'static',
-# ]
+# Pour le développement et production (nécessaire pour collectstatic)
+STATICFILES_DIRS = [
+    BASE_DIR / 'static',
+]
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

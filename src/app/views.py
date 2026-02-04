@@ -201,14 +201,22 @@ class MyTokenObtainPairView(TokenObtainPairView):
         # Cookie settings based on environment
         print(f"DEBUG: settings.DEBUG is {settings.DEBUG}")
         
-        # Production configuration (Robust)
-        if not settings.DEBUG:
+        # Determine if we are in production based on hostname or settings
+        host = request.get_host()
+        print(f"DEBUG: Request Host is: {host}")
+        
+        is_production = "lexaiq.com" in host or not settings.DEBUG
+        
+        if is_production:
+            # Production configuration (Robust)
+            # We remove 'domain' to make it a Host-Only cookie for api.lexaiq.com
+            # With SameSite=None, this allows it to be sent from lexaiq.com
             cookie_params = {
                 "httponly": True,
                 "secure": True,      # Always Secure in prod
                 "samesite": "None",  # None is most robust for cross-subdomain/site
                 "path": "/",
-                "domain": ".lexaiq.com" # Share between api.lexaiq.com and lexaiq.com
+                # "domain": ".lexaiq.com"  <-- SIMPLIFICATION: Remove explicit domain
             }
         else:
             # Development configuration
@@ -337,13 +345,18 @@ class CookieTokenRefreshView(TokenRefreshView):
         response = Response({"message": "Access token refreshed"}, status=status.HTTP_200_OK)
         
         # Cookie settings based on environment
-        if not settings.DEBUG:
+        
+        # Determine if we are in production based on hostname or settings
+        host = request.get_host()
+        is_production = "lexaiq.com" in host or not settings.DEBUG
+        
+        if is_production:
             cookie_params = {
                 "httponly": True,
                 "secure": True,
                 "samesite": "None",
                 "path": "/",
-                "domain": ".lexaiq.com"
+                # "domain": ".lexaiq.com" # Simplification: Host-Only
             }
         else:
             cookie_params = {

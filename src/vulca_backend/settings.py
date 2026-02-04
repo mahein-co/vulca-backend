@@ -207,8 +207,9 @@ SESSION_COOKIE_SAMESITE = "Lax"
 
 if not DEBUG:
     # Définir le domaine racine pour partager les cookies entre sous-domaines
-    SESSION_COOKIE_DOMAIN = ".lexaiq.com"
-    CSRF_COOKIE_DOMAIN = ".lexaiq.com"
+    # SIMPLIFICATION: On laisse le domaine par défaut (Host-Only) pour éviter les problèmes de Public Suffix
+    # SESSION_COOKIE_DOMAIN = ".lexaiq.com"
+    # CSRF_COOKIE_DOMAIN = ".lexaiq.com"
     # Utiliser SameSite="None" + Secure=True pour une compatibilité maximale cross-subdomain
     SESSION_COOKIE_SAMESITE = "None"
     CSRF_COOKIE_SAMESITE = "None"

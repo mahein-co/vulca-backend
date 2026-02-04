@@ -203,14 +203,15 @@ class MyTokenObtainPairView(TokenObtainPairView):
         cookie_params = {
             "httponly": True,
             "secure": not settings.DEBUG,  # False in dev (http), True in prod (https)
-            "samesite": "Lax",  # Lax is safer and works for localhost
+            "samesite": "Lax",  # Lax car même domaine racine (.lexaiq.com)
             "path": "/",
         }
         
-        # Add domain for production to enable cross-subdomain cookie sharing
+        # IMPORTANT: Définir 'domain' pour partager les cookies entre sous-domaines
+        # Frontend: www.lexaiq.com, Backend: api.lexaiq.com
+        # En définissant domain=".lexaiq.com", les cookies sont partagés entre tous les sous-domaines
         if not settings.DEBUG:
             cookie_params["domain"] = ".lexaiq.com"
-            cookie_params["samesite"] = "None"
             
         print(f"DEBUG: Cookie params being set: {cookie_params}")
 
@@ -333,11 +334,11 @@ class CookieTokenRefreshView(TokenRefreshView):
         cookie_params = {
             "httponly": True,
             "secure": not settings.DEBUG,
-            "samesite": "Lax" if settings.DEBUG else "None",
+            "samesite": "Lax",  # Lax car même domaine racine (.lexaiq.com)
             "path": "/",
         }
         
-        # Add domain for production to enable cross-subdomain cookie sharing
+        # Définir domain pour partager les cookies entre sous-domaines
         if not settings.DEBUG:
             cookie_params["domain"] = ".lexaiq.com"
 

@@ -185,7 +185,7 @@ if ENVIRONMENT == 'development':
         "http://127.0.0.1:8000",
     ]
 else:
-    # Production - Seulement les domaines lexaiq.com
+    # Production - Domaines lexaiq.com (frontend: www.lexaiq.com, backend: api.lexaiq.com)
     CORS_ALLOWED_ORIGINS = [
         "https://www.lexaiq.com",
         "https://lexaiq.com",
@@ -198,17 +198,20 @@ else:
     ]
 
 # Security settings for cookies (important for production)
-# Security settings for cookies (important for production)
+# Puisque frontend (www.lexaiq.com) et backend (api.lexaiq.com) partagent le même domaine racine,
+# on peut utiliser SameSite="Lax" au lieu de "None", ce qui est plus sécurisé
 CSRF_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_HTTPONLY = False
 SESSION_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_SAMESITE = "Lax"
 
 if not DEBUG:
+    # Définir le domaine racine pour partager les cookies entre sous-domaines
     SESSION_COOKIE_DOMAIN = ".lexaiq.com"
     CSRF_COOKIE_DOMAIN = ".lexaiq.com"
-    SESSION_COOKIE_SAMESITE = "None"
-    CSRF_COOKIE_SAMESITE = "None"
+    # Garder SameSite="Lax" car même domaine racine (plus sécurisé que "None")
+    SESSION_COOKIE_SAMESITE = "Lax"
+    CSRF_COOKIE_SAMESITE = "Lax"
 
 # Désactiver la redirection vers /login/
 LOGIN_URL = None

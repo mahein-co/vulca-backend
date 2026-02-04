@@ -184,15 +184,17 @@ class MyTokenObtainPairView(TokenObtainPairView):
         data = serializer.validated_data
 
         import sys
-        access_token = data.get("access")
+        # Aggressive diagnostic logging
+        print(f"--- DEBUG LOGIN START ---", file=sys.stderr)
+        print(f"DEBUG LOGIN VIEW: data keys from serializer: {list(data.keys())}", file=sys.stderr)
+        
+        # Check specific critical keys
+        access_token = data.get("access") or data.get("token")
         refresh_token = data.get("refresh")
         
-        # Aggressive logging for production
-        print(f"DEBUG LOGIN VIEW: Keys found in validated_data: {list(data.keys())}", file=sys.stderr)
-        print(f"DEBUG LOGIN VIEW: access_token exists: {bool(access_token)}", file=sys.stderr)
+        print(f"DEBUG LOGIN VIEW: Access found? {bool(access_token)}, Refresh found? {bool(refresh_token)}", file=sys.stderr)
 
         # JSON: USER INFO AND TOKENS
-        # Fallback to Header-based auth if cookies fail
         user_info = {
             "id": data.get("id"),
             "username": data.get("username"),
@@ -202,10 +204,12 @@ class MyTokenObtainPairView(TokenObtainPairView):
             "is_admin": data.get("is_admin"),
             "access": str(access_token) if access_token else None,
             "refresh": str(refresh_token) if refresh_token else None,
-            "DEBUG_VIEW_VERSION": "2.1-HYBRID-CORRECTED"
+            "DEBUG_VIEW_VERSION": "V3.0-DIAGNOSTIC",
+            "keys_detected": list(data.keys()) # For frontend inspection
         }
         
-        print(f"DEBUG LOGIN VIEW: Returning user_info with access key? {'access' in user_info}", file=sys.stderr)
+        print(f"DEBUG LOGIN VIEW: Final user_info keys: {list(user_info.keys())}", file=sys.stderr)
+        print(f"--- DEBUG LOGIN END ---", file=sys.stderr)
 
         response = Response(user_info, status=status.HTTP_200_OK)
 

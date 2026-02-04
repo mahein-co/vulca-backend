@@ -114,8 +114,9 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         obj_serializer = UserSerializerWithToken(self.user).data
 
-        print(f"DEBUG SERIALIZER: data keys before merging: {list(data.keys())}")
+        import sys
+        print(f"DEBUG SERIALIZER: data keys before merging: {list(data.keys())}", file=sys.stderr)
         for k, v in obj_serializer.items():
             data[k] = v
-        print(f"DEBUG SERIALIZER: data keys after merging: {list(data.keys())}")
+        print(f"DEBUG SERIALIZER: data keys after merging: {list(data.keys())}", file=sys.stderr)
         return data

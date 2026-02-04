@@ -205,6 +205,13 @@ else:
         "https://lexaiq.com",
         "https://api.lexaiq.com",
     ]
+    
+    # ✅ CRITICAL: Expose headers to allow frontend to read response headers
+    CORS_EXPOSE_HEADERS = [
+        'Set-Cookie',
+        'Content-Type',
+        'Authorization',
+    ]
 
 # Security settings for cookies (important for production)
 # Puisque frontend (www.lexaiq.com) et backend (api.lexaiq.com) partagent le même domaine racine,

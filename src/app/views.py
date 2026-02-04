@@ -188,11 +188,15 @@ class MyTokenObtainPairView(TokenObtainPairView):
         print(f"--- DEBUG LOGIN START ---", file=sys.stderr)
         print(f"DEBUG LOGIN VIEW: data keys from serializer: {list(data.keys())}", file=sys.stderr)
         
-        # Check specific critical keys
-        access_token = data.get("access") or data.get("token")
-        refresh_token = data.get("refresh")
+        # ✅ FIX: Generate tokens explicitly from the authenticated user
+        # This ensures tokens are always present, regardless of serializer structure
+        user = serializer.user
+        refresh = RefreshToken.for_user(user)
+        access_token = str(refresh.access_token)
+        refresh_token = str(refresh)
         
-        print(f"DEBUG LOGIN VIEW: Access found? {bool(access_token)}, Refresh found? {bool(refresh_token)}", file=sys.stderr)
+        print(f"DEBUG LOGIN VIEW: User authenticated: {user.email}", file=sys.stderr)
+        print(f"DEBUG LOGIN VIEW: Tokens generated - Access: {bool(access_token)}, Refresh: {bool(refresh_token)}", file=sys.stderr)
 
         # JSON: USER INFO AND TOKENS
         user_info = {
@@ -202,23 +206,23 @@ class MyTokenObtainPairView(TokenObtainPairView):
             "full_name": data.get("full_name"),
             "profile_picture": data.get("profile_picture"),
             "is_admin": data.get("is_admin"),
-            "access": str(access_token) if access_token else None,
-            "refresh": str(refresh_token) if refresh_token else None,
-            "DEBUG_VIEW_VERSION": "V3.0-DIAGNOSTIC",
-            "keys_detected": list(data.keys()) # For frontend inspection
+            "role": getattr(user, 'role', 'user'),
+            "access": access_token,  # ✅ Always present now
+            "refresh": refresh_token,  # ✅ Always present now
+            "DEBUG_VIEW_VERSION": "V4.0-FIXED",
         }
         
-        print(f"DEBUG LOGIN VIEW: Final user_info keys: {list(user_info.keys())}", file=sys.stderr)
+        print(f"DEBUG LOGIN VIEW: Final user_info - access present: {bool(user_info.get('access'))}", file=sys.stderr)
         print(f"--- DEBUG LOGIN END ---", file=sys.stderr)
 
         response = Response(user_info, status=status.HTTP_200_OK)
 
         # Cookie settings based on environment
-        print(f"DEBUG: settings.DEBUG is {settings.DEBUG}")
+        print(f"DEBUG: settings.DEBUG is {settings.DEBUG}", file=sys.stderr)
         
         # Determine if we are in production based on hostname or settings
         host = request.get_host()
-        print(f"DEBUG: Request Host is: {host}")
+        print(f"DEBUG: Request Host is: {host}", file=sys.stderr)
         
         is_production = "lexaiq.com" in host or not settings.DEBUG
         
@@ -231,7 +235,15 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 "secure": True,      # Always Secure in prod
                 "samesite": "None",  # None is most robust for cross-subdomain/site
                 "path": "/",
+                "max_age": 86400,  # 1 day for access token
                 # "domain": ".lexaiq.com"  <-- SIMPLIFICATION: Remove explicit domain
+            }
+            refresh_cookie_params = {
+                "httponly": True,
+                "secure": True,
+                "samesite": "None",
+                "path": "/",
+                "max_age": 604800,  # 7 days for refresh token
             }
         else:
             # Development configuration
@@ -240,13 +252,21 @@ class MyTokenObtainPairView(TokenObtainPairView):
                 "secure": False,
                 "samesite": "Lax",
                 "path": "/",
+                "max_age": 86400,
+            }
+            refresh_cookie_params = {
+                "httponly": True,
+                "secure": False,
+                "samesite": "Lax",
+                "path": "/",
+                "max_age": 604800,
             }
             
-        print(f"DEBUG: Authentication Cookie params being set: {cookie_params}")
+        print(f"DEBUG: Authentication Cookie params being set: {cookie_params}", file=sys.stderr)
 
         # Stockage des tokens en cookies HttpOnly (invisible côté JS)
         response.set_cookie(key="access", value=access_token, **cookie_params)
-        response.set_cookie(key="refresh", value=refresh_token, **cookie_params)
+        response.set_cookie(key="refresh", value=refresh_token, **refresh_cookie_params)
 
         return response
 

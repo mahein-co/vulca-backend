@@ -185,6 +185,15 @@ if ENVIRONMENT == 'development':
         "http://127.0.0.1:8000",
     ]
 else:
+    DEBUG = os.getenv('DEBUG', 'False') == 'True'
+    ALLOWED_HOSTS = [
+        "api.lexaiq.com", 
+        "lexaiq.com", 
+        "www.lexaiq.com", 
+        ".render.com", 
+        "localhost", 
+        "127.0.0.1"
+    ]
     # Production - Domaines lexaiq.com (frontend: www.lexaiq.com, backend: api.lexaiq.com)
     CORS_ALLOWED_ORIGINS = [
         "https://www.lexaiq.com",

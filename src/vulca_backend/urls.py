@@ -5,9 +5,15 @@ from django.views.static import serve
 from django.conf import settings
 from django.conf.urls.static import static
 from rest_framework.authtoken.views import obtain_auth_token
+from django.http import HttpResponse
+
+def health_check(request):
+    return HttpResponse("OK", status=200)
+
 urlpatterns = [
+    path('', health_check, name='health_check'), # Health check at root
     path('admin/', admin.site.urls),
-    path('', include('app.urls')), # Authentication & Users matched at root (e.g. /users/...)
+    path('', include('app.urls')), # Authentication & Users at root (e.g. /users/...)
     path('api/', include('ocr.urls')),
     path('api/', include('compta.urls')),
     path('api/', include('chatbot.urls')),

@@ -13,7 +13,8 @@ def health_check(request):
 urlpatterns = [
     path('', health_check, name='health_check'), # Health check at root
     path('admin/', admin.site.urls),
-    path('', include('app.urls')), # Authentication & Users at root (e.g. /users/...)
+    path('', include('app.urls')), # Authentication & Users at root (backup)
+    path('api/', include('app.urls')), # ✅ Added to match frontend /api/ prefix
     path('api/', include('ocr.urls')),
     path('api/', include('compta.urls')),
     path('api/', include('chatbot.urls')),

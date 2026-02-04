@@ -10,8 +10,9 @@ from django.conf import settings
 MEDIA_ROOT = settings.MEDIA_ROOT
 # MODEL -------------------------------------------
 from chatbot.models import DocumentPage
-# CONFIG -------------------------------------------
-#from decouple import config
+from dotenv import load_dotenv
+
+load_dotenv()
 # OPENAI -------------------------------------------
 from openai import OpenAI
 
@@ -125,4 +126,3 @@ def extract_text_from_pdf(document):
 
     
         
-

@@ -9,8 +9,16 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+
+# Force DEBUG to True if in development environment to prevent production security settings on localhost
+if ENVIRONMENT == 'development':
+    DEBUG = True
+else:
+    DEBUG = os.getenv('DEBUG', 'False') == 'True'
+
 SECRET_KEY = os.getenv('SECRET_KEY')
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
+# DEBUG = os.getenv('DEBUG', 'True') == 'True' # Removed logic to prioritize ENVIRONMENT
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 # === FRONTEND URL ===
@@ -115,8 +123,8 @@ AUTHENTICATION_BACKENDS = ['django.contrib.auth.backends.ModelBackend']
 # Configuration REST Framework avec JWT
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        #'app.authentication.JWTAuthenticationFromCookie',
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'app.authentication.JWTAuthenticationFromCookie',
+        # 'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',
@@ -141,7 +149,7 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
 # Allow specific origins (for production, you can add regex patterns)
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = False
 
 # Regex patterns for allowed origins (for subdomains)
 # This allows https://www.lexaiq.com, https://api.lexaiq.com, and https://lexaiq.com
@@ -162,38 +170,45 @@ CORS_ALLOW_HEADERS = [
     'x-project-id',
 ]
 
-# Explicit allowed origins
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",  # Local development
-    "http://127.0.0.1:3000",
-    "https://www.lexaiq.com",  # Production frontend
-    "https://lexaiq.com",  # Production frontend (without www)
-    "https://api.lexaiq.com",  # Production backend API
-    'http://localhost:8000',  # Local backend
-    'http://127.0.0.1:8000',  # Local backend alternative
-    "http://127.0.0.1:3000",  # Frontend alternative IP
-]
-
-# CSRF trusted origins
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",  # Local development
-    "http://127.0.0.1:3000",
-    "https://www.lexaiq.com",  # Production frontend
-    "https://lexaiq.com",  # Production frontend (without www)
-    "https://api.lexaiq.com",  # Production backend API
-    'http://localhost:8000',  # Local backend
-    'http://127.0.0.1:8000'  # Local backend alternative
-]
+# Explicit allowed origins - Configuration basée sur l'environnement
+if ENVIRONMENT == 'development':
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
+    CSRF_TRUSTED_ORIGINS = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
+else:
+    # Production - Seulement les domaines lexaiq.com
+    CORS_ALLOWED_ORIGINS = [
+        "https://www.lexaiq.com",
+        "https://lexaiq.com",
+        "https://api.lexaiq.com",
+    ]
+    CSRF_TRUSTED_ORIGINS = [
+        "https://www.lexaiq.com",
+        "https://lexaiq.com",
+        "https://api.lexaiq.com",
+    ]
 
 # Security settings for cookies (important for production)
-CSRF_COOKIE_SECURE = False  # True in production, False in development
-CSRF_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SECURE = False  # True in production, False in development
-SESSION_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"  # "None" for cross-origin in production
+# Security settings for cookies (important for production)
+CSRF_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_HTTPONLY = False
+SESSION_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_SAMESITE = "Lax"
 
 if not DEBUG:
     SESSION_COOKIE_DOMAIN = ".lexaiq.com"
     CSRF_COOKIE_DOMAIN = ".lexaiq.com"
+    SESSION_COOKIE_SAMESITE = "None"
+    CSRF_COOKIE_SAMESITE = "None"
 
 # Désactiver la redirection vers /login/
 LOGIN_URL = None

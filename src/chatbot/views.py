@@ -1,10 +1,12 @@
+import os
 import numpy as np
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # DJANGO -------------------------------------------
 from django.shortcuts import get_object_or_404
 from django.conf import settings
-
-# CONFIG -------------------------------------------
-#from decouple import config as env
 
 # REST FRAMEWORK -----------------------------------
 from rest_framework.response import Response
@@ -307,7 +309,7 @@ def generate_response(request):
         
         # ✅ APPEL À L'API OPENAI
         response = client.chat.completions.create(
-            model=env('OPENAI_MODEL'),
+            model=os.getenv('OPENAI_MODEL'),
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Contexte:\n{full_context}\n\nQuestion: {user_input}\n\nRéponds de manière claire et concise."}
@@ -471,7 +473,7 @@ def save_new_history_and_new_chat(request):
             
             # -------------------------------
             response = client.chat.completions.create(
-                model=env('OPENAI_MODEL'),
+                model=os.getenv('OPENAI_MODEL'),
                 messages = [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": f"Contexte:\n{context_text}\n\nQuestion: {user_input}\n\nRéponds de manière claire et concise."}

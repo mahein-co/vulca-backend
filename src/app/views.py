@@ -199,16 +199,20 @@ class MyTokenObtainPairView(TokenObtainPairView):
         response = Response(user_info, status=status.HTTP_200_OK)
 
         # Cookie settings based on environment
+        print(f"DEBUG: settings.DEBUG is {settings.DEBUG}")
         cookie_params = {
             "httponly": True,
-            "secure": not settings.DEBUG,
-            "samesite": "Lax" if settings.DEBUG else "None",
+            "secure": not settings.DEBUG,  # False in dev (http), True in prod (https)
+            "samesite": "Lax",  # Lax is safer and works for localhost
             "path": "/",
         }
         
         # Add domain for production to enable cross-subdomain cookie sharing
         if not settings.DEBUG:
             cookie_params["domain"] = ".lexaiq.com"
+            cookie_params["samesite"] = "None"
+            
+        print(f"DEBUG: Cookie params being set: {cookie_params}")
 
         # Stockage des tokens en cookies HttpOnly (invisible côté JS)
         response.set_cookie(key="access", value=access_token, **cookie_params)

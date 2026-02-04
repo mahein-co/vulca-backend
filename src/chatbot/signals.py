@@ -1,6 +1,6 @@
-import os 
-#from decouple import config
-#env = config
+from dotenv import load_dotenv
+import os
+load_dotenv()
 from django.conf import settings
 
 
@@ -24,7 +24,7 @@ def generate_message_history_title(sender, instance, created, **kwargs):
         try:
             # Demande à GPT-4 de générer un titre court
             response = client.chat.completions.create(
-                model=env("OPENAI_MODEL"), 
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), 
                 messages=[
                     {"role": "system", "content": "Tu es un assistant qui génère des titres concis et clairs (max 24 caractères)."},
                     {"role": "user", "content": f"Génère un titre court et pertinent pour ce texte: {instance.user_input}"}

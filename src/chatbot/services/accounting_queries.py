@@ -1,5 +1,5 @@
-from decimal import Decimal
 from django.db.models import Sum, Q, F
+from decimal import Decimal
 from datetime import datetime, date
 from compta.models import (
     Journal, GrandLivre, Balance, 

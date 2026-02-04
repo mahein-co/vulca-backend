@@ -1,6 +1,8 @@
 import os 
-from decouple import config
+#from decouple import config
 #env = config
+from django.conf import settings
+
 
 from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
@@ -11,7 +13,10 @@ from chatbot.services.embeddings import  process_pdf, extract_text_from_pdf
 from openai import OpenAI
 
 # OPENAI -------------------------------------------
-client = OpenAI(api_key=config("OPENAI_API_KEY"))
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 @receiver(post_save, sender=ChatMessage)
 def generate_message_history_title(sender, instance, created, **kwargs):

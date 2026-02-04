@@ -4,18 +4,22 @@ import shutil
 from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 from django.utils.text import slugify
+from django.conf import settings
 
 from django.conf import settings
 MEDIA_ROOT = settings.MEDIA_ROOT
 # MODEL -------------------------------------------
 from chatbot.models import DocumentPage
 # CONFIG -------------------------------------------
-from decouple import config
+#from decouple import config
 # OPENAI -------------------------------------------
 from openai import OpenAI
 
-client = OpenAI(api_key=config("OPENAI_API_KEY"))
+# OPENAI -------------------------------------------
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 def chunk_text(text, max_length=1000, overlap=100):
     """

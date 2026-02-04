@@ -4,7 +4,7 @@ from django.shortcuts import get_object_or_404
 from django.conf import settings
 
 # CONFIG -------------------------------------------
-from decouple import config as env
+#from decouple import config as env
 
 # REST FRAMEWORK -----------------------------------
 from rest_framework.response import Response
@@ -34,8 +34,11 @@ import json
 from datetime import datetime, date
 from chatbot.services.accounting_queries import AccountingQueryService
 
+# OPENAI -------------------------------------------
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
-client = OpenAI(api_key=env("OPENAI_API_KEY"))
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 greetings = ["bonjour", "bonsoir", "salut", "coucou", "allô", "bon après-midi", "hey", "yo", "coucou toi", "enchanté(e)", "hello", "hi", "salam", "hola", "ciao"]
 

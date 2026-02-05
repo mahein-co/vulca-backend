@@ -64,6 +64,47 @@ def get_pcg_label(account_code: str):
     return "-"
 
 
+def get_account_suggestions(description: str, top_n: int = 5):
+    """
+    Suggère des comptes PCG basés sur une description textuelle.
+    Utilise un score basé sur le nombre de mots-clés correspondants.
+    """
+    global pcg_cache
+    if pcg_cache is None:
+        try:
+            pcg_cache = load_pcg_mapping_from_pdf()
+        except Exception:
+            pcg_cache = {}
+
+    if not pcg_cache:
+        return []
+
+    # Nettoyage de la description pour la recherche
+    words = re.findall(r'\w+', description.lower())
+    if not words:
+        return []
+
+    suggestions = []
+    for code, label in pcg_cache.items():
+        label_lower = label.lower()
+        score = 0
+        for word in words:
+            if len(word) > 2 and word in label_lower: # Ignorer les trop petits mots
+                score += 1
+        
+        if score > 0:
+            suggestions.append({
+                'numero_compte': code,
+                'libelle': label,
+                'score': score
+            })
+
+    # Trier par score décroissant, puis par longueur de code (plus précis d'abord)
+    suggestions.sort(key=lambda x: (x['score'], len(x['numero_compte'])), reverse=True)
+    
+    return suggestions[:top_n]
+
+
 PCG_MAPPING = {
     # CLASSE 1 : CAPITAUX PROPRES & PASSIFS NON COURANTS
     '10': {'type_bilan': 'PASSIF', 'categorie': 'CAPITAUX_PROPRES'},

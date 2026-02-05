@@ -159,7 +159,7 @@ def delete_journal_related(sender, instance, **kwargs):
                 balance.delete()
             gl.delete()
     except Exception as e:
-        print(f"❌ ERREUR suppression cascade pour Journal ID {instance.id} : {e}")
+        print(f"[ERROR] ERREUR suppression cascade pour Journal ID {instance.id} : {e}")
 
 
 @receiver(post_save, sender=Balance)
@@ -264,7 +264,7 @@ def generate_financial_statements(sender, instance, **kwargs):
         _update_calculated_equity(project, instance.date)
 
     except Exception as e:
-        print(f"❌ ERREUR SIGNAL STATEMENTS pour {instance.numero_compte} : {e}")
+        print(f"[ERROR] ERREUR SIGNAL STATEMENTS pour {instance.numero_compte} : {e}")
 
 
 def _update_calculated_equity(project, date_val):

@@ -2,6 +2,9 @@ import json
 import re
 import unicodedata
 import hashlib
+import pandas as pd
+from datetime import date
+from django.db import OperationalError
 from vulca_backend import settings
 
 from rest_framework import generics
@@ -11,8 +14,9 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from ocr.models import FileSource, FormSource
+from compta.models import Bilan, CompteResultat, Project
 from ocr.serializers import FileSourceSerializer, FormSourceSerializer
-from ocr.utils import detect_file_type, clean_ai_json, generate_description
+from ocr.utils import detect_file_type, clean_ai_json, generate_description, generate_excel_description
 from ocr.openai_vision_ocr import extract_content_with_vision
 from ocr.constants import EXTRACTION_FIELDS_PROMPT
 from compta.permissions import HasProjectAccess
@@ -299,7 +303,7 @@ def file_source_list_create(request):
         )
     except Exception as e:
         import traceback
-        print("❌ Erreur génération journal:", e)
+        print("[ERROR] Erreur generation journal:", e)
         print(traceback.format_exc())
 
     return Response({
@@ -342,6 +346,7 @@ def form_source_list_create(request):
 
     data = dict(request.data)
     data["description"] = description
+    data["data_json"] = description_json  # Sauvegarder les données brutes
     data["project"] = project_id  # utiliser 'project' pour le serializer
 
     # Extraire date si manquante
@@ -388,9 +393,9 @@ def extract_content_file_view(request):
         return Response({"error": "Impossible d'extraire le texte."}, status=400)
 
     print("\n" + "=" * 80)
-    print("📄 TEXTE OCR BRUT :")
+    print("[INFO] TEXTE OCR BRUT :")
     print("=" * 80)
-    print(content[:2000])  # Limité pour logs
+    print(content[:2000])  # Limite pour logs
     print("=" * 80 + "\n")
 
     # ÉTAPE 1 : Vérification pièce comptable
@@ -466,9 +471,9 @@ def extract_content_file_view(request):
     else:
         extracted_json["type_document"] = type_document
 
-    # ⚠️ FALLBACK : Extraction du numéro de facture si l'IA ne l'a pas trouvé
+    # [WARNING] FALLBACK : Extraction du numéro de facture si l'IA ne l'a pas trouvé
     if not extracted_json.get("numero_facture"):
-        print("⚠️ Numéro de facture manquant, tentative d'extraction par regex...")
+        print("[WARNING] Numero de facture manquant, tentative d'extraction par regex...")
         
         # Patterns de recherche pour numéro de facture (PAR ORDRE DE PRIORITÉ)
         # Les patterns plus spécifiques en premier pour éviter les faux positifs
@@ -499,20 +504,20 @@ def extract_content_file_view(request):
                 # Validation : ignorer si c'est juste "1" ou trop court
                 if len(numero) >= 3 or (len(numero) >= 1 and not numero.isdigit()):
                     extracted_json["numero_facture"] = numero
-                    print(f"✅ Numéro de facture extrait par regex : {numero}")
+                    print(f"[SUCCESS] Numero de facture extrait par regex : {numero}")
                     break
         
         if not extracted_json.get("numero_facture"):
-            print("❌ Aucun numéro de facture trouvé, même avec regex")
+            print("[ERROR] Aucun numero de facture trouve, meme avec regex")
             # Générer un numéro temporaire basé sur la date
             from datetime import datetime
             temp_num = f"TEMP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
             extracted_json["numero_facture"] = temp_num
-            print(f"⚠️ Numéro temporaire généré : {temp_num}")
+            print(f"[WARNING] Numero temporaire genere : {temp_num}")
 
-    print("\n✅ JSON FINAL NORMALISÉ :")
+    print("\n[SUCCESS] JSON FINAL NORMALISE :")
     print("=" * 80)
-    print(json.dumps(extracted_json, indent=2, ensure_ascii=False))
+    print(json.dumps(extracted_json, indent=2, ensure_ascii=True))
     print("=" * 80 + "\n")
 
     return Response({
@@ -610,5 +615,362 @@ def all_pieces_list_view(request):
         "count": len(pieces),
         "pieces": pieces
     }, status=200)
+
+
+# ============================================================================
+# ENDPOINTS POUR L'IMPORTATION EXCEL AVANCÉE
+# ============================================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
+def excel_upload_and_analyze_view(request):
+    """
+    Endpoint 1: Upload et analyse initiale d'un fichier Excel.
+    """
+    project_id = getattr(request, 'project_id', None)
+    if not project_id:
+        return Response({"error": "Project non fourni."}, status=400)
+
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "Aucun fichier envoyé."}, status=400)
+    
+    if not file.name.lower().endswith(('.xlsx', '.xls')):
+        return Response({
+            "error": "Format de fichier non supporté. Veuillez uploader un fichier Excel (.xlsx ou .xls)."
+        }, status=400)
+    
+    use_ocr = request.data.get("use_ocr", "false").lower() == "true"
+    
+    try:
+        print(f"\n[INFO] DEBUT ANALYSE EXCEL (Projet: {project_id}): {file.name}")
+        
+        if use_ocr:
+            from ocr.excel_ocr_extractor import extract_excel_with_ocr
+            result = extract_excel_with_ocr(file, client, settings.OPENAI_MODEL)
+        else:
+            from ocr.excel_parser import ExcelParser
+            parser = ExcelParser(client, settings.OPENAI_MODEL)
+            result = parser.parse_excel_file(file)
+            result['extraction_method'] = 'DIRECT'
+        
+        response_data = {
+            "status": "success",
+            "message": "Fichier Excel analyse avec succes.",
+            "file_name": result['file_name'],
+            "total_rows": result['total_rows'],
+            "extraction_method": result.get('extraction_method', 'DIRECT'),
+            "sheets": []
+        }
+        
+        for sheet in result['sheets']:
+            sheet_data = {
+                "sheet_name": sheet['sheet_name'],
+                "detected_type": sheet['detected_type'],
+                "confidence": sheet['confidence'],
+                "columns_mapping": sheet['columns_mapping'],
+                "data_preview": sheet['data_preview'],
+                "unmapped_rows": sheet['unmapped_rows'],
+                "total_rows": sheet['total_rows'],
+                "extraction_method": sheet.get('extraction_method', result.get('extraction_method', 'DIRECT')),
+                "structured_data": sheet.get('structured_data')
+            }
+            response_data['sheets'].append(sheet_data)
+        
+        return Response(response_data, status=200)
+        
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"[ERROR] ERREUR ANALYSE EXCEL (Type: {type(e).__name__}): {str(e)}")
+        print(error_trace)
+        return Response({
+            "error": f"Erreur lors de l'analyse du fichier Excel: {str(e)}",
+            "detail": error_trace if settings.DEBUG else None
+        }, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
+def excel_validate_mapping_view(request):
+    """
+    Endpoint 2: Validation et enrichissement du mapping des comptes.
+    """
+    data = request.data
+    unmapped_rows = data.get('unmapped_rows', [])
+    
+    if not unmapped_rows:
+        return Response({"status": "success", "message": "Aucune ligne à mapper.", "suggestions": []}, status=200)
+    
+    try:
+        from ocr.pcg_loader import get_account_suggestions
+        suggestions = []
+        for row in unmapped_rows:
+            libelle = row.get('libelle', '')
+            account_suggestions = get_account_suggestions(libelle, top_n=5) if libelle else []
+            suggestions.append({
+                "row_index": row.get('row_index'),
+                "libelle": libelle,
+                "compte_detecte": row.get('compte_detecte', ''),
+                "suggestions": account_suggestions
+            })
+        return Response({"status": "success", "suggestions": suggestions}, status=200)
+    except Exception as e:
+        return Response({"error": f"Erreur lors de la validation du mapping: {str(e)}"}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
+def excel_save_data_view(request):
+    """
+    Endpoint 3: Sauvegarde finale des données dans les modèles Bilan/CompteResultat.
+    Crée également un FileSource pour déclencher le signal post_save.
+    """
+    project_id = getattr(request, 'project_id', None)
+    if not project_id:
+        return Response({"error": "Project non fourni."}, status=400)
+
+    try:
+        project = Project.objects.get(id=project_id)
+    except Project.DoesNotExist:
+        return Response({"error": "Project introuvable."}, status=404)
+
+    # Récupérer les données
+    if request.content_type and 'multipart/form-data' in request.content_type:
+        # Données envoyées via FormData
+        sheets_data_str = request.POST.get('sheets')
+        company_metadata_str = request.POST.get('company_metadata')
+        file = request.FILES.get('file')
+        
+        if not sheets_data_str:
+            return Response({"error": "Aucune donnée à sauvegarder."}, status=400)
+        
+        try:
+            sheets_data = json.loads(sheets_data_str)
+            company_metadata = json.loads(company_metadata_str) if company_metadata_str else {}
+        except json.JSONDecodeError as e:
+            return Response({"error": f"Erreur de parsing JSON: {str(e)}"}, status=400)
+    else:
+        # Données envoyées via JSON (ancien format)
+        data = request.data
+        sheets_data = data.get('sheets', [])
+        company_metadata = data.get('company_metadata', {})
+        file = None
+    
+    if not sheets_data:
+        return Response({"error": "Aucune donnée à sauvegarder."}, status=400)
+    
+    try:
+        created_bilans = 0
+        created_cr = 0
+        errors = []
+        file_source = None
+        
+        # 1. CRÉER LE FILESOURCE SI UN FICHIER EST FOURNI
+        if file:
+            print(f"\n{'='*80}")
+            print(f"[INFO] CREATION DU FILESOURCE POUR: {file.name}")
+            print(f"{'='*80}\n")
+            
+            # Calculer le hash du fichier pour éviter les doublons
+            file.seek(0)
+            file_content = file.read()
+            file_hash = hashlib.sha256(file_content).hexdigest()
+            file.seek(0)
+            
+            # Vérifier si le fichier existe déjà
+            existing_file = FileSource.objects.filter(
+                hash_ocr=file_hash,
+                project_id=project_id
+            ).first()
+            
+            if existing_file:
+                print(f"[WARNING] Fichier deja importe, utilisation de l'instance existante: {existing_file.id}")
+                file_source = existing_file
+            else:
+                # Calculer le total de lignes
+                total_rows = sum(len(s.get('rows', [])) for s in sheets_data)
+                
+                # Extraire la date d'exercice si disponible
+                date_exercice = None
+                for sheet in sheets_data:
+                    rows = sheet.get('rows', [])
+                    if rows and rows[0].get('date'):
+                        try:
+                            date_exercice = pd.to_datetime(rows[0]['date']).strftime('%d/%m/%Y')
+                            break
+                        except:
+                            pass
+                
+                # Préparer un résumé enrichi pour GPT
+                from datetime import datetime
+                summary_data = {
+                    "file_name": file.name,
+                    "import_type": "Excel financier avancé",
+                    "date_import": datetime.now().strftime('%d/%m/%Y'),
+                    "date_exercice": date_exercice,
+                    "total_lignes": total_rows,
+                    "nombre_feuilles": len(sheets_data),
+                    "sheets": [
+                        {
+                            "name": s.get('sheet_name', 'Unknown'),
+                            "type": s.get('detected_type', 'Unknown'),
+                            "rows_count": len(s.get('rows', []))
+                        } for s in sheets_data
+                    ],
+                    "company_metadata": company_metadata
+                }
+
+                # Générer une description fluide via IA avec le prompt spécialisé Excel
+                try:
+                    description = generate_excel_description(
+                        data=summary_data,
+                        json=json,
+                        client=client,
+                        model=settings.OPENAI_MODEL
+                    )
+                except Exception as e:
+                    print(f"[WARNING] Erreur generation description Excel GPT: {e}")
+                    description_parts = [f"{s.get('sheet_name')} ({s.get('detected_type')}): {len(s.get('rows', []))} lignes" for s in sheets_data]
+                    description = f"Import Excel: {file.name}\n" + "\n".join(description_parts)
+                
+                # Extraire la date du premier sheet
+                first_date = None
+                for sheet in sheets_data:
+                    rows = sheet.get('rows', [])
+                    if rows and rows[0].get('date'):
+                        try:
+                            first_date = pd.to_datetime(rows[0]['date']).date()
+                            break
+                        except:
+                            pass
+                
+                if not first_date:
+                    first_date = date.today()
+                
+                # Créer le FileSource
+                file_source = FileSource.objects.create(
+                    project=project,
+                    file=file,
+                    file_name=file.name,
+                    piece_type="Bilan/Compte de Résultat",
+                    description=description,
+                    ocr_data={
+                        "sheets": sheets_data,
+                        "company_metadata": company_metadata
+                    },
+                    is_ocr_processed=True,
+                    hash_ocr=file_hash,
+                    date=first_date
+                )
+                
+                print(f"[SUCCESS] FileSource cree avec succes: ID={file_source.id}")
+                print(f"   - Fichier: {file_source.file_name}")
+                print(f"   - Date: {file_source.date}")
+                print(f"   - Nombre de feuilles: {len(sheets_data)}")
+                print(f"\n{'='*80}\n")
+        
+        # 2. CRÉER LES BILANS ET COMPTES DE RÉSULTAT
+        print(f"[INFO] CREATION DES BILANS ET COMPTES DE RESULTAT")
+        print(f"{'='*80}\n")
+        
+        for sheet in sheets_data:
+            sheet_name = sheet.get('sheet_name')
+            sheet_type = sheet.get('detected_type')
+            rows = sheet.get('rows', [])
+            
+            print(f"[INFO] Traitement de la feuille: {sheet_name} ({sheet_type})")
+            
+            if sheet_type == 'BILAN':
+                for row in rows:
+                    try:
+                        numero_compte = row.get('numero_compte', '').strip()
+                        montant_ar = float(row.get('montant_ar', 0))
+                        if not numero_compte or montant_ar == 0: continue
+                        
+                        first_digit = numero_compte[0] if numero_compte else '1'
+                        if first_digit in '123':
+                            type_bilan, categorie = 'PASSIF', ('CAPITAUX_PROPRES' if first_digit == '1' else 'PASSIFS_COURANTS')
+                        else:
+                            type_bilan, categorie = 'ACTIF', ('ACTIF_NON_COURANTS' if first_digit == '2' else 'ACTIF_COURANTS')
+                        
+                        date_val = row.get('date')
+                        date_obj = pd.to_datetime(date_val).date() if date_val else date.today()
+                        
+                        Bilan.objects.create(
+                            project=project,
+                            numero_compte=numero_compte,
+                            libelle=row.get('libelle', '').strip(),
+                            montant_ar=montant_ar,
+                            date=date_obj,
+                            type_bilan=type_bilan,
+                            categorie=categorie
+                        )
+                        created_bilans += 1
+                    except Exception as e:
+                        errors.append({'sheet': sheet_name, 'error': str(e)})
+
+            elif sheet_type == 'COMPTE_RESULTAT':
+                for row in rows:
+                    try:
+                        numero_compte = row.get('numero_compte', '').strip()
+                        montant_ar = float(row.get('montant_ar', 0))
+                        if not numero_compte or montant_ar == 0: continue
+                        
+                        nature = 'CHARGE' if (numero_compte[0] if numero_compte else '6') == '6' else 'PRODUIT'
+                        date_val = row.get('date')
+                        date_obj = pd.to_datetime(date_val).date() if date_val else date.today()
+                        
+                        CompteResultat.objects.create(
+                            project=project,
+                            numero_compte=numero_compte,
+                            libelle=row.get('libelle', '').strip(),
+                            montant_ar=montant_ar,
+                            date=date_obj,
+                            nature=nature
+                        )
+                        created_cr += 1
+                    except Exception as e:
+                        errors.append({'sheet': sheet_name, 'error': str(e)})
+        
+        print(f"\n{'='*80}")
+        print(f"[SUCCESS] SAUVEGARDE TERMINEE")
+        print(f"   - Bilans crees: {created_bilans}")
+        print(f"   - Comptes de resultat crees: {created_cr}")
+        print(f"   - Erreurs: {len(errors)}")
+        print(f"{'='*80}\n")
+
+        response_data = {
+            "status": "success",
+            "created_bilans": created_bilans,
+            "created_compte_resultat": created_cr,
+            "errors": errors if errors else None
+        }
+        
+        if file_source:
+            response_data["file_source_id"] = file_source.id
+            response_data["file_source_name"] = file_source.file_name
+        
+        return Response(response_data, status=201)
+        
+    except OperationalError as e:
+        print(f"\n{'='*80}")
+        print(f"[ERROR] ERREUR DE CONNEXION A LA BASE DE DONNEES")
+        print(f"{'='*80}")
+        print(f"Message: {str(e)}")
+        print(f"{'='*80}\n")
+        return Response({
+            "error": "Impossible de se connecter a la base de donnees distante (Render). Le delai d'attente a expire. Veuillez verifier l'etat de votre base de donnees.",
+            "details": str(e)
+        }, status=503)
+        
+    except Exception as e:
+        import traceback
+        print(f"\n{'='*80}")
+        print(f"[ERROR] ERREUR LORS DE LA SAUVEGARDE")
+        print(f"{'='*80}")
+        print(traceback.format_exc())
+        print(f"{'='*80}\n")
+        return Response({"error": f"Erreur lors de la sauvegarde: {str(e)}"}, status=500)
 
 

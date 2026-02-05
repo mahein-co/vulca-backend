@@ -8,7 +8,7 @@ Analyse le texte fourni et :
 
 1. Identifie automatiquement tous les champs pertinents (numéro facture, Montant TTC, Montant HT (Hors Taxe), TVA, client, dates, identifiants, devise, Objet/Description, etc.) ainsi que les details possible. Ne mets pas d'espace entre les nombres puis stock toujours l'unité monétaire dans le champs devise et mets en MGA pour l'Ar et autre pour les autres devises d'un autre pays.
 
-⚠️ DATES - TRÈS IMPORTANT :
+ DATES - TRÈS IMPORTANT :
    - Extrais TOUTES les dates présentes dans le document
    - Pour les factures de services (électricité, eau, téléphone), il peut y avoir plusieurs dates de service
    - Utilise les clés suivantes selon le contexte :
@@ -27,10 +27,10 @@ Analyse le texte fourni et :
 6. Ne renvoie que du JSON, sans ``` ni texte autour
 7. IMPORTANT : Pour les montants, remplace la VIRGULE par un POINT (ex: "190101,00" -> 190101.00). Ne renvoie JAMAIS d'entiers si le montant a des décimales.
 
-8. ⚠️ CRITIQUE - NUMÉRO DE FACTURE (OBLIGATOIRE) :
+8.  CRITIQUE - NUMÉRO DE FACTURE (OBLIGATOIRE) :
    Le numéro de facture est LE champ le plus important pour identifier un document.
    
-   ⚠️ ATTENTION : Ne confonds PAS le numéro de facture avec :
+    ATTENTION : Ne confonds PAS le numéro de facture avec :
    - Le numéro de client (N°Client, Client ID, Référence client)
    - Le numéro de compte
    - Le numéro de téléphone
@@ -79,3 +79,20 @@ Input JSON : {json_in}
 
 
 PCG_MAPPING = load_pcg_mapping_from_pdf()
+
+
+# Liste des feuilles Excel à ignorer lors de l'importation
+EXCLUDED_SHEET_NAMES = [
+    'INSTRUCTIONS', 
+    'SOMMAIRE', 
+    'METADATA', 
+    'CONFIG', 
+    'PARAMETRES', 
+    'FEUIL1', 
+    'FEUIL2',
+    'FEUIL3',
+    'SHEET1',
+    'SHEET2',
+    'SHEET3'
+]
+

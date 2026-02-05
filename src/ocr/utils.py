@@ -102,10 +102,45 @@ def generate_description(data, json, client, model):
     prompt = f"""
     Voici un objet JSON contenant des informations diverses :
 
-    {json.dumps(processed_data, indent=2, ensure_ascii=False)}
+    {json.dumps(processed_data, indent=2, ensure_ascii=True)}
 
     Genre une description claire, professionnelle et fluide en francais,
     sans lister les cles, mais en interpretant intelligemment le contenu.
+    """
+
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5,
+    )
+
+    return completion.choices[0].message.content
+
+# GENERATE EXCEL DESCRIPTION =====================
+def generate_excel_description(data, json, client, model):
+    """
+    Génère une description détaillée et professionnelle pour un fichier Excel financier.
+    Optimisée pour les bilans et comptes de résultat.
+    """
+    prompt = f"""
+    Voici les informations d'un fichier Excel financier importé :
+
+    {json.dumps(data, indent=2, ensure_ascii=False)}
+
+    Génère une description claire, détaillée et professionnelle en français, structurée comme suit :
+
+    1. **Introduction** : Présente le fichier (nom, type de document)
+    2. **Contenu** : Décris chaque feuille (nom, type, nombre de lignes) de manière fluide
+    3. **Synthèse** : Résume le nombre total d'écritures et de feuilles
+    4. **Métadonnées** : Mentionne les informations d'entreprise si disponibles (RCS, NIF, STAT)
+
+    La description doit être :
+    - Rédigée en paragraphes fluides (pas de liste à puces)
+    - Professionnelle et précise
+    - Facile à comprendre pour un comptable
+    - Complète sans être trop technique
+
+    N'inclus pas de titres de sections, rédige directement les paragraphes.
     """
 
     completion = client.chat.completions.create(

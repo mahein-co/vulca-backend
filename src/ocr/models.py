@@ -26,6 +26,7 @@ class FileSource(models.Model):
     date = models.DateField(db_index=True, null=True, blank=True)
     is_ocr_processed = models.BooleanField(default=False)
     description = models.TextField(blank=True, null=True)
+    ocr_data = models.JSONField(blank=True, null=True)  # Stockage des données extraites par l'OCR
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -67,6 +68,7 @@ class FormSource(models.Model):
     )
     piece_type = models.CharField(max_length=225, null=True, blank=True, default='Autres')
     description = models.TextField(blank=True, null=True)
+    data_json = models.JSONField(blank=True, null=True)  # Stockage des données saisies manuellement
     ref_file = models.CharField(max_length=225, null=True, blank=True)
     date = models.DateField(db_index=True, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

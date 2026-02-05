@@ -146,14 +146,31 @@ def detect_accounting_query(user_input):
     patterns = {
         'ca': r'chiffre.*affaires?|ca\b|ventes?|revenus?',
         'charges': r'charges?|dépenses?|coûts?|frais',
+        'ebe': r'ebe\b|excédent brut d\'exploitation',
+        'roe': r'roe\b|rentabilité des capitaux propres',
+        'marge_brute': r'marge brute|marge commerciale',
+        'bfr': r'bfr\b|besoin en fonds de roulement',
+        'roa': r'roa\b|rentabilité des actifs',
+        'leverage': r'leverage\b|levier Financier|endettement',
+        'marge_nette': r'marge nette',
+        'marge_operationnelle': r'marge opérationnelle',
+        'current_ratio': r'current ratio|ratio de liquidité',
+        'rotation_stocks': r'rotation des stocks|rotation stock',
         'resultat': r'résultat|bénéfice|profit|perte',
         'tresorerie': r'trésorerie|liquidité|banque|caisse',
         'bilan': r'bilan|actif|passif',
-        'comparaison': r'compar|différence|évolution|versus|vs'
+        'comparaison': r'compar|différence|évolution|versus|vs',
+        'analyse_globale': r'analyser|interpréter|audit|santé|vue|résumé|situation|dashboard|tableau|rapport|exercice|période'
     }
     
-    # Extraction d'années
+    # 1. Extraction de dates précises (DD/MM/YYYY ou DD-MM-YYYY ou DD.MM.YYYY)
+    date_matches = re.findall(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})', user_input)
+    
+    # 2. Extraction d'années (20XX)
     annees = re.findall(r'\b(20\d{2})\b', user_input)
+    
+    # Normalisation des dates (remplacer les séparateurs par /)
+    date_matches = [d.replace('-', '/').replace('.', '/') for d in date_matches]
     
     # Détection du type
     query_type = None
@@ -163,22 +180,45 @@ def detect_accounting_query(user_input):
             break
     
     if not query_type:
-        return None
+        # Si on a des dates mais pas de type, on assume une analyse globale
+        if date_matches or annees:
+            query_type = 'analyse_globale'
+        else:
+            return None
     
     # Extraction des paramètres
     params = {}
     
-    if annees:
-        if len(annees) >= 2 and query_type == 'comparaison':
-            params['annee1'] = int(annees[0])
-            params['annee2'] = int(annees[1])
-        elif len(annees) == 1:
-            params['annee'] = int(annees[0])
+    # Priorité aux dates précises
+    if len(date_matches) >= 2:
+        try:
+            params['start_date'] = datetime.strptime(date_matches[0], '%d/%m/%Y').date()
+            params['end_date'] = datetime.strptime(date_matches[1], '%d/%m/%Y').date()
+        except ValueError:
+            pass
+    elif len(date_matches) == 1:
+        try:
+            # Si une seule date, on considère que c'est la date de fin
+            params['end_date'] = datetime.strptime(date_matches[0], '%d/%m/%Y').date()
+        except ValueError:
+            pass
+            
+    # Sinon on regarde les années
+    if not params.get('start_date') and not params.get('end_date'):
+        if annees:
+            if len(annees) >= 2 and query_type == 'comparaison':
+                params['annee1'] = int(annees[0])
+                params['annee2'] = int(annees[1])
+            elif len(annees) == 1:
+                params['annee'] = int(annees[0])
+            else:
+                params['annee'] = datetime.now().year
         else:
+            # Par défaut : année en cours
             params['annee'] = datetime.now().year
-    else:
-        # Par défaut : année en cours
-        params['annee'] = datetime.now().year
+    
+    print(f"[DEBUG] Query Type détecté: {query_type}")
+    print(f"[DEBUG] Paramètres extraits: {params}")
     
     return {
         'type': query_type,
@@ -212,6 +252,73 @@ def get_accounting_context(user, project_id, query_info):
             context_parts.append(f"**Charges** ({data['periode']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Comptes: {data['comptes']}")
+
+        elif query_type == 'ebe':
+            data = service.get_ebe(**params)
+            context_parts.append(f"**EBE (Excédent Brut d'Exploitation)** ({data['periode']}):")
+            context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
+            context_parts.append(f"- Produits d'exploitation: {data['produits_exploitation']:,.2f} AR")
+            context_parts.append(f"- Charges d'exploitation: {data['charges_exploitation']:,.2f} AR")
+            
+        elif query_type == 'roe':
+            data = service.get_roe(**params)
+            context_parts.append(f"**ROE (Rentabilité des capitaux propres)** ({data['periode']}):")
+            context_parts.append(f"- Taux: {data['valeur']:.2f}%")
+            context_parts.append(f"- Résultat net: {data['resultat_net']:,.2f} AR")
+            context_parts.append(f"- Capitaux propres: {data['capitaux_propres']:,.2f} AR")
+
+        elif query_type == 'marge_brute':
+            data = service.get_marge_brute(**params)
+            context_parts.append(f"**Marge Brute** ({data['periode']}):")
+            context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
+            context_parts.append(f"- Taux de marge: {data['taux']:.2f}%")
+            context_parts.append(f"- Ventes: {data['ventes']:,.2f} AR")
+            context_parts.append(f"- Achats: {data['achats']:,.2f} AR")
+
+        elif query_type == 'bfr':
+            data = service.get_bfr(date_ref=params.get('end_date'), annee=params.get('annee'))
+            context_parts.append(f"**BFR (Besoin en Fonds de Roulement)** (au {data['date']}):")
+            context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
+            context_parts.append(f"- Stocks: {data['stocks']:,.2f} AR")
+            context_parts.append(f"- Créances clients: {data['creances_clients']:,.2f} AR")
+            context_parts.append(f"- Dettes fournisseurs: {data['dettes_fournisseurs']:,.2f} AR")
+
+        elif query_type == 'leverage' or query_type == 'current_ratio':
+            data = service.get_ratios_structure(date_ref=params.get('end_date'), annee=params.get('annee'))
+            context_parts.append(f"**Ratios de Structure** (au {data['date']}):")
+            if query_type == 'leverage':
+                context_parts.append(f"- Leverage (Levier financier): {data['leverage']:.2f}")
+                context_parts.append(f"- Dettes financières: {data['dettes_financieres']:,.2f} AR")
+                context_parts.append(f"- Capitaux propres: {data['capitaux_propres']:,.2f} AR")
+            else:
+                context_parts.append(f"- Current Ratio (Ratio de liquidité): {data['current_ratio']:.2f}")
+                context_parts.append(f"- Actif courant: {data['actif_courant']:,.2f} AR")
+                context_parts.append(f"- Passif courant: {data['passif_courant']:,.2f} AR")
+
+        elif query_type == 'roa':
+            data = service.get_roa(**params)
+            context_parts.append(f"**ROA (Return on Assets)** ({data['periode']}):")
+            context_parts.append(f"- Taux: {data['valeur']:.2f}%")
+            context_parts.append(f"- Résultat net: {data['resultat_net']:,.2f} AR")
+            context_parts.append(f"- Total Actif: {data['total_actif']:,.2f} AR")
+
+        elif query_type == 'marge_nette' or query_type == 'marge_operationnelle':
+            data = service.get_marges_profitabilite(**params)
+            context_parts.append(f"**Profitabilité** ({data['periode']}):")
+            if query_type == 'marge_nette':
+                context_parts.append(f"- Marge Nette: {data['marge_nette']:.2f}%")
+            else:
+                context_parts.append(f"- Marge Opérationnelle: {data['marge_operationnelle']:.2f}%")
+            context_parts.append(f"- Résultat net: {data['resultat_net']:,.2f} AR")
+            context_parts.append(f"- EBE: {data['ebe']:,.2f} AR")
+
+        elif query_type == 'rotation_stocks':
+            data = service.get_rotation_stocks(annee=params.get('annee'))
+            context_parts.append(f"**Rotation des Stocks** (Année {data['annee']}):")
+            context_parts.append(f"- Coefficient: {data['coefficient']:.2f} fois")
+            context_parts.append(f"- Délai moyen de stockage: {data['jours_stock']:.2f} jours")
+            context_parts.append(f"- Achats: {data['achats']:,.2f} AR")
+            context_parts.append(f"- Stock final: {data['stock_final']:,.2f} AR")
         
         elif query_type == 'resultat':
             data = service.get_resultat_net(**params)
@@ -221,17 +328,47 @@ def get_accounting_context(user, project_id, query_info):
             context_parts.append(f"- Charges: {data['charges']:,.2f} AR")
         
         elif query_type == 'tresorerie':
-            data = service.get_tresorerie(date_fin=date.today())
+            data = service.get_tresorerie(annee=params.get('annee'))
             context_parts.append(f"**Trésorerie** (au {data['date']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Comptes: {data['comptes']}")
         
         elif query_type == 'bilan':
-            data = service.get_bilan_summary()
+            data = service.get_bilan_summary(annee=params.get('annee'))
             context_parts.append(f"**Bilan** ({data['date']}):")
             context_parts.append(f"- Actif total: {data['actif']:,.2f} AR")
             context_parts.append(f"- Passif total: {data['passif']:,.2f} AR")
             context_parts.append(f"- Équilibre: {data['equilibre']:,.2f} AR")
+
+        elif query_type == 'analyse_globale':
+            annee = params.get('annee')
+            ca = service.get_chiffre_affaires(**params)
+            mb = service.get_marge_brute(**params)
+            ebe = service.get_ebe(**params)
+            marges = service.get_marges_profitabilite(**params)
+            roa_data = service.get_roa(**params)
+            bfr = service.get_bfr(date_ref=params.get('end_date'), annee=annee)
+            ratios = service.get_ratios_structure(date_ref=params.get('end_date'), annee=annee)
+            bilan = service.get_bilan_summary(annee=annee, date_bilan=params.get('end_date'))
+            
+            periode = ca.get('periode', str(annee) if annee else "Toute la période")
+            
+            context_parts.append(f"=== ANALYSE GLOBALE ({periode}) ===")
+            
+            if "error" not in ca:
+                context_parts.append(f"**Performance & Rentabilité :**")
+                context_parts.append(f"- Chiffre d'Affaires: {ca.get('montant', 0):,.2f} AR")
+                context_parts.append(f"- Marge Brute: {mb.get('montant', 0):,.2f} AR ({mb.get('taux', 0):.2f}%)")
+                context_parts.append(f"- EBE: {ebe.get('montant', 0):,.2f} AR")
+                context_parts.append(f"- Résultat Net: {marges.get('resultat_net', 0):,.2f} AR ({marges.get('marge_nette', 0):.2f}%)")
+                context_parts.append(f"- Marge Opérationnelle: {marges.get('marge_operationnelle', 0):.2f}%")
+                context_parts.append(f"- ROA (Rentabilité Actifs): {roa_data.get('valeur', 0):.2f}%")
+            
+            context_parts.append(f"\n**Gestion & Structure (au {bilan.get('date')}) :**")
+            context_parts.append(f"- BFR: {bfr.get('montant', 0):,.2f} AR")
+            context_parts.append(f"- Leverage: {ratios.get('leverage', 0):.2f}")
+            context_parts.append(f"- Current Ratio (Liquidité): {ratios.get('current_ratio', 0):.2f}")
+            context_parts.append(f"- Bilan: Actif {bilan.get('actif', 0):,.2f} AR / Passif {bilan.get('passif', 0):,.2f} AR")
         
         elif query_type == 'comparaison':
             if 'annee1' in params and 'annee2' in params:
@@ -268,7 +405,8 @@ def generate_response(request):
         user = request.user
         user_input = request.data.get('user_input')
         message_history_id = request.data.get('message_history')
-        project_id = request.data.get('project_id')  # ✅ Récupérer le project_id
+        project_id = request.data.get('project_id')
+        filtered_data = request.data.get('filtered_data')  # NOUVEAU: Données filtrées
 
         if not user_input or not user_input.strip():
             return Response(
@@ -276,15 +414,66 @@ def generate_response(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        print(f"\n[DEBUG] Message reçu: {user_input}")
+        print(f"[DEBUG] Filtered Data présente: {filtered_data is not None}")
+        if filtered_data:
+            print(f"[DEBUG] Content of Filtered Data: {json.dumps(filtered_data, indent=2)}")
+
         # ✅ DÉTECTION DE QUESTION COMPTABLE
         query_info = detect_accounting_query(user_input)
         
-        # ✅ RÉCUPÉRATION DES DONNÉES COMPTABLES
+        # ✅ CONSTRUCTION DU CONTEXTE COMPTABLE
         accounting_context = ""
-        if query_info and project_id:
+        
+        # NOUVEAU: Utiliser les données filtrées si disponibles
+        if filtered_data:
+            print("=" * 50)
+            print("[INFO] UTILISATION DES DONNÉES FILTRÉES")
+            print(f"Période: {filtered_data.get('filter', {}).get('date_start')} → {filtered_data.get('filter', {}).get('date_end')}")
+            print("=" * 50)
+            
+            accounting_context = "=== DONNÉES COMPTABLES FILTRÉES ===\n"
+            filter_info = filtered_data.get('filter', {})
+            accounting_context += f"Période analysée: {filter_info.get('date_start')} au {filter_info.get('date_end')}\n\n"
+            
+            # Formater les données pour le chatbot
+            if 'chiffre_affaires' in filtered_data:
+                ca = filtered_data['chiffre_affaires']
+                accounting_context += f"**Chiffre d'affaires** ({ca.get('periode', '')}):\n"
+                accounting_context += f"- Montant: {ca.get('montant', 0):,.2f} AR\n"
+                accounting_context += f"- Comptes: {ca.get('comptes', '')}\n\n"
+            
+            if 'charges' in filtered_data:
+                charges = filtered_data['charges']
+                accounting_context += f"**Charges** ({charges.get('periode', '')}):\n"
+                accounting_context += f"- Montant: {charges.get('montant', 0):,.2f} AR\n"
+                accounting_context += f"- Comptes: {charges.get('comptes', '')}\n\n"
+            
+            if 'resultat_net' in filtered_data:
+                resultat = filtered_data['resultat_net']
+                accounting_context += f"**Résultat net** ({resultat.get('periode', '')}):\n"
+                accounting_context += f"- Résultat: {resultat.get('montant', 0):,.2f} AR\n"
+                accounting_context += f"- Produits: {resultat.get('produits', 0):,.2f} AR\n"
+                accounting_context += f"- Charges: {resultat.get('charges', 0):,.2f} AR\n\n"
+            
+            if 'tresorerie' in filtered_data:
+                treso = filtered_data['tresorerie']
+                accounting_context += f"**Trésorerie** (au {treso.get('date', '')}):\n"
+                accounting_context += f"- Montant: {treso.get('montant', 0):,.2f} AR\n"
+                accounting_context += f"- Comptes: {treso.get('comptes', '')}\n\n"
+            
+            if 'bilan' in filtered_data:
+                bilan = filtered_data['bilan']
+                accounting_context += f"**Bilan** ({bilan.get('date', '')}):\n"
+                accounting_context += f"- Actif total: {bilan.get('actif', 0):,.2f} AR\n"
+                accounting_context += f"- Passif total: {bilan.get('passif', 0):,.2f} AR\n"
+                accounting_context += f"- Équilibre: {bilan.get('equilibre', 0):,.2f} AR\n\n"
+        
+        elif query_info and project_id:
+            # Fallback: utiliser l'ancien système si pas de données filtrées
             accounting_context = get_accounting_context(user, project_id, query_info)
             print("=" * 50)
-            print("Question comptable détectée:")
+            print("Question comptable détectée (mode classique):")
             print(f"Type: {query_info['type']}")
             print(f"Params: {query_info['params']}")
             print(f"Contexte comptable:\n{accounting_context}")
@@ -298,20 +487,35 @@ def generate_response(request):
         
         # ✅ CONSTRUCTION DU CONTEXTE COMPLET
         full_context = ""
+        current_system_prompt = SYSTEM_PROMPT
+        
         if accounting_context:
-            full_context += "=== DONNÉES COMPTABLES ===\n"
+            full_context += "=== DONNÉES COMPTABLES DU TABLEAU DE BORD ===\n"
             full_context += accounting_context
             full_context += "\n\n"
+            
+            # Informer explicitement l'IA qu'elle a accès à ces données
+            if filtered_data:
+                dates = filtered_data.get('filter', {})
+                current_system_prompt += f"\n\nNOTE IMPORTANTE : Tu as actuellement accès aux données réelles du tableau de bord pour la période du {dates.get('date_start')} au {dates.get('date_end')}. Analyse ces données pour répondre à l'utilisateur."
+            
+            # Instruction sur les valeurs à 0
+            current_system_prompt += "\nSi les données sont à 0.00 AR, cela signifie qu'aucune écriture comptable n'a été trouvée pour ce compte sur la période. Interprète cela comme une absence d'activité importée plutôt que comme une erreur."
         
         if context_text:
             full_context += "=== DOCUMENTS DE RÉFÉRENCE ===\n"
             full_context += context_text
         
+        # ✅ DÉBOGAGE DU PROMPT ENVOYÉ
+        print(f"[DEBUG] Full Context Length: {len(full_context)} chars")
+        if full_context:
+            print(f"[DEBUG] Context Preview: {full_context[:200]}...")
+
         # ✅ APPEL À L'API OPENAI
         response = client.chat.completions.create(
-            model=os.getenv('OPENAI_MODEL'),
+            model=OPENAI_MODEL,  # Utiliser la variable définie en haut
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": current_system_prompt},
                 {"role": "user", "content": f"Contexte:\n{full_context}\n\nQuestion: {user_input}\n\nRéponds de manière claire et concise."}
             ],
             temperature=0.2

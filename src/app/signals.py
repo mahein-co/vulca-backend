@@ -64,8 +64,8 @@ from app.models import CustomUser
 #         #     paid_at=timezone.now(),
 #         # )
 
-#         # print(f"[SIGNAL] Plan Trial attribué à {instance.email}")
+#         # print(f"[SIGNAL] Plan Trial attribue a {instance.email}")
 #         pass
 
 #     except Exception as e:
-#         print(f"[SIGNAL ERROR] Impossible d’attribuer le plan Trial à {instance.email}: {e}")
+#         print(f"[SIGNAL ERROR] Impossible d'attribuer le plan Trial a {instance.email}: {e}")

@@ -12,7 +12,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from vulca_backend import settings
-from ocr.utils import clean_ai_json
+from ocr.utils import clean_ai_json, generate_description
 from ocr.models import FileSource, FormSource
 # from chatbot.models import ChatMessage, MessageHistory, RAGContent
 
@@ -533,7 +533,7 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
     # ===================================================
     # 🚀 AFFICHAGE DE DÉMARRAGE
     # ===================================================
-    print("\n🚀 START GENERATE JOURNAL VIEW")
+    print("\n[INFO] START GENERATE JOURNAL VIEW")
     print(f"   Input data keys: {list(document_json.keys())}")
     print()
     
@@ -544,13 +544,13 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
     description_json = document_json.get("description_json", {})
     
     if piece_type == "Relevé bancaire" and "transactions_details" in description_json:
-        print("   📋 Détection: Relevé bancaire avec transactions multiples")
+        print("   [INFO] Detection: Releve bancaire avec transactions multiples")
         transactions = description_json.get("transactions_details", [])
         
         if not transactions:
             raise ValidationError("Aucune transaction dans le relevé bancaire")
         
-        print(f"   📊 Traitement de {len(transactions)} transactions")
+        print(f"   [INFO] Traitement de {len(transactions)} transactions")
         
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import time
@@ -590,7 +590,7 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
                 }
 
         # Exécution parallèle
-        print(f"   🚀 Démarrage de l'exécution parallèle (max_workers=5)...")
+        print(f"   [INFO] Demarrage de l'execution parallele (max_workers=5)...")
         start_time = time.time()
         
         saved_entries_data = []
@@ -607,16 +607,16 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
                     res = future.result()
                     if res["success"]:
                         saved_entries_data.append(res["result"])
-                        print(f"      ✅ Transaction {res['idx']} traitée avec succès")
+                        print(f"      [SUCCESS] Transaction {res['idx']} traitee avec succes")
                     else:
-                        print(f"      ❌ Erreur transaction {res['idx']}: {res['error']}")
+                        print(f"      [ERROR] Erreur transaction {res['idx']}: {res['error']}")
                 except Exception as exc:
-                    print(f"      ❌ Exception fatale transaction {idx}: {exc}")
+                    print(f"      [ERROR] Exception fatale transaction {idx}: {exc}")
 
-        print(f"   ⏱️ Fin du traitement parallèle en {time.time() - start_time:.2f}s")
+        print(f"   [INFO] Fin du traitement parallele en {time.time() - start_time:.2f}s")
         
         # Sauvegarde séquentielle pour éviter les conflits DB
-        print("   💾 Sauvegarde des écritures en base...")
+        print("   [INFO] Sauvegarde des ecritures en base...")
         
         for ai_result in saved_entries_data:
             type_journal = ai_result.get("type_journal")
@@ -632,7 +632,7 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
             total_credit = sum(Decimal(str(e["credit_ar"])) for e in ecritures)
             
             if total_debit != total_credit:
-                print(f"      ⚠️ Transaction {numero_piece} non équilibrée (D:{total_debit} / C:{total_credit})")
+                print(f"      [WARNING] Transaction {numero_piece} non equilibree (D:{total_debit} / C:{total_credit})")
                 continue
                 
             for line in ecritures:
@@ -667,7 +667,7 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
                     "libelle": entry.libelle
                 })
         
-        print(f"\n   ✅ {len(all_saved_lines)} écritures sauvegardées pour {len(transactions)} transactions")
+        print(f"\n   [SUCCESS] {len(all_saved_lines)} ecritures sauvegardees pour {len(transactions)} transactions")
         
         return {
             "message": "Journal enregistré avec succès",
@@ -699,7 +699,7 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
     if not ecritures:
         raise ValidationError("Aucune écriture générée")
     
-    print(f"   📊 AI a généré {len(ecritures)} lignes d'écriture")
+    print(f"   [INFO] AI a genere {len(ecritures)} lignes d'ecriture")
 
     # Vérification de l'équilibre du journal
     total_debit = sum(Decimal(str(e["debit_ar"])) for e in ecritures)
@@ -713,7 +713,7 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
     journal_entries_to_create = []
     
     # 🚀 OPTIMISATION: Préparation des objets pour Bulk Create
-    print(f"   🏗️ Préparation des objets Journal ({len(ecritures)} lignes)...")
+    print(f"   [INFO] Preparation des objets Journal ({len(ecritures)} lignes)...")
     
     for idx, line in enumerate(ecritures, start=1):
         numero_compte = line["numero_compte"]
@@ -743,13 +743,13 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
         
     try:
         # 1. BULK CREATE JOURNAL (Bypasses save(), so no signals fired yet)
-        print(f"   💾 Sauvegarde en masse des {len(journal_entries_to_create)} lignes journal...")
+        print(f"   [INFO] Sauvegarde en masse des {len(journal_entries_to_create)} lignes journal...")
         created_entries = Journal.objects.bulk_create(journal_entries_to_create)
         
         # 2. GESTION MANUELLE DES CONSÉQUENCES (Grand Livre, Balance, Bilan)
         # Puisque bypass des signaux, on doit le faire manuellement mais de façon optimisée (1 seule fois)
         
-        print("   📚 Génération optimisée du Grand Livre...")
+        print("   [INFO] Generation optimisee du Grand Livre...")
         gl_entries_to_create = []
         affected_accounts = set()
         
@@ -799,10 +799,10 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
                  pass 
 
         GrandLivre.objects.bulk_create(gl_entries_to_create)
-        print(f"   ✅ {len(gl_entries_to_create)} lignes Grand Livre créées.")
+        print(f"   [SUCCESS] {len(gl_entries_to_create)} lignes Grand Livre creees.")
         
         # 3. MISE À JOUR BALANCE & ÉTATS FINANCIERS (Une fois par compte/date)
-        print("   ⚖️ Mise à jour optimisée Balance & États Financiers...")
+        print("   [INFO] Mise a jour optimisee Balance \u0026 Etats Financiers...")
         
         affected_dates = {e.date for e in created_entries}
         
@@ -826,17 +826,17 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
             # This is acceptable because it runs only once per unique account (e.g. 5 fois), not per line (could be 50).
             # If still slow, we could decouple Balance signal too, but usually N_accounts << N_lines.
             
-        print("   🏁 Traitement terminé.")
+        print("   [INFO] Traitement termine.")
 
     except Exception as e:
-        print(f"      ❌ ERREUR lors de la sauvegarde: {str(e)}")
+        print(f"      [ERROR] ERREUR lors de la sauvegarde: {str(e)}")
         raise ValidationError(f"Erreur de validation/sauvegarde: {str(e)}")
 
     # ===================================================
     # ✅ AFFICHAGE FORMATÉ DU JOURNAL DANS LE TERMINAL
     # ===================================================
     print("\n" + "=" * 50)
-    print(f"📄 JOURNAL GÉNÉRÉ (Type: {type_journal}, Pièce: {numero_piece})")
+    print(f"   [INFO] JOURNAL GENERE (Type: {type_journal}, Piece: {numero_piece})")
     print("-" * 50)
     
     for idx, line in enumerate(saved_lines, start=1):
@@ -844,7 +844,7 @@ def process_journal_generation(document_json, project_id=None, file_source=None,
         libelle = line["libelle"]
         debit = int(line["debit"]) if line["debit"] else 0
         credit = int(line["credit"]) if line["credit"] else 0
-        print(f"Ligne {idx}: {compte} - {libelle} | Débit: {debit} | Crédit: {credit}")
+        print(f"Ligne {idx}: {compte} - {libelle} | Debit: {debit} | Credit: {credit}")
     
     print("=" * 50)
     print()
@@ -934,9 +934,35 @@ def create_bilan_manual_view(request):
     POST /api/bilans/manual/
     """
     project_id = getattr(request, "project_id", None)
+
+    # 1. Générer description intelligente via GPT
+    try:
+        description = generate_description(
+            data=request.data,
+            json=json,
+            client=client,
+            model=settings.OPENAI_MODEL
+        )
+    except Exception as e:
+        print(f"[WARNING] Erreur génération description Bilan: {e}")
+        description = f"Saisie manuelle Bilan - Compte {request.data.get('numero_compte')}"
+
+    # 2. Créer une instance FormSource pour traçabilité dans "Gestion des pièces"
+    try:
+        FormSource.objects.create(
+            project_id=project_id,
+            piece_type="Bilan",
+            description=description,
+            data_json=request.data,
+            date=request.data.get("date")
+        )
+    except Exception as e:
+        print(f"[ERROR] Impossible de créer FormSource pour Bilan: {e}")
+
+    # 3. Sauvegarder l'entrée Bilan
     serializer = BilanSerializer(data=request.data)
     if serializer.is_valid():
-        serializer.save(project_id=project_id)
+        serializer.save(project_id=project_id, description=description)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -949,9 +975,35 @@ def create_compte_resultat_manual_view(request):
     POST /api/CompteResultats/manual/
     """
     project_id = getattr(request, "project_id", None)
+
+    # 1. Générer description intelligente via GPT
+    try:
+        description = generate_description(
+            data=request.data,
+            json=json,
+            client=client,
+            model=settings.OPENAI_MODEL
+        )
+    except Exception as e:
+        print(f"[WARNING] Erreur génération description CR: {e}")
+        description = f"Saisie manuelle Compte de Résultat - Compte {request.data.get('numero_compte')}"
+
+    # 2. Créer une instance FormSource pour traçabilité dans "Gestion des pièces"
+    try:
+        FormSource.objects.create(
+            project_id=project_id,
+            piece_type="Compte de résultat",
+            description=description,
+            data_json=request.data,
+            date=request.data.get("date")
+        )
+    except Exception as e:
+        print(f"[ERROR] Impossible de créer FormSource pour CompteResultat: {e}")
+
+    # 3. Sauvegarder l'entrée Compte de Résultat
     serializer = CompteResultatSerializer(data=request.data)
     if serializer.is_valid():
-        serializer.save(project_id=project_id)
+        serializer.save(project_id=project_id, description=description)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

@@ -29,11 +29,8 @@ class ProjectMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        # Ignorer les routes exclues
-        if any(request.path.startswith(path) for path in self.EXCLUDED_PATHS):
-            return self.get_response(request)
-        
-        # Ignorer si utilisateur non authentifié (géré par IsAuthenticated)
+        # 1. Attempt manual authentication first for all requests
+        # This ensures request.user is populated even for excluded paths
         if not request.user.is_authenticated:
             # ⚡ [BUGFIX] : JWTAuthenticationFromCookie s'exécute dans DRF, après le middleware.
             # On tente une authentification manuelle pour que le middleware connaisse l'utilisateur.
@@ -45,6 +42,11 @@ class ProjectMiddleware:
             except Exception:
                 pass
 
+        # 2. Ignorer les routes exclues
+        if any(request.path.startswith(path) for path in self.EXCLUDED_PATHS):
+            return self.get_response(request)
+        
+        # Ignorer si utilisateur non authentifié (géré par IsAuthenticated dans les vues)
         if not request.user.is_authenticated:
             return self.get_response(request)
         

@@ -7,7 +7,7 @@ import json
 # TEST 1: Vérification du mapping des clés
 # ===================================================================
 print("=" * 80)
-print("TEST 1: Vérification du mapping des clés")
+print("TEST 1: Verification du mapping des cles")
 print("=" * 80)
 
 # Simulation de données extraites en anglais
@@ -79,7 +79,7 @@ def translate_keys(obj, mapping):
 # Application du mapping
 translated_json = translate_keys(sample_extracted_json, keys_mapping)
 
-print("\n✅ JSON TRADUIT :")
+print("\n[INFO] JSON TRADUIT :")
 print(json.dumps(translated_json, indent=2, ensure_ascii=False))
 
 # Vérification des champs attendus
@@ -87,9 +87,9 @@ expected_fields = ["numero_facture", "montant_ttc", "montant_ht", "montant_tva",
 missing_fields = [f for f in expected_fields if f not in translated_json]
 
 if missing_fields:
-    print(f"\n❌ ERREUR : Champs manquants : {missing_fields}")
+    print(f"\n[ERROR] : Champs manquants : {missing_fields}")
 else:
-    print(f"\n✅ SUCCÈS : Tous les champs attendus sont présents")
+    print(f"\n[SUCCESS] : Tous les champs attendus sont presents")
 
 # Vérification des détails
 if "details" in translated_json and len(translated_json["details"]) > 0:
@@ -98,9 +98,9 @@ if "details" in translated_json and len(translated_json["details"]) > 0:
     missing_detail_fields = [f for f in expected_detail_fields if f not in detail]
     
     if missing_detail_fields:
-        print(f"❌ ERREUR : Champs manquants dans details : {missing_detail_fields}")
+        print(f"[ERROR] : Champs manquants dans details : {missing_detail_fields}")
     else:
-        print(f"✅ SUCCÈS : Tous les champs de détails sont présents")
+        print(f"[SUCCESS] : Tous les champs de details sont presents")
         print(f"   - quantite: {detail['quantite']}")
         print(f"   - prix_unitaire: {detail['prix_unitaire']}")
         print(f"   - montant: {detail['montant']}")
@@ -148,7 +148,7 @@ print("START GENERATE JOURNAL VIEW")
 print(f"   Input data keys: {list(translated_json.keys())}")
 print()
 print("=" * 50)
-print(f"📄 JOURNAL GÉNÉRÉ (Type: {sample_journal_data['type_journal']}, Pièce: {sample_journal_data['numero_piece']})")
+print(f"[INFO] JOURNAL GENERE (Type: {sample_journal_data['type_journal']}, Piece: {sample_journal_data['numero_piece']})")
 print("-" * 50)
 
 for idx, line in enumerate(sample_journal_data["lignes"], start=1):
@@ -156,11 +156,11 @@ for idx, line in enumerate(sample_journal_data["lignes"], start=1):
     libelle = line["libelle"]
     debit = int(line["debit"]) if line["debit"] else 0
     credit = int(line["credit"]) if line["credit"] else 0
-    print(f"Ligne {idx}: {compte} - {libelle} | Débit: {debit} | Crédit: {credit}")
+    print(f"Ligne {idx}: {compte} - {libelle} | Debit: {debit} | Credit: {credit}")
 
 print("=" * 50)
 print()
 
 print("\n" + "=" * 80)
-print("✅ TOUS LES TESTS SONT TERMINÉS")
+print("[SUCCESS] TOUS LES TESTS SONT TERMINES")
 print("=" * 80)

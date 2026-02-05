@@ -48,7 +48,7 @@ def process_image_with_vision(file_bytes: bytes, client, model: str) -> str:
     try:
         # Charger l'image
         image = Image.open(io.BytesIO(file_bytes))
-        print(f"🖼️ IMAGE MODE: {image.mode}, SIZE: {image.size}")
+        print(f"[INFO] IMAGE MODE: {image.mode}, SIZE: {image.size}")
         
         # Redimensionner si nécessaire
         image = resize_image_if_needed(image)
@@ -84,7 +84,7 @@ def process_image_with_vision(file_bytes: bytes, client, model: str) -> str:
         return text
         
     except Exception as e:
-        print(f"❌ OCR Vision API ERROR (Image): {e}")
+        print(f"[ERROR] OCR Vision API ERROR (Image): {e}")
         return ""
 
 
@@ -110,13 +110,13 @@ def process_pdf_with_vision(file_bytes: bytes, client, model: str) -> str:
                 pass
         
         if extracted_text.strip():
-            print("✅ PDF texte natif extrait avec PyPDF2")
+            print("[SUCCESS] PDF texte natif extrait avec PyPDF2")
             return extracted_text
     except Exception as e:
-        print(f"⚠️ Extraction texte natif échouée: {e}")
+        print(f"[WARNING] Extraction texte natif echouee: {e}")
     
     # ---- 2) Si pas de texte natif, utiliser Vision API ----
-    print("🔄 Utilisation de Vision API pour PDF scanné...")
+    print("[INFO] Utilisation de Vision API pour PDF scanne...")
     
     try:
         from pdf2image import convert_from_bytes
@@ -136,7 +136,7 @@ def process_pdf_with_vision(file_bytes: bytes, client, model: str) -> str:
         
         # Traiter chaque page avec Vision API
         for i, img in enumerate(images):
-            print(f"   📄 Traitement page {i+1}/{len(images)}...")
+            print(f"   [INFO] Traitement page {i+1}/{len(images)}...")
             
             # Redimensionner si nécessaire
             img = resize_image_if_needed(img)
@@ -173,13 +173,13 @@ def process_pdf_with_vision(file_bytes: bytes, client, model: str) -> str:
             
             # STOP intelligent (évite OCR inutile si déjà assez de texte)
             if len(text.strip()) > 1200:
-                print(f"   ⏸️ Arrêt anticipé (texte suffisant)")
+                print("   [INFO] Arret anticipe (texte suffisant)")
                 break
         
         return text
         
     except Exception as e:
-        print(f"❌ OCR Vision API ERROR (PDF): {e}")
+        print(f"[ERROR] OCR Vision API ERROR (PDF): {e}")
         raise e
 
 
@@ -209,14 +209,14 @@ def extract_content_with_vision(file, file_type: str, client, model: str) -> str
     if file_type == "pdf":
         text = process_pdf_with_vision(file_bytes, client, model)
         elapsed = round(time.time() - start_time, 2)
-        print(f"⏱ OCR Vision API (PDF): {elapsed} s")
+        print(f" OCR Vision API (PDF): {elapsed} s")
         return clean_text_output(text)
     
     # ---- IMAGES ----
     elif file_type in ["png", "jpg", "jpeg", "webp"]:
         text = process_image_with_vision(file_bytes, client, model)
         elapsed = round(time.time() - start_time, 2)
-        print(f"⏱ OCR Vision API (Image): {elapsed} s")
+        print(f" OCR Vision API (Image): {elapsed} s")
         return clean_text_output(text)
     
     # ---- EXCEL ----
@@ -225,10 +225,10 @@ def extract_content_with_vision(file, file_type: str, client, model: str) -> str
             df = pd.read_excel(io.BytesIO(file_bytes))
             text = df.to_csv(index=False, sep=';')
             elapsed = round(time.time() - start_time, 2)
-            print(f"⏱ Excel extraction: {elapsed} s")
+            print(f" Excel extraction: {elapsed} s")
             return text
         except Exception as e:
-            print(f"❌ Excel read error: {e}")
+            print(f"[ERROR] Excel read error: {e}")
             return ""
     
     # ---- CSV ----
@@ -237,10 +237,10 @@ def extract_content_with_vision(file, file_type: str, client, model: str) -> str
             df = pd.read_csv(io.BytesIO(file_bytes))
             text = df.to_csv(index=False, sep=';')
             elapsed = round(time.time() - start_time, 2)
-            print(f"⏱ CSV extraction: {elapsed} s")
+            print(f" CSV extraction: {elapsed} s")
             return text
         except Exception as e:
-            print(f"❌ CSV read error: {e}")
+            print(f"[ERROR] CSV read error: {e}")
             return ""
     
     return clean_text_output(text)

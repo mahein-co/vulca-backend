@@ -45,10 +45,11 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 greetings = ["bonjour", "bonsoir", "salut", "coucou", "allô", "bon après-midi", "hey", "yo", "coucou toi", "enchanté(e)", "hello", "hi", "salam", "hola", "ciao"]
 
 # SEARCH VECTOR SIMILARY ------------------------------------------------
-def search_similar_pages(query_embedding, top_k=5, threshold=0.9):
+def search_similar_pages(query_embedding, project_id, top_k=5, threshold=0.9):
     results = (
         DocumentPage.objects
         .select_related("document")
+        .filter(document__project_id=project_id) 
         .annotate(distance=CosineDistance("embedding", query_embedding))
         .filter(distance__lt=threshold)
         .order_by("distance")[:top_k]
@@ -414,6 +415,13 @@ def generate_response(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        if not project_id:
+            return Response(
+                {"error": "project_id est requis"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+
         print(f"\n[DEBUG] Message reçu: {user_input}")
         print(f"[DEBUG] Filtered Data présente: {filtered_data is not None}")
         if filtered_data:
@@ -481,7 +489,10 @@ def generate_response(request):
         
         # ✅ RECHERCHE VECTORIELLE (Documents)
         query_embedding = np.array(generate_embedding(user_input))
-        results = search_similar_pages(query_embedding=query_embedding)
+        results = search_similar_pages(
+            query_embedding=query_embedding,
+            project_id=project_id
+        )
         contents = [page["content"] for page in results]
         context_text = "\n\n".join([res for res in contents])
         
@@ -555,9 +566,20 @@ def generate_response(request):
 @api_view(["POST", "GET"])
 @permission_classes([IsAuthenticated])
 def get_message_histories(request):
+    project_id = request.query_params.get('project_id')
+
+    if not project_id:
+        return Response(
+            {"error": "project_id est requis"}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
     # GET ALL HISTORIES
     if request.method == "GET":
-        histories = MessageHistory.objects.filter(user=request.user)
+        histories = MessageHistory.objects.filter(
+            user=request.user,
+            project_id=project_id
+        )
         obj_serializers = MessageHistorySerializer(histories, many=True)
 
         context = {"histories":obj_serializers.data, }
@@ -565,20 +587,38 @@ def get_message_histories(request):
 
     # SAVE A HISTORY
     if request.method == "POST":
-        obj_serializer = MessageHistorySerializer(data=request.data)
+        print("=" * 50)
+        print("POST /api/histories/ - Debugging:")
+        print(f"request.data: {request.data}")
+        print(f"project_id from query_params: {project_id}")
+        print("=" * 50)
+        
+        data = request.data.copy()
+        data['project'] = project_id
+
+        obj_serializer = MessageHistorySerializer(data=data)
         if obj_serializer.is_valid():
-            history_saved = obj_serializer.save(user=request.user) 
+            history_saved = obj_serializer.save(
+                user=request.user,
+                project_id=project_id
+            ) 
             context = {
-                "history": MessageHistorySerializer(history_saved).data,  
+                "history": MessageHistorySerializer(history_saved).data, 
+                "id": history_saved.id, 
                 "error": False,
                 "message": "History was saved successfully."
             }
             return Response(context, status=status.HTTP_201_CREATED)
         else:
-            # Simplifie les erreurs
+            # Afficher les erreurs
+            print("Erreurs de validation:", obj_serializer.errors)
             errors = obj_serializer.errors
             first_error = next(iter(errors.values()))[0] if errors else "Invalid data"
-            context = {"error": True, "message": first_error}
+            context = {
+                "error": True, 
+                "message": first_error, 
+                "details": obj_serializer.errors
+            }
             return Response(context, status=status.HTTP_400_BAD_REQUEST)
         
     

@@ -16,7 +16,7 @@ class MessageHistorySerializer(serializers.ModelSerializer):
     class Meta:
         model = MessageHistory
         #fields = "__all__"
-        fields = ['id', 'title', 'created_at', 'updated_at', 'chat_messages'] 
+        fields = ['id', 'title', 'project', 'created_at', 'updated_at', 'chat_messages'] 
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 

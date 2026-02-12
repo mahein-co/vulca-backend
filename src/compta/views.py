@@ -928,6 +928,60 @@ class CompteResultatListCreateView(generics.ListCreateAPIView):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
+def ai_dashboard_analysis_view(request):
+    """
+    Analyse les indicateurs du dashboard avec l'IA et retourne des insights intelligents.
+    POST /api/dashboard/ai-analysis/
+    
+    Body: {
+        "indicators": {...},
+        "ratios": {...}
+    }
+    """
+    from compta.ai_dashboard_analysis import analyze_dashboard_with_ai
+    
+    project_id = getattr(request, 'project_id', None)
+    
+    try:
+        # Récupérer les données du dashboard
+        dashboard_data = request.data
+        
+        if not dashboard_data:
+            return Response(
+                {"error": "Aucune donnée fournie"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Extraire les dates si disponibles
+        date_range = dashboard_data.get('date_range', {})
+        start_date = date_range.get('start_date')
+        end_date = date_range.get('end_date')
+        
+        # Appeler l'analyse IA avec les dates
+        result = analyze_dashboard_with_ai(dashboard_data, start_date, end_date, project_id)
+        
+        if result.get("success"):
+            return Response({
+                "success": True,
+                "analysis": result["analysis"]
+            })
+        else:
+            return Response({
+                "success": False,
+                "error": result.get("error", "Erreur inconnue"),
+                "details": result.get("details")
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": "Erreur lors de l'analyse IA",
+            "details": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
 def create_bilan_manual_view(request):
     """
     Create a single Bilan entry from manual form input.

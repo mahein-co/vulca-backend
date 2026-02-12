@@ -60,6 +60,7 @@ urlpatterns = [
     path("amortissements-exercice/", views.amortissements_exercice_view, name="amortissements-exercice"),
     path("delais-clients/", views.delais_clients_view, name="delais-clients"),
     path("delais-fournisseurs/", views.delais_fournisseurs_view, name="delais-fournisseurs"),
+    path("compte-resultat/ai-analysis/", views.compte_resultat_ai_analysis_view, name="compte-resultat-ai-analysis"),
 ]
     #path("journals/", views.list_journals_view, name="list-journals"),
     # path("comptes/", views.list_comptes, name="list-comptes"),

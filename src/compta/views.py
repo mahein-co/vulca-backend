@@ -971,6 +971,49 @@ def ai_dashboard_analysis_view(request):
                 "error": result.get("error", "Erreur inconnue"),
                 "details": result.get("details")
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": "Erreur lors de l'analyse IA",
+            "details": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
+def compte_resultat_ai_analysis_view(request):
+    """
+    Analyse les données du Compte de Résultat ou du Bilan avec l'IA.
+    POST /api/compte-resultat/ai-analysis/
+    """
+    from compta.ai_compte_resultat_analysis import analyze_compte_resultat_with_ai
+    
+    project_id = getattr(request, 'project_id', None)
+    
+    try:
+        data = request.data
+        view_type = data.get('view_type', 'compteResultat')
+        
+        if not data:
+            return Response(
+                {"error": "Aucune donnée fournie"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Appeler l'analyse IA
+        result = analyze_compte_resultat_with_ai(data, view_type, project_id)
+        
+        if result.get("success"):
+            return Response({
+                "success": True,
+                "analysis": result["analysis"]
+            })
+        else:
+            return Response({
+                "success": False,
+                "error": result.get("error", "Erreur inconnue"),
+                "details": result.get("details")
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
     except Exception as e:
         return Response({

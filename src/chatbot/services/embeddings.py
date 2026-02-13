@@ -41,7 +41,7 @@ def generate_embedding(text:str) -> list:
     if not text or not text.strip():
         raise ValueError("Le texte pour l'embedding ne peut pas être vide")
     embedding_response = client.embeddings.create(
-        model="text-embedding-3-large",
+        model="text-embedding-3-small",
         input=text.strip()
     )
     return embedding_response.data[0].embedding

@@ -29,8 +29,6 @@ from chatbot.services.embeddings import generate_embedding
 # OPENAI -------------------------------------------
 from openai import OpenAI
 
-import os
-
 import re
 import json
 from datetime import datetime, date
@@ -71,6 +69,15 @@ def search_similar_pages(query_embedding, project_id, top_k=5, threshold=0.9):
     formatted_results = list(unique_sources.values())
     return formatted_results
 
+
+def is_followup_empty_question(user_input):
+    followup_phrases = [
+        "c'est tout", "cest tout", "plus de détails", "plus de detail",
+        "autre chose", "y a autre chose", "ya autre chose",
+        "encore ?", "c'est tout ?", "autres ?", "autre ?"
+    ]
+    text = user_input.lower()
+    return any(phrase in text for phrase in followup_phrases)
 
 
 # GENERATE RESPONSE AI -----------------------------
@@ -163,6 +170,12 @@ def detect_financial_query(user_input):
         'comparaison': r'compar|différence|évolution|versus|vs',
         'analyse_globale': r'analyser|interpréter|audit|santé|vue|résumé|situation|dashboard|tableau|rapport|exercice|période'
     }
+
+    # Détecter si l'utilisateur demande des détails
+    demande_details = bool(re.search(
+        r'détails?|liste|lignes?|ventil|décompos|tous les|chaque|par (date|compte|mois)|réparti|précis|exact|quels?|quelles?|combien|montant|composition',
+        user_input_lower
+    ))
     
     # 1. Extraction de dates précises (DD/MM/YYYY ou DD-MM-YYYY ou DD.MM.YYYY)
     date_matches = re.findall(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})', user_input)
@@ -220,10 +233,12 @@ def detect_financial_query(user_input):
     
     print(f"[DEBUG] Query Type détecté: {query_type}")
     print(f"[DEBUG] Paramètres extraits: {params}")
+    print(f"[DEBUG] Détails demandés: {demande_details}")
     
     return {
         'type': query_type,
-        'params': params
+        'params': params,
+        'include_details': demande_details
     }
 
 
@@ -232,34 +247,66 @@ def get_accounting_context(user, project_id, query_info):
     """
     Récupère les données comptables selon le type de question
     """
+
     if not query_info:
         return ""
     
     service = AccountingQueryService(project_id=project_id)
     query_type = query_info['type']
     params = query_info['params']
+    include_details = query_info.get('include_details', False)
     
     context_parts = []
     
     try:
         if query_type == 'ca':
-            data = service.get_chiffre_affaires(**params)
+            data = service.get_chiffre_affaires(**params, include_details=include_details)
             context_parts.append(f"**Chiffre d'affaires** ({data['periode']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Comptes: {data['comptes']}")
+
+            # Afficher les détails si disponibles
+            if 'details' in data:
+                context_parts.append(f"\n**Détails des ventes** ({data['nb_lignes']} lignes):")
+                for detail in data['details'][:10]:  # Limiter à 10 lignes max
+                    context_parts.append(
+                        f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR"
+                    )
+                if data['nb_lignes'] > 10:
+                    context_parts.append(f"  ... et {data['nb_lignes'] - 10} autres lignes")
         
         elif query_type == 'charges':
-            data = service.get_charges(**params)
+            data = service.get_charges(**params, include_details=include_details)
             context_parts.append(f"**Charges** ({data['periode']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Comptes: {data['comptes']}")
 
+            if 'details' in data:
+                context_parts.append(f"\n**Détails des charges** ({data['nb_lignes']} lignes):")
+                for detail in data['details'][:10]:
+                    context_parts.append(
+                        f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR"
+                    )
+                if data['nb_lignes'] > 10:
+                    context_parts.append(f"  ... et {data['nb_lignes'] - 10} autres lignes")
+
         elif query_type == 'ebe':
-            data = service.get_ebe(**params)
+            data = service.get_ebe(**params, include_details=include_details)
             context_parts.append(f"**EBE (Excédent Brut d'Exploitation)** ({data['periode']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Produits d'exploitation: {data['produits_exploitation']:,.2f} AR")
             context_parts.append(f"- Charges d'exploitation: {data['charges_exploitation']:,.2f} AR")
+
+            if 'details' in data:  
+                context_parts.append(f"\n**Détails EBE** ({data['nb_lignes']} lignes):")
+                context_parts.append(f"Produits d'exploitation:")
+                for detail in data['details']['produits'][:5]:
+                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
+                context_parts.append(f"Charges d'exploitation:")
+                for detail in data['details']['charges'][:5]:
+                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
+
+
             
         elif query_type == 'roe':
             data = service.get_roe(**params)
@@ -269,20 +316,41 @@ def get_accounting_context(user, project_id, query_info):
             context_parts.append(f"- Capitaux propres: {data['capitaux_propres']:,.2f} AR")
 
         elif query_type == 'marge_brute':
-            data = service.get_marge_brute(**params)
+            data = service.get_marge_brute(**params, include_details=include_details)
             context_parts.append(f"**Marge Brute** ({data['periode']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Taux de marge: {data['taux']:.2f}%")
             context_parts.append(f"- Ventes: {data['ventes']:,.2f} AR")
             context_parts.append(f"- Achats: {data['achats']:,.2f} AR")
 
+            if 'details' in data:  
+                context_parts.append(f"\n**Détails Marge Brute:**")
+                context_parts.append(f"Ventes:")
+                for detail in data['details']['ventes'][:5]:
+                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
+                context_parts.append(f"Achats:")
+                for detail in data['details']['achats'][:5]:
+                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
+
+
         elif query_type == 'bfr':
-            data = service.get_bfr(date_ref=params.get('end_date'), annee=params.get('annee'))
+            data = service.get_bfr(date_ref=params.get('end_date'), annee=params.get('annee'), include_details=include_details)
             context_parts.append(f"**BFR (Besoin en Fonds de Roulement)** (au {data['date']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Stocks: {data['stocks']:,.2f} AR")
             context_parts.append(f"- Créances clients: {data['creances_clients']:,.2f} AR")
             context_parts.append(f"- Dettes fournisseurs: {data['dettes_fournisseurs']:,.2f} AR")
+
+            if 'details' in data:  
+                context_parts.append(f"\n**Détails BFR** ({data['nb_lignes']} comptes):")
+                if data['details']['stocks']:
+                    context_parts.append(f"Stocks:")
+                    for d in data['details']['stocks'][:3]:
+                        context_parts.append(f"  - {d['compte']}: {d['solde']:,.2f} AR")
+                if data['details']['creances_clients']:
+                    context_parts.append(f"Créances clients:")
+                    for d in data['details']['creances_clients'][:3]:
+                        context_parts.append(f"  - {d['compte']}: {d['solde']:,.2f} AR")
 
         elif query_type == 'leverage' or query_type == 'current_ratio':
             data = service.get_ratios_structure(date_ref=params.get('end_date'), annee=params.get('annee'))
@@ -322,24 +390,51 @@ def get_accounting_context(user, project_id, query_info):
             context_parts.append(f"- Stock final: {data['stock_final']:,.2f} AR")
         
         elif query_type == 'resultat':
-            data = service.get_resultat_net(**params)
+            data = service.get_resultat_net(**params, include_details=include_details)
             context_parts.append(f"**Résultat net** ({data['periode']}):")
             context_parts.append(f"- Résultat: {data['montant']:,.2f} AR")
             context_parts.append(f"- Produits: {data['produits']:,.2f} AR")
             context_parts.append(f"- Charges: {data['charges']:,.2f} AR")
+
+            if 'details' in data:  
+                context_parts.append(f"\n**Détails Résultat** ({data['nb_lignes']} lignes):")
+                context_parts.append(f"Produits:")
+                for detail in data['details']['produits'][:5]:
+                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
+                context_parts.append(f"Charges:")
+                for detail in data['details']['charges'][:5]:
+                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
+        
         
         elif query_type == 'tresorerie':
-            data = service.get_tresorerie(annee=params.get('annee'))
+            data = service.get_tresorerie(annee=params.get('annee'), include_details=include_details)  # ✅ Ajouter include_details
             context_parts.append(f"**Trésorerie** (au {data['date']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Comptes: {data['comptes']}")
+
+            if 'details' in data:
+                context_parts.append(f"\n**Détails Trésorerie** ({data['nb_lignes']} comptes):")
+                for detail in data['details'][:10]:  
+                    context_parts.append(f"  - {detail['compte']} au {detail['date']}: {detail['solde']:,.2f} AR")
+                if data['nb_lignes'] > 10:
+                    context_parts.append(f"  ... et {data['nb_lignes'] - 10} autres lignes")
+        
         
         elif query_type == 'bilan':
-            data = service.get_bilan_summary(annee=params.get('annee'))
+            data = service.get_bilan_summary(annee=params.get('annee'), include_details=include_details)
             context_parts.append(f"**Bilan** ({data['date']}):")
             context_parts.append(f"- Actif total: {data['actif']:,.2f} AR")
             context_parts.append(f"- Passif total: {data['passif']:,.2f} AR")
             context_parts.append(f"- Équilibre: {data['equilibre']:,.2f} AR")
+
+            if 'details' in data:  
+                context_parts.append(f"\n**Détails Bilan** ({data['nb_lignes']} comptes):")
+                context_parts.append(f"Actif:")
+                for d in data['details']['actif'][:5]:
+                    context_parts.append(f"  - {d['compte']} - {d['libelle']}: {d['montant']:,.2f} AR")
+                context_parts.append(f"Passif:")
+                for d in data['details']['passif'][:5]:
+                    context_parts.append(f"  - {d['compte']} - {d['libelle']}: {d['montant']:,.2f} AR")
 
         elif query_type == 'analyse_globale':
             annee = params.get('annee')
@@ -394,6 +489,41 @@ def get_accounting_context(user, project_id, query_info):
     return "\n".join(context_parts)
 
 
+def format_details(data_key, data_dict, include_details):
+    """
+    Formate les informations comptables et leurs détails si demandés
+    """
+    text = f"**{data_key}** ({data_dict.get('periode', '')}):\n"
+    text += f"- Montant: {data_dict.get('montant', 0):,.2f} AR\n"
+    text += f"- Comptes: {data_dict.get('comptes', '')}\n"
+    
+    if 'details' in data_dict and data_dict['details']:
+        details = data_dict['details']
+
+        # Cas 1: details est une liste (charges, ventes, trésorerie, etc.)
+        if isinstance(details, list):
+            text += f"\n**Détails {data_key}** ({data_dict.get('nb_lignes', len(details))} lignes):\n"
+            for detail in details[:10]:
+                text += f"  - {detail.get('date')} | {detail.get('compte')} - {detail.get('libelle')}: {detail.get('montant'):,.2f} AR\n"
+            if data_dict.get('nb_lignes', len(details)) > 10:
+                text += f"  ... et {data_dict.get('nb_lignes') - 10} autres lignes\n"
+
+        # Cas 2: details est un dictionnaire (résultat net)
+        elif isinstance(details, dict):
+            text += f"\n**Détails {data_key}**:\n"
+            for section, items in details.items():
+                text += f"- {section.capitalize()}:\n"
+                for item in items[:10]:
+                    text += f"  - {item.get('date')} | {item.get('compte')} - {item.get('libelle')}: {item.get('montant'):,.2f} AR\n"
+                if len(items) > 10:
+                    text += f"  ... et {len(items) - 10} autres lignes\n"
+
+    text += "\n"
+    return text
+
+
+
+
 @api_view(['POST', 'GET'])
 @permission_classes([IsAuthenticated])
 def generate_response(request):
@@ -432,6 +562,34 @@ def generate_response(request):
         
         # ✅ CONSTRUCTION DU CONTEXTE FINANCIER
         accounting_context = ""
+
+        # ✅ FALLBACK LOGIQUE POUR QUESTIONS DE SUIVI ("c'est tout ?", etc.)
+        if filtered_data and is_followup_empty_question(user_input):
+            has_more = False
+
+            for key in ['chiffre_affaires', 'charges', 'resultat_net', 'tresorerie', 'bilan']:
+                if key in filtered_data:
+                    details = filtered_data[key].get('details')
+                    if isinstance(details, list) and len(details) > 10:
+                        has_more = True
+                    elif isinstance(details, dict):
+                        for section_items in details.values():
+                            if len(section_items) > 10:
+                                has_more = True
+
+            if not has_more:
+                ai_response = "Oui, ce sont toutes les informations disponibles pour cette période."
+
+                request.data["ai_response"] = ai_response
+                serializer = ChatMessageSerializer(data=request.data)
+                if serializer.is_valid():
+                    message_history = get_object_or_404(MessageHistory, id=message_history_id)
+                    serializer.save(user=user, message_history=message_history)
+                    return Response(
+                        {"conversation": serializer.data, "sources": []},
+                        status=status.HTTP_201_CREATED
+                    )
+
         
         # NOUVEAU: Utiliser les données filtrées si disponibles
         if filtered_data:
@@ -446,37 +604,20 @@ def generate_response(request):
             
             # Formater les données pour le chatbot
             if 'chiffre_affaires' in filtered_data:
-                ca = filtered_data['chiffre_affaires']
-                accounting_context += f"**Chiffre d'affaires** ({ca.get('periode', '')}):\n"
-                accounting_context += f"- Montant: {ca.get('montant', 0):,.2f} AR\n"
-                accounting_context += f"- Comptes: {ca.get('comptes', '')}\n\n"
-            
+                accounting_context += format_details("Chiffre d'affaires", filtered_data['chiffre_affaires'], True)
+                
             if 'charges' in filtered_data:
-                charges = filtered_data['charges']
-                accounting_context += f"**Charges** ({charges.get('periode', '')}):\n"
-                accounting_context += f"- Montant: {charges.get('montant', 0):,.2f} AR\n"
-                accounting_context += f"- Comptes: {charges.get('comptes', '')}\n\n"
-            
+                accounting_context += format_details("Charges", filtered_data['charges'], include_details)
+                
             if 'resultat_net' in filtered_data:
-                resultat = filtered_data['resultat_net']
-                accounting_context += f"**Résultat net** ({resultat.get('periode', '')}):\n"
-                accounting_context += f"- Résultat: {resultat.get('montant', 0):,.2f} AR\n"
-                accounting_context += f"- Produits: {resultat.get('produits', 0):,.2f} AR\n"
-                accounting_context += f"- Charges: {resultat.get('charges', 0):,.2f} AR\n\n"
-            
+                accounting_context += format_details("Résultat net", filtered_data['resultat_net'], include_details)
+                
             if 'tresorerie' in filtered_data:
-                treso = filtered_data['tresorerie']
-                accounting_context += f"**Trésorerie** (au {treso.get('date', '')}):\n"
-                accounting_context += f"- Montant: {treso.get('montant', 0):,.2f} AR\n"
-                accounting_context += f"- Comptes: {treso.get('comptes', '')}\n\n"
-            
+                accounting_context += format_details("Trésorerie", filtered_data['tresorerie'], include_details)
+                
             if 'bilan' in filtered_data:
-                bilan = filtered_data['bilan']
-                accounting_context += f"**Bilan** ({bilan.get('date', '')}):\n"
-                accounting_context += f"- Actif total: {bilan.get('actif', 0):,.2f} AR\n"
-                accounting_context += f"- Passif total: {bilan.get('passif', 0):,.2f} AR\n"
-                accounting_context += f"- Équilibre: {bilan.get('equilibre', 0):,.2f} AR\n\n"
-        
+                accounting_context += format_details("Bilan", filtered_data['bilan'], include_details)
+                
         elif query_info and project_id:
             # Fallback: utiliser l'ancien système si pas de données filtrées
             accounting_context = get_accounting_context(user, project_id, query_info)
@@ -711,7 +852,7 @@ def save_new_history_and_new_chat(request):
             query_embedding = np.array(generate_embedding(user_input))
 
             # Vector request
-            results = search_similar_pages(query_embedding=query_embedding)
+            results = search_similar_pages(query_embedding=query_embedding, project_id=project_id)
             contents = [page["content"] for page in results]
             context_text = "\n\n".join([res for res in contents])
             

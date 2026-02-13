@@ -1,4 +1,4 @@
-from django.db.models import Sum, Q, F
+from django.db.models import Sum, Q, F, Count, Avg, Max, Min
 from decimal import Decimal
 from datetime import datetime, date
 from compta.models import (
@@ -17,8 +17,540 @@ class AccountingQueryService:
             self.project = None
             self.project_id = None
     
-    # ========== CHIFFRE D'AFFAIRES ==========
-    def get_chiffre_affaires(self, start_date=None, end_date=None, annee=None):
+    # ========================================
+    # MÉTHODES GÉNÉRIQUES POUR ACCÉDER À TOUT
+    # ========================================
+    
+    def get_all_data(self, include_details=True):
+        """
+        Récupère TOUTES les données du projet
+        Retourne un dictionnaire complet avec toutes les tables
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+        
+        return {
+            "project": {
+                "id": self.project.id,
+                "name": self.project.name if hasattr(self.project, 'name') else None,
+            },
+            "journal": self.get_journal_data(include_details=include_details),
+            "grand_livre": self.get_grand_livre_data(include_details=include_details),
+            "balance": self.get_balance_data(include_details=include_details),
+            "compte_resultat": self.get_compte_resultat_data(include_details=include_details),
+            "bilan": self.get_bilan_data(include_details=include_details),
+            "synthese": self.get_synthese_complete()
+        }
+    
+    def get_journal_data(self, start_date=None, end_date=None, annee=None, include_details=True):
+        """
+        Récupère toutes les écritures du journal
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+        
+        filters = Q(project_id=self.project_id)
+        
+        if annee:
+            filters &= Q(date__year=annee)
+        elif start_date and end_date:
+            filters &= Q(date__gte=start_date, date__lte=end_date)
+        
+        queryset = Journal.objects.filter(filters).order_by('-date', 'numero_piece')
+        
+        # Statistiques
+        stats = queryset.aggregate(
+            total_debit=Sum('montant_debit'),
+            total_credit=Sum('montant_credit'),
+            nb_ecritures=Count('id')
+        )
+        
+        response = {
+            "total_debit": float(stats['total_debit'] or 0),
+            "total_credit": float(stats['total_credit'] or 0),
+            "nb_ecritures": stats['nb_ecritures'],
+            "equilibre": float((stats['total_debit'] or 0) - (stats['total_credit'] or 0)),
+            "periode": self._format_periode(start_date, end_date, annee)
+        }
+        
+        if include_details:
+            response['ecritures'] = [
+                {
+                    "id": j.id,
+                    "date": j.date.strftime('%d/%m/%Y'),
+                    "numero_piece": j.numero_piece,
+                    "compte": j.numero_compte,
+                    "libelle": j.libelle,
+                    "debit": float(j.montant_debit or 0),
+                    "credit": float(j.montant_credit or 0),
+                    "lettrage": j.lettrage if hasattr(j, 'lettrage') else None,
+                }
+                for j in queryset
+            ]
+        
+        return response
+    
+    def get_grand_livre_data(self, numero_compte=None, start_date=None, end_date=None, annee=None, include_details=True):
+        """
+        Récupère les données du grand livre
+        Peut filtrer par compte spécifique
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+        
+        filters = Q(project_id=self.project_id)
+        
+        if numero_compte:
+            filters &= Q(numero_compte=numero_compte)
+        
+        if annee:
+            filters &= Q(date__year=annee)
+        elif start_date and end_date:
+            filters &= Q(date__gte=start_date, date__lte=end_date)
+        
+        queryset = GrandLivre.objects.filter(filters).order_by('numero_compte', '-date')
+        
+        # Grouper par compte
+        comptes = queryset.values('numero_compte').distinct()
+        
+        response = {
+            "nb_comptes": len(comptes),
+            "periode": self._format_periode(start_date, end_date, annee),
+        }
+        
+        if include_details:
+            response['comptes'] = []
+            for compte in comptes:
+                compte_data = queryset.filter(numero_compte=compte['numero_compte'])
+                compte_stats = compte_data.aggregate(
+                    total_debit=Sum('montant_debit'),
+                    total_credit=Sum('montant_credit'),
+                    solde=Sum(F('montant_debit') - F('montant_credit'))
+                )
+                
+                response['comptes'].append({
+                    "numero_compte": compte['numero_compte'],
+                    "total_debit": float(compte_stats['total_debit'] or 0),
+                    "total_credit": float(compte_stats['total_credit'] or 0),
+                    "solde": float(compte_stats['solde'] or 0),
+                    "mouvements": [
+                        {
+                            "date": m.date.strftime('%d/%m/%Y'),
+                            "libelle": m.libelle,
+                            "debit": float(m.montant_debit or 0),
+                            "credit": float(m.montant_credit or 0),
+                        }
+                        for m in compte_data
+                    ]
+                })
+        
+        return response
+    
+    def get_balance_data(self, numero_compte=None, nature=None, start_date=None, end_date=None, annee=None, include_details=True):
+        """
+        Récupère toutes les données de la balance
+        Peut filtrer par compte, nature (ACTIF/PASSIF)
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+        
+        filters = Q(project_id=self.project_id)
+        
+        if numero_compte:
+            if isinstance(numero_compte, list):
+                filters &= Q(numero_compte__in=numero_compte)
+            else:
+                filters &= Q(numero_compte=numero_compte)
+        
+        if nature:
+            filters &= Q(nature=nature)
+        
+        if annee:
+            filters &= Q(date__year=annee)
+        elif start_date and end_date:
+            filters &= Q(date__gte=start_date, date__lte=end_date)
+        
+        queryset = Balance.objects.filter(filters).order_by('numero_compte', '-date')
+        
+        # Statistiques globales
+        stats = queryset.aggregate(
+            total_debit=Sum('solde_debit'),
+            total_credit=Sum('solde_credit'),
+            nb_comptes=Count('numero_compte', distinct=True)
+        )
+        
+        # Par nature
+        stats_actif = queryset.filter(nature='ACTIF').aggregate(total=Sum(F('solde_debit') - F('solde_credit')))
+        stats_passif = queryset.filter(nature='PASSIF').aggregate(total=Sum(F('solde_credit') - F('solde_debit')))
+        
+        response = {
+            "total_debit": float(stats['total_debit'] or 0),
+            "total_credit": float(stats['total_credit'] or 0),
+            "total_actif": float(stats_actif['total'] or 0),
+            "total_passif": float(stats_passif['total'] or 0),
+            "equilibre": float((stats['total_debit'] or 0) - (stats['total_credit'] or 0)),
+            "nb_comptes": stats['nb_comptes'],
+            "periode": self._format_periode(start_date, end_date, annee)
+        }
+        
+        if include_details:
+            response['comptes'] = [
+                {
+                    "date": b.date.strftime('%d/%m/%Y'),
+                    "numero_compte": b.numero_compte,
+                    "libelle": b.libelle,
+                    "debit": float(b.solde_debit or 0),
+                    "credit": float(b.solde_credit or 0),
+                    "solde": float((b.solde_debit or 0) - (b.solde_credit or 0)),
+                    "nature": b.nature,
+                }
+                for b in queryset
+            ]
+        
+        return response
+    
+    def get_compte_resultat_data(self, numero_compte=None, nature=None, start_date=None, end_date=None, annee=None, include_details=True):
+        """
+        Récupère toutes les données du compte de résultat
+        Peut filtrer par compte, nature (PRODUIT/CHARGE)
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+        
+        filters = Q(project_id=self.project_id)
+        
+        if numero_compte:
+            if isinstance(numero_compte, list):
+                filters &= Q(numero_compte__in=numero_compte)
+            else:
+                filters &= Q(numero_compte__startswith=numero_compte)
+        
+        if nature:
+            filters &= Q(nature=nature)
+        
+        if annee:
+            filters &= Q(date__year=annee)
+        elif start_date and end_date:
+            filters &= Q(date__gte=start_date, date__lte=end_date)
+        
+        queryset = CompteResultat.objects.filter(filters).order_by('numero_compte', '-date')
+        
+        # Statistiques
+        stats_produits = queryset.filter(nature='PRODUIT').aggregate(total=Sum('montant_ar'))
+        stats_charges = queryset.filter(nature='CHARGE').aggregate(total=Sum('montant_ar'))
+        
+        total_produits = stats_produits['total'] or Decimal('0.00')
+        total_charges = stats_charges['total'] or Decimal('0.00')
+        
+        response = {
+            "total_produits": float(total_produits),
+            "total_charges": float(total_charges),
+            "resultat_net": float(total_produits - total_charges),
+            "nb_lignes": queryset.count(),
+            "periode": self._format_periode(start_date, end_date, annee)
+        }
+        
+        if include_details:
+            response['lignes'] = [
+                {
+                    "date": cr.date.strftime('%d/%m/%Y'),
+                    "numero_compte": cr.numero_compte,
+                    "libelle": cr.libelle,
+                    "montant": float(cr.montant_ar),
+                    "nature": cr.nature,
+                }
+                for cr in queryset
+            ]
+        
+        return response
+    
+    def get_bilan_data(self, type_bilan=None, categorie=None, date_bilan=None, annee=None, include_details=True):
+        """
+        Récupère toutes les données du bilan
+        Peut filtrer par type (ACTIF/PASSIF), catégorie
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+        
+        # Déterminer la date de référence
+        target_date = date_bilan or (date(annee, 12, 31) if annee else date.today())
+        
+        # Trouver la date la plus récente
+        latest_date = Bilan.objects.filter(
+            project_id=self.project_id,
+            date__lte=target_date
+        ).order_by('-date').values_list('date', flat=True).first()
+        
+        if not latest_date:
+            return {
+                "error": f"Aucune donnée de bilan avant le {target_date.strftime('%d/%m/%Y')}"
+            }
+        
+        filters = Q(project_id=self.project_id, date=latest_date)
+        
+        if type_bilan:
+            filters &= Q(type_bilan=type_bilan)
+        
+        if categorie:
+            filters &= Q(categorie=categorie)
+        
+        queryset = Bilan.objects.filter(filters).order_by('type_bilan', 'categorie', 'numero_compte')
+        
+        # Statistiques
+        stats_actif = queryset.filter(type_bilan='ACTIF').aggregate(total=Sum('montant_ar'))
+        stats_passif = queryset.filter(type_bilan='PASSIF').aggregate(total=Sum('montant_ar'))
+        
+        response = {
+            "date": latest_date.strftime('%d/%m/%Y'),
+            "total_actif": float(stats_actif['total'] or 0),
+            "total_passif": float(stats_passif['total'] or 0),
+            "equilibre": float((stats_actif['total'] or 0) - (stats_passif['total'] or 0)),
+            "nb_lignes": queryset.count()
+        }
+        
+        if include_details:
+            # Grouper par type et catégorie
+            response['actif'] = {}
+            response['passif'] = {}
+            
+            for ligne in queryset.filter(type_bilan='ACTIF'):
+                cat = ligne.categorie
+                if cat not in response['actif']:
+                    response['actif'][cat] = []
+                response['actif'][cat].append({
+                    "numero_compte": ligne.numero_compte,
+                    "libelle": ligne.libelle,
+                    "montant": float(ligne.montant_ar)
+                })
+            
+            for ligne in queryset.filter(type_bilan='PASSIF'):
+                cat = ligne.categorie
+                if cat not in response['passif']:
+                    response['passif'][cat] = []
+                response['passif'][cat].append({
+                    "numero_compte": ligne.numero_compte,
+                    "libelle": ligne.libelle,
+                    "montant": float(ligne.montant_ar)
+                })
+        
+        return response
+    
+    def search_in_all_tables(self, search_term, start_date=None, end_date=None, annee=None):
+        """
+        Recherche un terme dans TOUTES les tables
+        Retourne les résultats groupés par table
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+        
+        date_filters = Q()
+        if annee:
+            date_filters = Q(date__year=annee)
+        elif start_date and end_date:
+            date_filters = Q(date__gte=start_date, date__lte=end_date)
+        
+        results = {
+            "terme_recherche": search_term,
+            "periode": self._format_periode(start_date, end_date, annee),
+            "resultats": {}
+        }
+        
+        # Recherche dans Journal
+        journal_results = Journal.objects.filter(
+            Q(project_id=self.project_id) & date_filters &
+            (Q(libelle__icontains=search_term) | 
+             Q(numero_compte__icontains=search_term) |
+             Q(numero_piece__icontains=search_term))
+        )
+        if journal_results.exists():
+            results['resultats']['journal'] = [
+                {
+                    "date": j.date.strftime('%d/%m/%Y'),
+                    "compte": j.numero_compte,
+                    "libelle": j.libelle,
+                    "debit": float(j.montant_debit or 0),
+                    "credit": float(j.montant_credit or 0)
+                }
+                for j in journal_results[:10]  # Limiter à 10
+            ]
+            results['resultats']['journal_count'] = journal_results.count()
+        
+        # Recherche dans Balance
+        balance_results = Balance.objects.filter(
+            Q(project_id=self.project_id) & date_filters &
+            (Q(libelle__icontains=search_term) | 
+             Q(numero_compte__icontains=search_term))
+        )
+        if balance_results.exists():
+            results['resultats']['balance'] = [
+                {
+                    "date": b.date.strftime('%d/%m/%Y'),
+                    "compte": b.numero_compte,
+                    "libelle": b.libelle,
+                    "solde": float((b.solde_debit or 0) - (b.solde_credit or 0))
+                }
+                for b in balance_results[:10]
+            ]
+            results['resultats']['balance_count'] = balance_results.count()
+        
+        # Recherche dans CompteResultat
+        cr_results = CompteResultat.objects.filter(
+            Q(project_id=self.project_id) & date_filters &
+            (Q(libelle__icontains=search_term) | 
+             Q(numero_compte__icontains=search_term))
+        )
+        if cr_results.exists():
+            results['resultats']['compte_resultat'] = [
+                {
+                    "date": cr.date.strftime('%d/%m/%Y'),
+                    "compte": cr.numero_compte,
+                    "libelle": cr.libelle,
+                    "montant": float(cr.montant_ar),
+                    "nature": cr.nature
+                }
+                for cr in cr_results[:10]
+            ]
+            results['resultats']['compte_resultat_count'] = cr_results.count()
+        
+        # Recherche dans Bilan
+        bilan_results = Bilan.objects.filter(
+            Q(project_id=self.project_id) &
+            (Q(libelle__icontains=search_term) | 
+             Q(numero_compte__icontains=search_term))
+        )
+        if bilan_results.exists():
+            results['resultats']['bilan'] = [
+                {
+                    "date": b.date.strftime('%d/%m/%Y'),
+                    "compte": b.numero_compte,
+                    "libelle": b.libelle,
+                    "montant": float(b.montant_ar),
+                    "type": b.type_bilan
+                }
+                for b in bilan_results[:10]
+            ]
+            results['resultats']['bilan_count'] = bilan_results.count()
+        
+        results['total_resultats'] = sum([
+            results['resultats'].get('journal_count', 0),
+            results['resultats'].get('balance_count', 0),
+            results['resultats'].get('compte_resultat_count', 0),
+            results['resultats'].get('bilan_count', 0)
+        ])
+        
+        return results
+    
+    def get_compte_details(self, numero_compte, start_date=None, end_date=None, annee=None):
+        """
+        Récupère TOUS les détails d'un compte spécifique
+        dans toutes les tables (Journal, Grand Livre, Balance)
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+        
+        date_filters = Q()
+        if annee:
+            date_filters = Q(date__year=annee)
+        elif start_date and end_date:
+            date_filters = Q(date__gte=start_date, date__lte=end_date)
+        
+        response = {
+            "numero_compte": numero_compte,
+            "periode": self._format_periode(start_date, end_date, annee)
+        }
+        
+        # Journal
+        journal_data = Journal.objects.filter(
+            Q(project_id=self.project_id) & 
+            Q(numero_compte=numero_compte) & 
+            date_filters
+        ).order_by('-date')
+        
+        response['journal'] = {
+            "nb_ecritures": journal_data.count(),
+            "total_debit": float(journal_data.aggregate(total=Sum('montant_debit'))['total'] or 0),
+            "total_credit": float(journal_data.aggregate(total=Sum('montant_credit'))['total'] or 0),
+            "ecritures": [
+                {
+                    "date": j.date.strftime('%d/%m/%Y'),
+                    "libelle": j.libelle,
+                    "debit": float(j.montant_debit or 0),
+                    "credit": float(j.montant_credit or 0)
+                }
+                for j in journal_data
+            ]
+        }
+        
+        # Balance
+        balance_data = Balance.objects.filter(
+            Q(project_id=self.project_id) & 
+            Q(numero_compte=numero_compte) & 
+            date_filters
+        ).order_by('-date').first()
+        
+        if balance_data:
+            response['balance'] = {
+                "date": balance_data.date.strftime('%d/%m/%Y'),
+                "libelle": balance_data.libelle,
+                "solde_debit": float(balance_data.solde_debit or 0),
+                "solde_credit": float(balance_data.solde_credit or 0),
+                "solde": float((balance_data.solde_debit or 0) - (balance_data.solde_credit or 0)),
+                "nature": balance_data.nature
+            }
+        
+        # Compte de Résultat
+        cr_data = CompteResultat.objects.filter(
+            Q(project_id=self.project_id) & 
+            Q(numero_compte=numero_compte) & 
+            date_filters
+        )
+        
+        if cr_data.exists():
+            response['compte_resultat'] = {
+                "total": float(cr_data.aggregate(total=Sum('montant_ar'))['total'] or 0),
+                "nature": cr_data.first().nature,
+                "lignes": [
+                    {
+                        "date": cr.date.strftime('%d/%m/%Y'),
+                        "libelle": cr.libelle,
+                        "montant": float(cr.montant_ar)
+                    }
+                    for cr in cr_data
+                ]
+            }
+        
+        return response
+    
+    def get_synthese_complete(self, annee=None):
+        """
+        Synthèse financière COMPLÈTE avec tous les indicateurs clés
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+        
+        return {
+            "chiffre_affaires": self.get_chiffre_affaires(annee=annee),
+            "charges": self.get_charges(annee=annee),
+            "resultat_net": self.get_resultat_net(annee=annee),
+            "ebe": self.get_ebe(annee=annee),
+            "marge_brute": self.get_marge_brute(annee=annee),
+            "tresorerie": self.get_tresorerie(annee=annee),
+            "bilan": self.get_bilan_summary(annee=annee),
+            "bfr": self.get_bfr(annee=annee),
+            "ratios": {
+                "roe": self.get_roe(annee=annee),
+                "roa": self.get_roa(annee=annee),
+                "marges": self.get_marges_profitabilite(annee=annee),
+                "structure": self.get_ratios_structure(annee=annee),
+                "rotation_stocks": self.get_rotation_stocks(annee=annee)
+            }
+        }
+    
+    # ========================================
+    # MÉTHODES DE CALCUL SPÉCIFIQUES (EXISTANTES)
+    # ========================================
+    
+    def get_chiffre_affaires(self, start_date=None, end_date=None, annee=None, include_details=True):
         """
         Calcule le chiffre d'affaires (comptes 70x - Produits d'exploitation)
         PCG 2005: 701-709 = Ventes et produits
@@ -26,7 +558,6 @@ class AccountingQueryService:
         if not self.project:
             return {"error": "Projet non trouvé"}
         
-        # Déterminer les dates
         filters = Q(project_id=self.project_id) & Q(numero_compte__startswith='70')
         
         if annee:
@@ -34,23 +565,35 @@ class AccountingQueryService:
         elif start_date and end_date:
             filters &= Q(date__gte=start_date, date__lte=end_date)
         
-        # Récupérer depuis CompteResultat (plus rapide) ou calculer depuis Journal
-        resultat = CompteResultat.objects.filter(
-            filters, nature='PRODUIT'
-        ).aggregate(
-            total=Sum('montant_ar')
-        )
-        
+        queryset = CompteResultat.objects.filter(filters, nature='PRODUIT')
+        resultat = queryset.aggregate(total=Sum('montant_ar'))
         ca = resultat['total'] or Decimal('0.00')
         
-        return {
+        response = {
             "montant": float(ca),
             "periode": self._format_periode(start_date, end_date, annee),
             "comptes": "70x (Ventes et produits)"
         }
+        
+        if include_details:
+            details = queryset.values(
+                'date', 'numero_compte', 'libelle', 'montant_ar'
+            ).order_by('-date')
+            
+            response['details'] = [
+                {
+                    "date": d['date'].strftime('%d/%m/%Y'),
+                    "compte": d['numero_compte'],
+                    "libelle": d['libelle'],
+                    "montant": float(d['montant_ar'])
+                }
+                for d in details
+            ]
+            response['nb_lignes'] = len(response['details'])
+        
+        return response
     
-    # ========== CHARGES ==========
-    def get_charges(self, start_date=None, end_date=None, annee=None):
+    def get_charges(self, start_date=None, end_date=None, annee=None, include_details=True):
         """
         Calcule les charges totales (comptes 6xx)
         PCG 2005: 60-69 = Charges d'exploitation, financières, exceptionnelles
@@ -65,51 +608,72 @@ class AccountingQueryService:
         elif start_date and end_date:
             filters &= Q(date__gte=start_date, date__lte=end_date)
         
-        resultat = CompteResultat.objects.filter(
-            filters, nature='CHARGE'
-        ).aggregate(
-            total=Sum('montant_ar')
-        )
+        queryset = CompteResultat.objects.filter(filters, nature='CHARGE')
+        resultat = queryset.aggregate(total=Sum('montant_ar'))
+        ca = resultat['total'] or Decimal('0.00')
         
-        charges = resultat['total'] or Decimal('0.00')
-        
-        return {
-            "montant": float(charges),
+        response = {
+            "montant": float(ca),
             "periode": self._format_periode(start_date, end_date, annee),
             "comptes": "6xx (Charges)"
         }
+
+        if include_details:
+            details = queryset.values(
+                'date', 'numero_compte', 'libelle', 'montant_ar'
+            ).order_by('-date')
+            
+            response['details'] = [
+                {
+                    "date": d['date'].strftime('%d/%m/%Y'),
+                    "compte": d['numero_compte'],
+                    "libelle": d['libelle'],
+                    "montant": float(d['montant_ar'])
+                }
+                for d in details
+            ]
+            response['nb_lignes'] = len(response['details'])
+        
+        return response
     
-    # ========== RÉSULTAT NET ==========
-    def get_resultat_net(self, start_date=None, end_date=None, annee=None):
+    def get_resultat_net(self, start_date=None, end_date=None, annee=None, include_details=True):
         """
         Calcule le résultat net = Produits - Charges
         """
-        ca = self.get_chiffre_affaires(start_date, end_date, annee)
-        charges = self.get_charges(start_date, end_date, annee)
+        ca = self.get_chiffre_affaires(start_date, end_date, annee, include_details=include_details)
+        charges = self.get_charges(start_date, end_date, annee, include_details=include_details)
         
         if "error" in ca or "error" in charges:
             return {"error": "Impossible de calculer le résultat"}
         
         resultat = ca['montant'] - charges['montant']
         
-        return {
+        response = {
             "montant": resultat,
             "produits": ca['montant'],
             "charges": charges['montant'],
             "periode": ca['periode']
         }
+
+        if include_details:
+            response['details'] = {
+                "produits": ca.get('details', []),
+                "charges": charges.get('details', [])
+            }
+            response['nb_lignes'] = (
+                len(response['details']['produits']) +
+                len(response['details']['charges'])
+            )
+
+        return response
     
-    # ========== EBE (Excédent Brut d'Exploitation) ==========
-    def get_ebe(self, start_date=None, end_date=None, annee=None):
+    def get_ebe(self, start_date=None, end_date=None, annee=None, include_details=True):
         """
         Calcule l'EBE (Excédent Brut d'Exploitation)
-        PCG 2005: Valeur Ajoutée + Subventions - Impôts/Taxes - Charges Personnel
-        Simplification: Produits Exploitation (70-74) - Charges Exploitation (60-64)
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
             
-        # Produits d'exploitation (70 à 74)
         prod_filters = Q(project_id=self.project_id) & (
             Q(numero_compte__startswith='70') | 
             Q(numero_compte__startswith='71') |
@@ -117,7 +681,6 @@ class AccountingQueryService:
             Q(numero_compte__startswith='74')
         )
         
-        # Charges d'exploitation (60 à 64)
         char_filters = Q(project_id=self.project_id) & (
             Q(numero_compte__startswith='60') | 
             Q(numero_compte__startswith='61') |
@@ -140,30 +703,47 @@ class AccountingQueryService:
         char_total = char_res['total'] or Decimal('0.00')
         ebe = float(prod_total - char_total)
         
-        return {
+        response = {
             "montant": ebe,
             "produits_exploitation": float(prod_total),
             "charges_exploitation": float(char_total),
             "periode": self._format_periode(start_date, end_date, annee),
             "comptes": "70-74 vs 60-64"
         }
+
+        if include_details:
+            response['details'] = {
+                "produits": [
+                    {
+                        "date": d['date'].strftime('%d/%m/%Y'),
+                        "compte": d['numero_compte'],
+                        "libelle": d['libelle'],
+                        "montant": float(d['montant_ar'])
+                    } for d in CompteResultat.objects.filter(prod_filters, nature='PRODUIT').values('date','numero_compte','libelle','montant_ar')
+                ],
+                "charges": [
+                    {
+                        "date": d['date'].strftime('%d/%m/%Y'),
+                        "compte": d['numero_compte'],
+                        "libelle": d['libelle'],
+                        "montant": float(d['montant_ar'])
+                    } for d in CompteResultat.objects.filter(char_filters, nature='CHARGE').values('date','numero_compte','libelle','montant_ar')
+                ]
+            }
+            response['nb_lignes'] = len(response['details']['produits']) + len(response['details']['charges'])
+
+        return response
     
-    # ========== ROE (Return on Equity) ==========
     def get_roe(self, start_date=None, end_date=None, annee=None):
         """
         Calcule le ROE (Rentabilité des capitaux propres)
-        Formule: Résultat Net / Capitaux Propres
-        PCG 2005: Capitaux propres (comptes 10x à 14x)
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
             
-        # 1. Résultat Net sur la période
         res_net_data = self.get_resultat_net(start_date, end_date, annee)
         res_net = res_net_data.get('montant', 0)
         
-        # 2. Capitaux Propres (Bilan)
-        # On prend la date de fin (soit passée soit calculée par l'année)
         date_bilan = end_date
         if annee and not date_bilan:
             date_bilan = date(annee, 12, 31)
@@ -173,7 +753,6 @@ class AccountingQueryService:
         cp_filters = Q(project_id=self.project_id) & Q(type_bilan='PASSIF') & Q(categorie='CAPITAUX_PROPRES')
         cp_filters &= Q(date__lte=date_bilan)
             
-        # On prend le montant total des capitaux propres au dernier bilan connu avant ou à la date de fin
         latest_cp_date = Bilan.objects.filter(cp_filters).order_by('-date').values_list('date', flat=True).first()
         
         if latest_cp_date:
@@ -184,7 +763,6 @@ class AccountingQueryService:
             ).aggregate(total=Sum('montant_ar'))
             cp_total = cp_res['total'] or Decimal('0.00')
         else:
-            # Fallback sur les comptes 10-14
             cp_res = Balance.objects.filter(
                 project_id=self.project_id, 
                 numero_compte__regex=r'^1[0-4]',
@@ -202,11 +780,9 @@ class AccountingQueryService:
             "periode": res_net_data['periode']
         }
 
-    # ========== MARGE BRUTE ==========
-    def get_marge_brute(self, start_date=None, end_date=None, annee=None):
+    def get_marge_brute(self, start_date=None, end_date=None, annee=None, include_details=True):
         """
         Calcule la Marge Brute
-        Formule: Ventes (70) - Achats de marchandises (60)
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
@@ -221,13 +797,16 @@ class AccountingQueryService:
             filters_70 &= Q(date__gte=start_date, date__lte=end_date)
             filters_60 &= Q(date__gte=start_date, date__lte=end_date)
             
-        ventes = CompteResultat.objects.filter(filters_70, nature='PRODUIT').aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
-        achats = CompteResultat.objects.filter(filters_60, nature='CHARGE').aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
+        ventes_qs = CompteResultat.objects.filter(filters_70, nature='PRODUIT')
+        achats_qs = CompteResultat.objects.filter(filters_60, nature='CHARGE')
+
+        ventes = ventes_qs.aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
+        achats = achats_qs.aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
         
         marge = float(ventes - achats)
         taux = (marge / float(ventes) * 100) if ventes != 0 else 0
         
-        return {
+        response = {
             "montant": marge,
             "taux": taux,
             "ventes": float(ventes),
@@ -235,35 +814,61 @@ class AccountingQueryService:
             "periode": self._format_periode(start_date, end_date, annee)
         }
 
-    # ========== BFR (Besoin en Fonds de Roulement) ==========
-    def get_bfr(self, date_ref=None, annee=None):
+        if include_details:
+            response["details"] = {
+                "ventes": [
+                    {
+                        "date": d["date"].strftime('%d/%m/%Y'),
+                        "compte": d["numero_compte"],
+                        "libelle": d["libelle"],
+                        "montant": float(d["montant_ar"])
+                    }
+                    for d in ventes_qs.values("date", "numero_compte", "libelle", "montant_ar")
+                ],
+                "achats": [
+                    {
+                        "date": d["date"].strftime('%d/%m/%Y'),
+                        "compte": d["numero_compte"],
+                        "libelle": d["libelle"],
+                        "montant": float(d["montant_ar"])
+                    }
+                    for d in achats_qs.values("date", "numero_compte", "libelle", "montant_ar")
+                ]
+            }
+        
+        return response
+
+    def get_bfr(self, date_ref=None, annee=None, include_details=True):
         """
         Calcule le BFR = (Stocks + Créances clients) - Dettes fournisseurs
-        Stocks (3), Créances (41), Dettes Fournisseurs (40)
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
             
         target_date = date_ref or (date(annee, 12, 31) if annee else date.today())
         
-        # On cherche les soldes à la date cible
-        def get_balance_sum(prefix):
-            res = Balance.objects.filter(
+        def get_balance_qs(prefix):
+            return Balance.objects.filter(
                 project_id=self.project_id,
                 numero_compte__startswith=prefix,
                 date__lte=target_date
-            ).order_by('-date').values('numero_compte').annotate(
+            ).order_by('-date').values(
+                'date', 'numero_compte', 'solde_debit', 'solde_credit'
+            ).annotate(
                 solde=F('solde_debit') - F('solde_credit')
-            ).aggregate(total=Sum('solde'))
-            return res['total'] or Decimal('0.00')
+            )
 
-        stocks = get_balance_sum('3')
-        creances = get_balance_sum('41')
-        dettes_fourn = -get_balance_sum('40') # Inversé car solde créditeur positif pour dettes
+        stocks_qs = get_balance_qs('3')
+        creances_qs = get_balance_qs('41')
+        dettes_qs = get_balance_qs('40')
+
+        stocks = stocks_qs.aggregate(total=Sum('solde'))['total'] or Decimal('0.00')
+        creances = creances_qs.aggregate(total=Sum('solde'))['total'] or Decimal('0.00')
+        dettes_fourn = -(dettes_qs.aggregate(total=Sum('solde'))['total'] or Decimal('0.00'))
         
         bfr = float(stocks + creances - dettes_fourn)
         
-        return {
+        response = {
             "montant": bfr,
             "stocks": float(stocks),
             "creances_clients": float(creances),
@@ -271,7 +876,38 @@ class AccountingQueryService:
             "date": target_date.strftime('%d/%m/%Y')
         }
 
-    # ========== ROA (Return on Assets) ==========
+        if include_details:
+            response['details'] = {
+                "stocks": [
+                    {
+                        "date": d['date'].strftime('%d/%m/%Y'),
+                        "compte": d['numero_compte'],
+                        "solde": float(d['solde'])
+                    } for d in stocks_qs
+                ],
+                "creances_clients": [
+                    {
+                        "date": d['date'].strftime('%d/%m/%Y'),
+                        "compte": d['numero_compte'],
+                        "solde": float(d['solde'])
+                    } for d in creances_qs
+                ],
+                "dettes_fournisseurs": [
+                    {
+                        "date": d['date'].strftime('%d/%m/%Y'),
+                        "compte": d['numero_compte'],
+                        "solde": float(-d['solde'])
+                    } for d in dettes_qs
+                ]
+            }
+            response['nb_lignes'] = (
+                len(response['details']['stocks']) +
+                len(response['details']['creances_clients']) +
+                len(response['details']['dettes_fournisseurs'])
+            )
+
+        return response
+
     def get_roa(self, start_date=None, end_date=None, annee=None):
         """
         Calcule le ROA = Résultat Net / Total Actif
@@ -291,20 +927,15 @@ class AccountingQueryService:
             "periode": res_net_data['periode']
         }
 
-    # ========== Ratios de Structure / Liquidité ==========
     def get_ratios_structure(self, date_ref=None, annee=None):
         """
         Calcule Leverage et Current Ratio
-        Leverage = Dettes / Capitaux Propres
-        Current Ratio = Actif Courant / Passif Courant
         """
         target_date = date_ref or (date(annee, 12, 31) if annee else date.today())
         
-        # Capitaux Propres
         cp_res = self.get_roe(end_date=target_date, annee=annee)
         cp = cp_res.get('capitaux_propres', 0)
         
-        # Dettes (16, 17, 40, etc.) - Simplifié aux dettes financières (16)
         dettes_fin = Bilan.objects.filter(
             project_id=self.project_id,
             numero_compte__startswith='16',
@@ -312,10 +943,8 @@ class AccountingQueryService:
         ).aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
         dettes_fin_float = float(dettes_fin)
         
-        # Leverage
         leverage = (dettes_fin_float / cp) if cp != 0 else 0
         
-        # Current Ratio (Actif Courant: 3, 4, 5 / Passif Courant: 4)
         actif_courant = Bilan.objects.filter(
             project_id=self.project_id,
             type_bilan='ACTIF',
@@ -344,12 +973,9 @@ class AccountingQueryService:
             "date": target_date.strftime('%d/%m/%Y')
         }
 
-    # ========== Marges de Profitabilité ==========
     def get_marges_profitabilite(self, start_date=None, end_date=None, annee=None):
         """
         Calcule Marge Nette et Marge Opérationnelle
-        Marge Nette = Résultat Net / CA
-        Marge Opérationnelle = EBE / CA
         """
         ca_data = self.get_chiffre_affaires(start_date, end_date, annee)
         ca = ca_data.get('montant', 0)
@@ -372,10 +998,9 @@ class AccountingQueryService:
             "periode": ca_data['periode']
         }
 
-    # ========== Rotation des Stocks ==========
     def get_rotation_stocks(self, annee=None):
         """
-        Calcule la Rotation des stocks = Achats / Stock moyen (ici stock final)
+        Calcule la Rotation des stocks
         """
         if not annee:
             annee = date.today().year
@@ -387,7 +1012,6 @@ class AccountingQueryService:
         stocks = bfr.get('stocks', 0)
         
         rotation = (achats / stocks) if stocks != 0 else 0
-        # En jours : 365 / rotation
         jours = (365 / rotation) if rotation != 0 else 0
         
         return {
@@ -398,11 +1022,9 @@ class AccountingQueryService:
             "annee": annee
         }
     
-    # ========== TRÉSORERIE ==========
-    def get_tresorerie(self, date_fin=None, annee=None):
+    def get_tresorerie(self, date_fin=None, annee=None, include_details=True):
         """
         Calcule la trésorerie (comptes 51x + 53x)
-        PCG 2005: 51 = Banque, 53 = Caisse
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
@@ -412,7 +1034,6 @@ class AccountingQueryService:
         )
         
         if annee:
-            # Si année spécifiée, on prend la situation au 31/12 de cette année
             filters &= Q(date__year__lte=annee)
             final_date_str = f"31/12/{annee}"
         elif date_fin:
@@ -421,38 +1042,54 @@ class AccountingQueryService:
         else:
             final_date_str = "aujourd'hui"
         
-        # Récupérer depuis la Balance
-        balances = Balance.objects.filter(filters).aggregate(
+        balances = Balance.objects.filter(filters)
+
+        totals = balances.aggregate(
             solde_debit_total=Sum('solde_debit'),
             solde_credit_total=Sum('solde_credit')
         )
         
-        tresorerie = (balances['solde_debit_total'] or Decimal('0.00')) - \
-                     (balances['solde_credit_total'] or Decimal('0.00'))
+        tresorerie = (totals['solde_debit_total'] or Decimal('0.00')) - \
+                     (totals['solde_credit_total'] or Decimal('0.00'))
         
-        return {
+        response = {
             "montant": float(tresorerie),
             "date": final_date_str,
             "comptes": "51x (Banque) + 53x (Caisse)"
         }
+
+        if include_details:
+            details = balances.values(
+                'date', 'numero_compte', 'solde_debit', 'solde_credit'
+            ).order_by('-date')
+            
+            response['details'] = [
+                {
+                    "date": d['date'].strftime('%d/%m/%Y'),
+                    "compte": d['numero_compte'],
+                    "solde_debit": float(d['solde_debit']),
+                    "solde_credit": float(d['solde_credit']),
+                    "solde": float(d['solde_debit'] - d['solde_credit'])
+                }
+                for d in details
+            ]
+            response['nb_lignes'] = len(response['details'])
+        
+        return response
     
-    # ========== BILAN ==========
-    def get_bilan_summary(self, date_bilan=None, annee=None):
+    def get_bilan_summary(self, date_bilan=None, annee=None, include_details=True):
         """
         Résumé du bilan (Actif vs Passif)
-        Prend la situation la plus récente disponible à ou avant la date demandée.
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
         
-        # Détermination de la date de référence
         target_date = date_bilan
         if annee:
             target_date = date(annee, 12, 31)
         elif not target_date:
             target_date = date.today()
 
-        # Trouver la date la plus récente disponible dans le bilan <= target_date
         latest_date = Bilan.objects.filter(
             project_id=self.project_id,
             date__lte=target_date
@@ -464,28 +1101,52 @@ class AccountingQueryService:
                 "date": f"aucune donnée avant le {target_date.strftime('%d/%m/%Y')}"
             }
 
-        # Actif
-        actif = Bilan.objects.filter(
+        actif_qs = Bilan.objects.filter(
             project_id=self.project_id,
             date=latest_date,
             type_bilan='ACTIF'
-        ).aggregate(total=Sum('montant_ar'))
+        )
         
-        # Passif
-        passif = Bilan.objects.filter(
+        passif_qs = Bilan.objects.filter(
             project_id=self.project_id,
             date=latest_date,
             type_bilan='PASSIF'
-        ).aggregate(total=Sum('montant_ar'))
+        )
+
+        actif_total = actif_qs.aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
+        passif_total = passif_qs.aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
         
-        return {
-            "actif": float(actif['total'] or Decimal('0.00')),
-            "passif": float(passif['total'] or Decimal('0.00')),
-            "equilibre": float((actif['total'] or Decimal('0.00')) - (passif['total'] or Decimal('0.00'))),
+        response = {
+            "actif": float(actif_total),
+            "passif": float(passif_total),
+            "equilibre": float(actif_total - passif_total),
             "date": latest_date.strftime('%d/%m/%Y')
         }
+
+        if include_details:
+            response['details'] = {
+                "actif": [
+                    {
+                        "compte": d['numero_compte'],
+                        "libelle": d['libelle'],
+                        "montant": float(d['montant_ar'])
+                    } for d in actif_qs.values('numero_compte', 'libelle', 'montant_ar')
+                ],
+                "passif": [
+                    {
+                        "compte": d['numero_compte'],
+                        "libelle": d['libelle'],
+                        "montant": float(d['montant_ar'])
+                    } for d in passif_qs.values('numero_compte', 'libelle', 'montant_ar')
+                ]
+            }
+            response['nb_lignes'] = (
+                len(response['details']['actif']) +
+                len(response['details']['passif'])
+            )
+
+        return response
     
-    # ========== COMPARAISON PÉRIODES ==========
     def compare_periodes(self, annee1, annee2):
         """
         Compare deux années (CA, Charges, Résultat)
@@ -522,7 +1183,6 @@ class AccountingQueryService:
             }
         }
     
-    # ========== HELPERS ==========
     def _format_periode(self, start_date, end_date, annee):
         """Formate la période pour l'affichage"""
         if annee:
@@ -531,3 +1191,66 @@ class AccountingQueryService:
             return f"Du {start_date.strftime('%d/%m/%Y')} au {end_date.strftime('%d/%m/%Y')}"
         else:
             return "Toute la période"
+
+    def get_ventes_detaillees(self, start_date=None, end_date=None, annee=None):
+        return self.get_chiffre_affaires(
+            start_date=start_date,
+            end_date=end_date,
+            annee=annee,
+            include_details=True
+        )
+
+    def get_charges_par_compte(self, start_date=None, end_date=None, annee=None):
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+
+        filters = Q(project_id=self.project_id) & Q(numero_compte__startswith='6')
+
+        if annee:
+            filters &= Q(date__year=annee)
+        elif start_date and end_date:
+            filters &= Q(date__gte=start_date, date__lte=end_date)
+
+        queryset = CompteResultat.objects.filter(filters, nature='CHARGE')
+
+        data = queryset.values('numero_compte', 'libelle').annotate(
+            total=Sum('montant_ar')
+        ).order_by('numero_compte')
+
+        return {
+            "total_charges": float(queryset.aggregate(total=Sum('montant_ar'))['total'] or 0),
+            "details": [
+                {
+                    "compte": d['numero_compte'],
+                    "libelle": d['libelle'],
+                    "montant": float(d['total'])
+                }
+                for d in data
+            ]
+        }
+
+    def get_achats_marchandises(self, start_date=None, end_date=None, annee=None):
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+
+        filters = Q(project_id=self.project_id) & Q(numero_compte__startswith='60')
+
+        if annee:
+            filters &= Q(date__year=annee)
+        elif start_date and end_date:
+            filters &= Q(date__gte=start_date, date__lte=end_date)
+
+        queryset = CompteResultat.objects.filter(filters, nature='CHARGE')
+
+        return {
+            "total_achats": float(queryset.aggregate(total=Sum('montant_ar'))['total'] or 0),
+            "details": [
+                {
+                    "date": cr.date.strftime('%d/%m/%Y'),
+                    "compte": cr.numero_compte,
+                    "libelle": cr.libelle,
+                    "montant": float(cr.montant_ar)
+                }
+                for cr in queryset
+            ]
+        }

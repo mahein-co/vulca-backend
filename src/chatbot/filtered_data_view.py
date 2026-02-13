@@ -12,7 +12,7 @@ from chatbot.services.accounting_queries import AccountingQueryService
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def get_filtered_accounting_data(request):
     """
-    Retourne toutes les données comptables filtrées par date pour le chatbot.
+    Retourne toutes les données financières filtrées par date pour le chatbot.
     Endpoint: /api/chatbot/filtered-data/?date_start=YYYY-MM-DD&date_end=YYYY-MM-DD
     """
     project_id = getattr(request, 'project_id', None)

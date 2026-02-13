@@ -135,10 +135,10 @@ def search_similar_pages(query_embedding, project_id, top_k=5, threshold=0.9):
 #             return Response(context, status=status.HTTP_201_CREATED)
 #         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-#DETECTION DES QUESTIONS COMPTABLES
-def detect_accounting_query(user_input):
+#DETECTION DES QUESTIONS FINANCIÈRES
+def detect_financial_query(user_input):
     """
-    Détecte le type de question comptable et extrait les paramètres
+    Détecte le type de question financière et extrait les paramètres
     Retourne: {'type': str, 'params': dict} ou None
     """
     user_input_lower = user_input.lower()
@@ -427,10 +427,10 @@ def generate_response(request):
         if filtered_data:
             print(f"[DEBUG] Content of Filtered Data: {json.dumps(filtered_data, indent=2)}")
 
-        # ✅ DÉTECTION DE QUESTION COMPTABLE
-        query_info = detect_accounting_query(user_input)
+        # ✅ DÉTECTION DE QUESTION FINANCIÈRE
+        query_info = detect_financial_query(user_input)
         
-        # ✅ CONSTRUCTION DU CONTEXTE COMPTABLE
+        # ✅ CONSTRUCTION DU CONTEXTE FINANCIER
         accounting_context = ""
         
         # NOUVEAU: Utiliser les données filtrées si disponibles
@@ -501,7 +501,7 @@ def generate_response(request):
         current_system_prompt = SYSTEM_PROMPT
         
         if accounting_context:
-            full_context += "=== DONNÉES COMPTABLES DU TABLEAU DE BORD ===\n"
+            full_context += "=== DONNÉES FINANCIÈRES DU TABLEAU DE BORD ===\n"
             full_context += accounting_context
             full_context += "\n\n"
             

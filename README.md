@@ -1,4 +1,4 @@
-# vulca-backend
+# REKAPY-backend
 
 ## OCR system dependencies ( A ajouter)
 

@@ -1048,7 +1048,7 @@ def create_bilan_manual_view(request):
     try:
         FormSource.objects.create(
             project_id=project_id,
-            piece_type="Bilan",
+            piece_type="État financier",
             description=description,
             data_json=request.data,
             date=request.data.get("date")
@@ -1089,7 +1089,7 @@ def create_compte_resultat_manual_view(request):
     try:
         FormSource.objects.create(
             project_id=project_id,
-            piece_type="Compte de résultat",
+            piece_type="État financier",
             description=description,
             data_json=request.data,
             date=request.data.get("date")

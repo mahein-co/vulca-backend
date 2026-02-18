@@ -87,12 +87,6 @@ EXCLUDED_SHEET_NAMES = [
     'SOMMAIRE', 
     'METADATA', 
     'CONFIG', 
-    'PARAMETRES', 
-    'FEUIL1', 
-    'FEUIL2',
-    'FEUIL3',
-    'SHEET1',
-    'SHEET2',
-    'SHEET3'
+    'PARAMETRES'
 ]
 

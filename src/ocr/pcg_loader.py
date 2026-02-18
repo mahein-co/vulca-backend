@@ -77,7 +77,44 @@ def get_account_suggestions(description: str, top_n: int = 5):
             pcg_cache = {}
 
     if not pcg_cache:
-        return []
+        pcg_cache = {}
+
+    # 0️⃣ Mapping manuel pour les cas spécifiques (priorité absolue)
+    # On utilise une comparaison "simplifiée" pour être robuste aux espaces/caractères spéciaux
+    MANUAL_LABEL_MAPPING = {
+        "ibs": "695",
+        "ir": "695",
+        "ibsir": "695",
+        "lbsir": "695",
+        "impotsurlesbenefices": "695",
+        "impotsurlesbenefice": "695",
+        "chargedimpot": "695",
+        "etatimpotsurles": "444",
+        "autresproduitsdegestioncourante": "758",
+        "produitsdegestioncourante": "758",
+        "produitdegestioncourante": "758",
+    }
+
+    def simplify(text):
+        return re.sub(r'[^a-z0-9]', '', str(text).lower())
+
+    desc_simplified = simplify(description)
+    
+    # Vérification directe ou par mot-clé pour IBS/IR
+    target_code = None
+    if desc_simplified in MANUAL_LABEL_MAPPING:
+        target_code = MANUAL_LABEL_MAPPING[desc_simplified]
+    elif "ibsir" in desc_simplified or "lbsir" in desc_simplified or desc_simplified in ["ibs", "ir"]:
+        target_code = "695"
+
+    if target_code:
+        # Trouver le label correspondant s'il existe dans le cache, sinon utiliser une valeur par défaut
+        label = pcg_cache.get(target_code, description.capitalize())
+        return [{
+            'numero_compte': target_code,
+            'libelle': label,
+            'score': 100 # Score maximum pour le mapping manuel
+        }]
 
     # Nettoyage de la description pour la recherche
     words = re.findall(r'\w+', description.lower())

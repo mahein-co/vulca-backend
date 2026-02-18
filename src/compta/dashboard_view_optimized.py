@@ -54,6 +54,28 @@ def dashboard_indicators_view(request):
             
             return qs.aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
 
+        from compta.models import Balance
+        def get_total_balance_live(d_end):
+            # Calculer le total actif (comptes 1-5 débiteurs) à partir de la table Balance
+            # Note: Pour une balance, total actif = somme des soldes débiteurs des comptes de classe 1 à 5
+            # Mais ici le dashboard semble vouloir le total du bilan
+            # On va utiliser la même logique que BalanceModal mais filtré sur les actifs
+            qs = Balance.objects.filter(project_id=project_id, date__lte=d_end)
+            # Agrégation par compte pour avoir le dernier état à d_end
+            # En fait, la table Balance est déjà agrégée par jour.
+            # Pour avoir la situation à une date T, on prend le cumul.
+            res = qs.aggregate(
+                total_debit=Sum("total_debit"),
+                total_credit=Sum("total_credit")
+            )
+            debit = res["total_debit"] or Decimal("0.00")
+            credit = res["total_credit"] or Decimal("0.00")
+            # Pour le total bilan (actif), on prend généralement le total débit de la balance 
+            # ou on suit la logique spécifique du projet. 
+            # L'utilisateur se plaint que Dashboard != Modal.
+            # Dans BalanceModal: totalDebit = balanceData.reduce((sum, item) => sum + cleanAmount(item.debit), 0);
+            return debit
+
         try:
             # 1. CALCULS DES MASSES
             ca = get_sum_cr(["70"])
@@ -80,7 +102,13 @@ def dashboard_indicators_view(request):
             creances_clients = get_sum_bilan(["411"], type_bilan="ACTIF")
             tresorerie_actif = get_sum_bilan(["5"], type_bilan="ACTIF")
             actifs_courants = stocks + creances_clients + tresorerie_actif 
-            total_actif = get_sum_bilan([""], type_bilan="ACTIF")
+            
+            # ⚡ [LIVE FIX] : Utiliser Balance au lieu de Bilan pour le total_balance du dashboard
+            total_balance_live = get_total_balance_live(d_end)
+            if total_balance_live > 0:
+                total_actif = total_balance_live
+            else:
+                total_actif = get_sum_bilan([""], type_bilan="ACTIF")
             
             capitaux_propres = get_sum_bilan(["10", "11", "12"], type_bilan="PASSIF") + resultat_net
             dettes_fi = get_sum_bilan(["16"], type_bilan="PASSIF") + get_sum_bilan(["512"], type_bilan="PASSIF")

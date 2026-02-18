@@ -17,6 +17,16 @@ def generate_journal_on_filesource_save(sender, instance, created, **kwargs):
         print(f"[WARNING] Pas de donnees OCR pour {instance.file_name}, generation de journal ignoree.")
         return
     
+    # Éviter la double génération pour les imports Excel structurés (déjà gérés par la vue)
+    excel_types = [
+        "Journal", "Grand Livre", "Balance", "Bilan", 
+        "Compte de Résultat", "Bilan & Compte de Résultat",
+        "État financier", "Grand Journal"
+    ]
+    if any(t in str(instance.piece_type) for t in excel_types) or "Import Excel" in str(instance.piece_type):
+        print(f"[INFO] Import Excel structure detecte ({instance.piece_type}), generation automatique par signal ignoree.")
+        return
+
     try:
         from compta.views import process_journal_generation
         

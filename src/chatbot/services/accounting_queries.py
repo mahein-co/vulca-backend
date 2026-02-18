@@ -1,6 +1,7 @@
 from django.db.models import Sum, Q, F, Count, Avg, Max, Min
 from decimal import Decimal
 from datetime import datetime, date
+from django.db.models import Sum
 from compta.models import (
     Journal, GrandLivre, Balance, 
     CompteResultat, Bilan, Project
@@ -1254,3 +1255,18 @@ class AccountingQueryService:
                 for cr in queryset
             ]
         }
+
+    def get_annees_ca_superieur(self, seuil: float) -> list:
+        """Retourne les années où le CA dépasse un seuil donné"""
+    
+    
+        resultats = (
+            CompteResultat.objects
+            .filter(project_id=self.project_id, numero_compte__startswith='70', nature='PRODUIT')
+            .annotate(annee=ExtractYear('date'))
+            .values('annee')
+            .annotate(total=Sum('montant_ar'))
+            .filter(total__gt=seuil)
+            .order_by('annee')
+        )
+        return [{"annee": r['annee'], "montant": float(r['total'])} for r in resultats]

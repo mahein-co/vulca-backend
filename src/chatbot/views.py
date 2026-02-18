@@ -605,8 +605,9 @@ def generate_response(request):
         elif project_id:
             router = QueryRouter(
                 project_id=project_id,
-                openai_client=client,       
-                model=OPENAI_MODEL
+                #openai_client=client,       
+                #model=OPENAI_MODEL
+                llm_client=client,
             )
             result = router.route(user_input)
 
@@ -661,12 +662,26 @@ def generate_response(request):
             print(f"[DEBUG] Context Preview: {full_context[:200]}...")
 
         # ✅ APPEL À L'API OPENAI
+        historique = []
+        if message_history_id:
+            messages_precedents = ChatMessage.objects.filter(
+                message_history_id=message_history_id
+            ).order_by('timestamp')[:10] 
+            
+            for msg in messages_precedents:
+                historique.append({"role": "user", "content": msg.user_input})
+                historique.append({"role": "assistant", "content": msg.ai_response})
+
+        # 2. Construire la liste complète des messages
+        messages_to_send = [
+            {"role": "system", "content": current_system_prompt},
+        ] + historique + [
+            {"role": "user", "content": f"Contexte:\n{full_context}\n\nQuestion: {user_input}\n\nRéponds de manière claire et concise."}
+        ]
+
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,  # Utiliser la variable définie en haut
-            messages=[
-                {"role": "system", "content": current_system_prompt},
-                {"role": "user", "content": f"Contexte:\n{full_context}\n\nQuestion: {user_input}\n\nRéponds de manière claire et concise."}
-            ],
+            model=OPENAI_MODEL,
+            messages=messages_to_send,
             temperature=0.2
         )
 

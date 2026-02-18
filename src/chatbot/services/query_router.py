@@ -22,13 +22,14 @@ class QueryRouter:
         'marges':           [r'marge nette', r'marge opérat'],
         'rotation_stocks':  [r'rotation.*stock', r'stock.*rotation'],
         'ratios_structure': [r'leverage', r'current ratio', r'ratio.*structure'],
+        'annees_ca_seuil': [r'années?.*(dépasse|supérieur|plus grand|au-dessus).*\d+'],
     }
 
     def __init__(self, project_id: int, llm_client):
         self.project_id = project_id
         self.llm_client = llm_client
         self.accounting_service = AccountingQueryService(project_id)
-        self.sql_service = TextToSQLService(project_id)
+        self.sql_service = TextToSQLService(project_id, llm_client)
 
     def route(self, question: str) -> dict:
         """Point d'entrée principal."""
@@ -65,7 +66,13 @@ class QueryRouter:
 
     def _use_text_to_sql(self, question: str) -> dict:
         try:
-            sql = self.sql_service.generate_sql(question, self.llm_client)
+            response = llm_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0
+            )
+            sql = response.choices[0].message.content
+            #sql = self.sql_service.generate_sql(question, self.llm_client)
             results = self.sql_service.execute(sql)
             
             return {

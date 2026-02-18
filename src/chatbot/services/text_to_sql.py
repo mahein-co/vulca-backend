@@ -70,8 +70,9 @@ class TextToSQLService:
 
     def __init__(self, project_id: int):
         self.project_id = int(project_id)
+        self.llm_client = llm_client
 
-    def generate_sql(self, question: str, llm_client) -> str:
+    def generate_sql(self, question: str) -> str:
         """Demande au LLM de générer le SQL."""
         
         prompt = f"""Tu es un expert SQL et comptabilité française/malgache (PCG 2005).
@@ -93,8 +94,14 @@ Question: {question}
 Retourne UNIQUEMENT la requête SQL brute, sans markdown, sans explication."""
 
         # Adapter selon ton client LLM (OpenAI, Anthropic, etc.)
-        sql = llm_client.generate(prompt)
-        return self._clean_sql(sql)
+        #sql = llm_client.generate(prompt)
+        #return self._clean_sql(sql)
+        response = self.llm_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        return self._clean_sql(response.choices[0].message.content)
 
     def execute(self, sql: str) -> list[dict]:
         """Exécute la requête SQL de façon sécurisée."""

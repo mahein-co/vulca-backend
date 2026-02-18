@@ -147,9 +147,10 @@ class DataCleaner:
             # Détecter les colonnes de montants
             elif any(keyword in col_str for keyword in ['montant', 'amount', 'valeur', 'value', 'total']):
                 try:
+                    col_data = df[col]
                     # Nettoyer les séparateurs de milliers et convertir
-                    if df[col].dtype == 'object':
-                        df[col] = df[col].astype(str).str.replace(' ', '').str.replace(',', '.')
+                    if hasattr(col_data, 'dtype') and col_data.dtype == 'object':
+                        df[col] = col_data.astype(str).str.replace(' ', '').str.replace(',', '.')
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                     self.cleaning_stats['types_corrected'] += 1
                 except Exception:
@@ -157,17 +158,18 @@ class DataCleaner:
             
             # Pour les autres colonnes, essayer de détecter automatiquement
             else:
-                # Si la colonne contient des nombres sous forme de strings
-                if df[col].dtype == 'object':
-                    try:
+                try:
+                    # Si la colonne contient des nombres sous forme de strings
+                    col_data = df[col]
+                    if hasattr(col_data, 'dtype') and col_data.dtype == 'object':
                         # Tenter conversion numérique
-                        numeric_col = pd.to_numeric(df[col], errors='coerce')
+                        numeric_col = pd.to_numeric(col_data, errors='coerce')
                         # Si plus de 70% des valeurs sont numériques, convertir
                         if numeric_col.notna().sum() / len(df) > 0.7:
                             df[col] = numeric_col
                             self.cleaning_stats['types_corrected'] += 1
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
         
         return df
     
@@ -196,13 +198,18 @@ class DataCleaner:
                     df[col] = df[col].round(2)
             
             # Nettoyer les libellés textuels
-            elif df[col].dtype == 'object':
-                # Supprimer les espaces multiples
-                df[col] = df[col].astype(str).str.replace(r'\s+', ' ', regex=True)
-                # Supprimer les espaces en début/fin
-                df[col] = df[col].str.strip()
-                # Capitaliser la première lettre
-                df[col] = df[col].str.capitalize()
+            else:
+                try:
+                    col_data = df[col]
+                    if hasattr(col_data, 'dtype') and col_data.dtype == 'object':
+                        # Supprimer les espaces multiples
+                        df[col] = col_data.astype(str).str.replace(r'\s+', ' ', regex=True)
+                        # Supprimer les espaces en début/fin
+                        df[col] = df[col].str.strip()
+                        # Capitaliser la première lettre
+                        df[col] = df[col].str.capitalize()
+                except Exception:
+                    pass
         
         return df
     
@@ -226,10 +233,12 @@ class DataCleaner:
         # 1. Identifier d'abord les colonnes existantes bien nommées
         for col in df.columns:
             col_str = str(col).lower()
-            if any(kw in col_str for kw in ['compte', 'numéro de compte', 'code_compte', 'account']):
+            # Prioriser les colonnes qui contiennent "compte" mais PAS "libelle" ou "intitule"
+            if any(kw in col_str for kw in ['compte', 'numéro de compte', 'code_compte', 'account']) and \
+               not any(kw in col_str for kw in ['libelle', 'libellé', 'intitule', 'intitulé']) and not compte_col_found:
                 new_columns[col] = 'COMPTE'
                 compte_col_found = True
-            elif any(kw in col_str for kw in ['libelle', 'libellé', 'description', 'poste', 'rubrique']):
+            elif any(kw in col_str for kw in ['libelle', 'libellé', 'description', 'poste', 'rubrique', 'intitule', 'intitulé']) and not label_col_found:
                 new_columns[col] = 'DESCRIPTION'
                 label_col_found = True
         
@@ -333,8 +342,9 @@ class DataCleaner:
             val_is_significant = (df[col].notna() & (df[col] != 0))
             
             # Gérer les colonnes object qui pourraient contenir "0" ou "0.00"
-            if df[col].dtype == 'object':
-                val_as_str = df[col].astype(str).str.strip().str.replace(',', '.')
+            col_data = df[col]
+            if hasattr(col_data, 'dtype') and col_data.dtype == 'object':
+                val_as_str = col_data.astype(str).str.strip().str.replace(',', '.')
                 val_is_zero_str = val_as_str.isin(['0', '0.0', '0.00', 'nan', 'null', 'None', ''])
                 val_is_significant &= (~val_is_zero_str)
 
@@ -465,15 +475,35 @@ class DataCleaner:
         
         # Enrichir chaque ligne
         enriched_count = 0
+        print(f"    [DEBUG] Enrichissement PCG sur {len(df)} lignes... (colonne: {compte_col})")
         for idx, row in df.iterrows():
             # Si le compte est déjà renseigné et valide, on le garde
-            existing_compte = row.get(compte_col)
-            if existing_compte and str(existing_compte).strip() and str(existing_compte) != 'nan':
-                continue
+            existing_compte_data = row.get(compte_col)
+            
+            # Gérer le cas où existing_compte_data est une Series (doublons de colonnes)
+            if hasattr(existing_compte_data, 'any'):
+                # C'est une Series, prendre le premier élément
+                existing_compte = existing_compte_data.iloc[0] if not existing_compte_data.empty else None
+            else:
+                existing_compte = existing_compte_data
+                
+            # Vérification robuste (évite ValueError si existing_compte est toujours étrange)
+            try:
+                if pd.notna(existing_compte) and str(existing_compte).strip() not in ['', 'nan', 'None']:
+                    continue
+            except Exception:
+                # Si l'erreur d'ambiguïté persiste, on essaie de forcer en string
+                if str(existing_compte).strip() not in ['', 'nan', 'None']:
+                    continue
             
             # Sinon, chercher dans le PCG
-            description = str(row.get(desc_col, '')).strip()
-            if not description or description == 'nan':
+            description_data = row.get(desc_col, '')
+            if hasattr(description_data, 'any'):
+                description = str(description_data.iloc[0]).strip() if not description_data.empty else ''
+            else:
+                description = str(description_data).strip()
+                
+            if not description or description == 'nan' or description == 'None':
                 continue
             
             # Obtenir les suggestions du PCG
@@ -501,20 +531,28 @@ class DataCleaner:
         
         initial_rows = len(df)
         metadata_keywords = [
-            'actif', 'passif', 'bilan', 'tableau de flux', 'flux de trésorerie',
+            'actif', 'passif', 'bilan au', 'tableau de flux', 'flux de trésorerie',
             'etat des capitaux', 'capitaux propres', 'tableau des amortissements',
             'etats financiers', 'états financiers', 'compte de résultat', 'cdr nat',
-            'nif:', 'nif :', 'stat:', 'description', 'compte',
+            'nif:', 'nif :', 'stat:', 'stat :', 'adresse :',
         ]
         
         rows_to_drop = []
         for idx, row in df.iterrows():
             row_text = ' '.join(str(val).lower() for val in row.values if pd.notna(val))
+            
+            # Compter les valeurs numériques dans la ligne
+            numeric_count = sum(1 for val in row.values if pd.notna(val) and str(val).replace(',', '.').replace('.', '').replace('-', '').isdigit())
+            
+            # Si la ligne contient des montants, ce n'est PAS une métadonnée
+            if numeric_count >= 2:  # Au moins 2 valeurs numériques (ex: compte + montant)
+                continue
+            
+            # Vérifier les mots-clés de métadonnées
             is_metadata = any(keyword in row_text for keyword in metadata_keywords)
             
             # Vérifier si ligne avec uniquement du texte (pas de montants)
             if not is_metadata:
-                numeric_count = sum(1 for val in row.values if pd.notna(val) and str(val).replace(',', '.').replace('.', '').replace('-', '').isdigit())
                 text_count = sum(1 for val in row.values if pd.notna(val) and str(val).strip() and not str(val).replace(',', '.').replace('.', '').replace('-', '').isdigit())
                 
                 if text_count > 0 and numeric_count == 0 and text_count <= 2:

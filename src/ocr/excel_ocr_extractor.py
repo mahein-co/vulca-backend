@@ -8,8 +8,10 @@ import base64
 import json
 import re
 import pandas as pd
-import matplotlib.pyplot as plt
+import openpyxl
 import matplotlib
+import matplotlib.pyplot as plt # type: ignore (non-interactif)
+# suppression de l'import direct pour utiliser l'API objet
 from PIL import Image
 from typing import Dict, List, Tuple, Optional
 from io import BytesIO
@@ -27,9 +29,12 @@ from ocr.data_cleaner import clean_dataframe
 from ocr.constants import EXCLUDED_SHEET_NAMES
 
 
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+
 def convert_excel_sheet_to_image(df: pd.DataFrame, sheet_name: str) -> Image.Image:
     """
-    Convertit un DataFrame (feuille Excel) en image PNG.
+    Convertit un DataFrame (feuille Excel) en image PNG de manière thread-safe.
     
     Args:
         df: DataFrame pandas représentant la feuille Excel
@@ -39,7 +44,7 @@ def convert_excel_sheet_to_image(df: pd.DataFrame, sheet_name: str) -> Image.Ima
         PIL.Image: Image de la feuille Excel
     """
     # Limiter le nombre de lignes pour éviter des images trop grandes
-    max_rows = 50
+    max_rows = 500
     if len(df) > max_rows:
         df_display = df.head(max_rows)
         truncated = True
@@ -54,8 +59,12 @@ def convert_excel_sheet_to_image(df: pd.DataFrame, sheet_name: str) -> Image.Ima
     fig_width = min(20, max(12, num_cols * 2))
     fig_height = min(30, max(8, num_rows * 0.5 + 2))
     
-    # Créer la figure
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    # --- UTILISATION DE L'API OBJET (THREAD-SAFE) ---
+    # On évite plt.subplots() car il utilise un état global non thread-safe
+    fig = Figure(figsize=(fig_width, fig_height))
+    canvas = FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
+    
     ax.axis('tight')
     ax.axis('off')
     
@@ -66,7 +75,6 @@ def convert_excel_sheet_to_image(df: pd.DataFrame, sheet_name: str) -> Image.Ima
     ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
     
     # Créer le tableau
-    # Convertir les valeurs en strings et gérer les NaN
     cell_text = []
     for _, row in df_display.iterrows():
         row_text = []
@@ -79,12 +87,11 @@ def convert_excel_sheet_to_image(df: pd.DataFrame, sheet_name: str) -> Image.Ima
                 row_text.append(str(val))
         cell_text.append(row_text)
     
-    # Calculer les largeurs de colonnes (donner plus de place à la première colonne de libellés)
-    # Si on détecte bcp de colonnes, on réduit les largeurs
+    # Largeurs de colonnes
     if num_cols > 5:
         col_widths = [0.12] * num_cols
-        col_widths[0] = 0.20 # Description plus large
-        if num_cols > 1: col_widths[1] = 0.10 # Code compte souvent après le libellé ou avant
+        col_widths[0] = 0.20
+        if num_cols > 1: col_widths[1] = 0.10
     else:
         col_widths = [0.25] + [0.12] * (num_cols - 1)
     
@@ -98,26 +105,34 @@ def convert_excel_sheet_to_image(df: pd.DataFrame, sheet_name: str) -> Image.Ima
         colWidths=col_widths
     )
     
-    # Styliser le tableau
     table.auto_set_font_size(False)
     table.set_fontsize(9)
     table.scale(1, 2)
     
-    # Colorer l'en-tête
     for i in range(num_cols):
         cell = table[(0, i)]
         cell.set_facecolor('#4472C4')
         cell.set_text_props(weight='bold', color='white')
     
-    # Sauvegarder en mémoire
+    # Sauvegarder en mémoire via le canvas directement
     buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
-    plt.close(fig)
-    
-    buf.seek(0)
-    image = Image.open(buf)
-    
-    return image
+    try:
+        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        buf.seek(0)
+        
+        # Vérification critique : le buffer est-il valide ?
+        if buf.getbuffer().nbytes == 0:
+            raise ValueError("Le buffer de l'image est vide après savefig.")
+            
+        image = Image.open(buf)
+        # Forcer le chargement pour vérifier que l'image est valide immédiatement
+        image.load()
+        return image
+    except Exception as e:
+        print(f"[ERROR] Erreur lors de la génération de l'image pour {sheet_name}: {e}")
+        # Retenter une fois avec une taille plus petite si c'est un problème de mémoire ? 
+        # Pour l'instant on lève l'exception pour avoir le log exact.
+        raise e
 
 
 def encode_image_to_base64(image: Image.Image) -> str:
@@ -141,7 +156,8 @@ def extract_sheet_data_with_vision(
     image: Image.Image, 
     client, 
     model: str,
-    sheet_name: str
+    sheet_name: str,
+    df_text: str = ""
 ) -> Dict:
     """
     Extrait les données d'une feuille Excel via OpenAI Vision API.
@@ -170,48 +186,59 @@ def extract_sheet_data_with_vision(
         name_hint = "Cette feuille est probablement un COMPTE DE RÉSULTAT (CDR NAT). Cherche bien les charges et produits."
 
     prompt = f"""Analyse cette feuille Excel nommée "{sheet_name}" et extrait TOUTES les données dans un format structuré.
+
 {name_hint}
 
-INSTRUCTIONS IMPORTANTES:
+INSTRUCTIONS IMPORTANTES POUR L'EXTRACTION:
+1. **DÉTECTION DES COMPTES** :
+   - Cherche les codes comptables (ex: 101, 201, 401, 601, 701...).
+   - **ATTENTION** : Ne confond pas les indices de lignes (ex: "1 -", "2 -", "3 -", "1.", "2.") avec des numéros de compte. Si un chiffre est suivi d'un tiret ou semble être un numéro de chapitre (1, 2, 3), il appartient au LIBELLÉ, pas à la colonne de compte.
+   - Si une ligne n'a pas de numéro de compte explicite, laisse `null`.
 
-1. **MÉTADONNÉES D'EN-TÊTE** (si présentes en haut du document, avant le tableau principal):
-   - Nom de l'entreprise (peut être en gras ou en haut)
-   - NIF (Numéro d'Identification Fiscale) - cherche "NIF:" ou "NIF :"
-   - STAT (Numéro statistique) - cherche "STAT:" ou "STAT :"
-   - Adresse (peut être sur une ou plusieurs lignes)
-   
-   Si ces informations ne sont PAS présentes, laisse les champs vides ou null.
+2. **DÉTECTION DES LIBELLÉS** :
+   - Capture le texte exact du poste ou libellé (ex: "Capital social", "ACHATS CONSOMMES", etc.).
+   - Inclut les préfixes d'indices dans le libellé (ex: "1 - PRODUCTION DE L'EXERCICE").
 
-2. Identifie les colonnes (en-têtes) du tableau. PORTE UNE ATTENTION PARTICULIÈRE à :
-   - La colonne des LIBELLÉS (Postes, Rubriques)
-   - La colonne des NUMÉROS DE COMPTE (Codes comptables comme 101, 201, 601, etc.)
-3. Extrait TOUTES les lignes de données visibles. NE MANQUE PAS la colonne descriptive et les codes de compte.
-4. Préserve les valeurs exactes (nombres, textes, dates).
-5. Si une cellule est vide, utilise null.
-6. Identifie si possible le type de données (Bilan, Compte de Résultat, ou Autre).
+3. **JOURNAUX ET PIÈCES (IMPORTANT)** :
+   - Si tu vois des colonnes "N° Pièce", "Pièce", "Réf", "Date", "Débit", "Crédit", c'est un JOURNAL ou GRAND LIVRE.
+   - **EXTRAIS SYSTÉMATIQUEMENT** le numéro de pièce (ex: PJ001, PI001) et la date exacte pour chaque ligne.
+   - Si une ligne n'a pas de numéro de pièce mais que la ligne précédente en a un pour la même opération, propage-le.
 
+4. **DÉTECTION DES MONTANTS (CRUCIAL)** :
+   - Les montants sont souvent à droite. Cherche les colonnes "BRUT", "AMORTISSEMENTS", "NET", "SOLDE", "VALEUR", "DÉBIT", "CRÉDIT".
+   - **EXTRAIS TOUTES LES COLONNES NUMÉRIQUES**. Si tu vois des chiffres pour chaque ligne, crée une colonne correspondante.
+   - Si une colonne de montants correspond à une année, utilise l'année comme titre (ex: "2024").
+
+5. **AUCUN OUBLI** :
+   - Extraits TOUTES les lignes, y compris les lignes de totaux et les lignes sans numéro de compte.
+   - Si une ligne contient une description et un montant, elle DOIT être extraite.
+
+VOICI LES DONNÉES DE LA FEUILLE (format CSV brut pour référence si l'image est floue):
+---
+{df_text}
+---
+
+6. **FORMAT DE RÉPONSE** :
 Retourne UNIQUEMENT un JSON valide avec cette structure:
 {{
   "company_metadata": {{
     "nom_entreprise": "...",
-    "nif": "...",
-    "stat": "...",
-    "adresse": "..."
+    "nif": "...", "stat": "...", "adresse": "...", "periode": "..."
   }},
-  "columns": ["Colonne1", "Colonne2", ...],
+  "columns": ["Date", "N° Pièce", "Libellé", "Compte", "Débit", "Crédit", ...],
   "rows": [
-    ["valeur1", "valeur2", ...],
-    ["valeur1", "valeur2", ...],
+    ["2026-01-01", "PJ001", "Banque", "512", "5000000", "0"],
+    ["2026-01-01", "PJ001", "Capital", "101", "0", "5000000"],
     ...
   ],
-  "detected_type": "BILAN" ou "COMPTE_RESULTAT" ou "UNKNOWN",
+  "detected_type": "BILAN", "COMPTE_RESULTAT", "JOURNAL" ou "UNKNOWN",
   "confidence": 0.0 à 1.0
 }}
 
-RÈGLES DE DÉTECTION:
-- BILAN: Contient des comptes classe 1-5, mots-clés: Actif, Passif, Patrimoine
-- COMPTE_RESULTAT: Contient des comptes classe 6-7, mots-clés: Charges, Produits, Résultat
-- UNKNOWN: Si incertain
+RÈGLES DE DÉTECTION DU TYPE:
+- BILAN: Actif/Passif, Immobilisations (Classe 1-5).
+- COMPTE_RESULTAT: Charges/Produits, Chiffre d'Affaires (Classe 6-7).
+- JOURNAL: Colonnes Date, Pièce, Libellé, Débit, Crédit.
 
 NE RETOURNE QUE LE JSON, AUCUN TEXTE SUPPLÉMENTAIRE."""
 
@@ -397,11 +424,17 @@ def parse_vision_response_to_dataframe(vision_data: Dict) -> pd.DataFrame:
     df = df.replace('null', pd.NA)
     df = df.replace('', pd.NA)
     
-    # Tenter de convertir les colonnes numériques
+    # Tenter de convertir les colonnes numériques ou dates
     for col in df.columns:
+        col_lower = str(col).lower()
         try:
-            # Essayer de convertir en numérique
-            df[col] = pd.to_numeric(df[col])
+            # Si le nom de la colonne suggère une date, tenter le parsing date d'abord
+            if 'date' in col_lower or 'period' in col_lower or 'période' in col_lower:
+                df[col] = pd.to_datetime(df[col], errors='ignore', dayfirst=True)
+            
+            # Sinon essayer numérique
+            if not pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = pd.to_numeric(df[col], errors='ignore')
         except Exception:
             pass
     
@@ -452,6 +485,14 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
     
     excel_file = BytesIO(file_content)
     
+    # Charger le classeur avec openpyxl pour vérifier la visibilité
+    try:
+        wb = openpyxl.load_workbook(BytesIO(file_content), read_only=True)
+        hidden_sheets = [s.title for s in wb.worksheets if s.sheet_state != 'visible']
+    except Exception as e:
+        print(f"   [WARNING] Impossible de lire la visibilite des feuilles avec openpyxl: {e}")
+        hidden_sheets = []
+
     # Charger toutes les feuilles avec pandas (pour obtenir les noms)
     xl_file = pd.ExcelFile(excel_file)
     sheet_names = xl_file.sheet_names
@@ -464,14 +505,18 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
     }
     
     for sheet_name in sheet_names:
-        # Sauter les feuilles exclues
+        # Sauter les feuilles exclues ou masquées
         if sheet_name in EXCLUDED_SHEET_NAMES or sheet_name.upper() in EXCLUDED_SHEET_NAMES:
             print(f"   [INFO] Feuille '{sheet_name}' ignoree (exclue)")
             continue
+            
+        if sheet_name in hidden_sheets:
+            print(f"   [INFO] Feuille '{sheet_name}' ignoree (masquee)")
+            continue
 
-        # Limite de sécurité pour éviter les timeouts extrêmes
-        if len(result['sheets']) >= 5:
-            print(f"   [WARNING] Limite de 5 feuilles atteinte. Saut des feuilles restantes pour eviter le timeout.")
+        # Limite de sécurité augmentée pour permettre l'accès aux feuilles cachées/lointaines
+        if len(result['sheets']) >= 20:
+            print(f"   [WARNING] Limite de 20 feuilles atteinte. Saut des feuilles restantes pour eviter le timeout.")
             break
 
         print(f"\n[INFO] Traitement feuille: {sheet_name}")
@@ -492,9 +537,12 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
         # Convertir en image
         image = convert_excel_sheet_to_image(df_original, sheet_name)
         
-        print(f"   [INFO] Extraction OCR avec OpenAI Vision...")
+        print(f"   [INFO] Extraction OCR avec OpenAI Vision (avec fallback texte)...")
+        # Préparer une version texte pour aider l'IA (fallback si l'image est refusée)
+        df_text = df_original.to_csv(index=False, sep=';')
+        
         # Extraire avec Vision API
-        vision_data = extract_sheet_data_with_vision(image, client, model, sheet_name)
+        vision_data = extract_sheet_data_with_vision(image, client, model, sheet_name, df_text=df_text)
         
         # Convertir en DataFrame
         df_extracted = parse_vision_response_to_dataframe(vision_data)
@@ -513,7 +561,7 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
         df_extracted = clean_dataframe(
             df_extracted, 
             context='financial',
-            remove_totals=True,  # Supprimer les totaux suite à la demande utilisateur
+            remove_totals=False,  # RE-ACTIVER LES TOTAUX SUITE A DEMANDE UTILISATEUR
             sheet_name=sheet_name
         )
         
@@ -546,12 +594,22 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
         print(f"   [INFO] Structuration financiere...")
         try:
             structurer = FinancialDataStructurer()
-            structured_data = structurer.process_dataframe(df_extracted, columns_mapping, company_metadata)
+            structured_data = structurer.process_dataframe(
+                df_extracted, 
+                columns_mapping, 
+                company_metadata,
+                pre_detected_type=detected_type
+            )
             print(f"   [SUCCESS] Structuration reussie")
         except Exception as e:
             print(f"   [WARNING] Erreur structuration: {e}")
             structured_data = None
         
+        # FILTRAGE FINAL: Seuls les types financiers pertinents sont conservés
+        if detected_type not in ['BILAN', 'COMPTE_RESULTAT', 'JOURNAL']:
+            print(f"   [INFO] Feuille '{sheet_name}' ignoree car type detecte ({detected_type}) non financier")
+            continue
+
         sheet_info = {
             'sheet_name': sheet_name,
             'detected_type': detected_type,

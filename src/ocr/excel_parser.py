@@ -67,6 +67,14 @@ class ExcelParser:
             
         excel_file = BytesIO(file_content)
         
+        # Charger le classeur avec openpyxl pour vérifier la visibilité
+        try:
+            wb = openpyxl.load_workbook(BytesIO(file_content), read_only=True)
+            hidden_sheets = [s.title for s in wb.worksheets if s.sheet_state != 'visible']
+        except Exception as e:
+            print(f"   [WARNING] Impossible de lire la visibilite des feuilles avec openpyxl: {e}")
+            hidden_sheets = []
+
         # Charger toutes les feuilles
         xl_file = pd.ExcelFile(excel_file)
         sheet_names = xl_file.sheet_names
@@ -79,9 +87,13 @@ class ExcelParser:
         
         
         for sheet_name in sheet_names:
-            # Sauter les feuilles exclues
+            # Sauter les feuilles exclues ou masquées
             if sheet_name in EXCLUDED_SHEET_NAMES or sheet_name.upper() in EXCLUDED_SHEET_NAMES:
                 print(f"    Feuille '{sheet_name}' ignore (exclue)")
+                continue
+            
+            if sheet_name in hidden_sheets:
+                print(f"    Feuille '{sheet_name}' ignore (masquee)")
                 continue
 
             try:
@@ -135,7 +147,11 @@ class ExcelParser:
                 # Structuration financière automatique
                 print(f"   [INFO] Structuration financiere...")
                 try:
-                    structured_data = self.structurer.process_dataframe(df, columns_mapping)
+                    structured_data = self.structurer.process_dataframe(
+                        df, 
+                        columns_mapping,
+                        pre_detected_type=sheet_type
+                    )
                     print(f"    Structuration russie")
                 except Exception as e:
                     print(f"   [WARNING] Erreur structuration: {e}")
@@ -153,6 +169,11 @@ class ExcelParser:
                     'structured_data': structured_data  # Données structurées
                 }
                 
+                # FILTRAGE FINAL: Seuls les types financiers pertinents sont conservés
+                if sheet_type not in ['BILAN', 'COMPTE_RESULTAT', 'JOURNAL']:
+                    print(f"    Feuille '{sheet_name}' ignoree car type detecte ({sheet_type}) non financier")
+                    continue
+
                 result['sheets'].append(sheet_info)
                 result['total_rows'] += len(df)
                 
@@ -216,7 +237,7 @@ class ExcelParser:
         Combine l'analyse visuelle avec l'analyse des données.
         
         Returns:
-            tuple: (type, confidence) où type est 'BILAN', 'COMPTE_RESULTAT' ou 'UNKNOWN'
+            tuple: (type, confidence) où type est 'BILAN', 'COMPTE_RESULTAT', 'JOURNAL' ou 'UNKNOWN'
         """
         # Méthode 1: Analyse heuristique des numéros de compte
         heuristic_type, heuristic_confidence = self._detect_type_by_accounts(df)
@@ -284,6 +305,10 @@ class ExcelParser:
         # 1. Vérification de correspondance exacte (Haute priorité)
         if any(kw in sheet_name_lower for kw in ['actif', 'passif', 'bilan']):
             return 'BILAN', 0.95
+        if any(kw in sheet_name_lower for kw in ['journal', 'ecriture', 'écriture']):
+            return 'JOURNAL', 0.95
+        if 'grand livre' in sheet_name_lower:
+            return 'JOURNAL', 0.98  # Type Journal détecté via mot-clé spécifique
         if any(kw in sheet_name_lower for kw in ['cdr', 'resultat', 'résultat', 'produit', 'charge']):
             # Vérifier spécifiquement pour CDR NAT
             if 'cdr' in sheet_name_lower or 'nat' in sheet_name_lower:
@@ -305,18 +330,29 @@ class ExcelParser:
             'chiffre d\'affaires', 'ca', 'ebitda', 'cdr', 'cdr nat', 'nat'
         ]
         
+        journal_keywords = [
+            'journal', 'grand livre', 'débit', 'crédit', 'pièce', 'libellé',
+            'general ledger', 'journal entry', 'debit', 'credit', 'voucher'
+        ]
+        
         bilan_score = sum(1 for kw in bilan_keywords if kw in text_lower)
         cr_score = sum(1 for kw in cr_keywords if kw in text_lower)
+        journal_score = sum(1 for kw in journal_keywords if kw in text_lower)
         
-        total_score = bilan_score + cr_score
+        total_score = bilan_score + cr_score + journal_score
         
         if total_score == 0:
             return 'UNKNOWN', 0.0
         
-        if bilan_score > cr_score:
-            return 'BILAN', min(0.9, bilan_score / (total_score + 2))
-        elif cr_score > bilan_score:
-            return 'COMPTE_RESULTAT', min(0.9, cr_score / (total_score + 2))
+        scores = {
+            'BILAN': bilan_score,
+            'COMPTE_RESULTAT': cr_score,
+            'JOURNAL': journal_score
+        }
+        
+        best_type = max(scores, key=scores.get)
+        if scores[best_type] > 0:
+            return best_type, min(0.9, scores[best_type] / (total_score + 2))
         else:
             return 'UNKNOWN', 0.5
     
@@ -344,13 +380,20 @@ class ExcelParser:
 RÈGLES:
 - BILAN: Contient Actif/Passif, comptes classe 1-5, patrimoine de l'entreprise
 - COMPTE DE RÉSULTAT: Contient Charges/Produits, comptes classe 6-7, résultat de l'exercice
+- JOURNAL: Contient des écritures avec Débit/Crédit, dates, pièces, comptes mixtes
 
 Réponds UNIQUEMENT avec un JSON:
 {
-    "type": "BILAN" ou "COMPTE_RESULTAT" ou "UNKNOWN",
+    "type": "BILAN" ou "COMPTE_RESULTAT" ou "JOURNAL" ou "UNKNOWN",
     "confidence": 0.0 à 1.0,
     "reasoning": "explication brève"
-}"""
+}
+
+RÈGLES:
+- BILAN: Actif/Passif, comptes classe 1-5
+- COMPTE DE RÉSULTAT: Charges/Produits, comptes classe 6-7
+- JOURNAL / GRAND LIVRE: Liste détaillée d'écritures avec Date, Pièce, Libellé, Compte, Débit, Crédit
+"""
                     },
                     {
                         "role": "user",
@@ -403,7 +446,8 @@ Réponds UNIQUEMENT avec un JSON:
             'montant': ['montant', 'amount', 'valeur', 'value', 'solde', 'balance'],
             'debit': ['debit', 'débit', 'dr'],
             'credit': ['credit', 'crédit', 'cr'],
-            'date': ['date', 'période', 'period']
+            'date': ['date', 'période', 'period', 'le'],
+            'numero_piece': ['piece', 'pièce', 'piéce', 'n_piece', 'n°_piece', 'numero_piece', 'réf', 'ref', 'n°']
         }
         
         for col in df.columns:
@@ -611,8 +655,11 @@ Réponds UNIQUEMENT avec un JSON:
 
             if 'date' in columns_mapping and columns_mapping['date'] in df.columns:
                 normalized['date'] = pd.to_datetime(
-                    df[columns_mapping['date']], errors='coerce'
+                    df[columns_mapping['date']], errors='coerce', dayfirst=True
                 )
+
+            if 'numero_piece' in columns_mapping and columns_mapping['numero_piece'] in df.columns:
+                normalized['numero_piece'] = df[columns_mapping['numero_piece']].astype(str).str.strip()
 
             # Ajouter des champs spécifiques selon le type
             if sheet_type == 'BILAN':
@@ -681,11 +728,19 @@ Réponds UNIQUEMENT avec un JSON:
 
         first_digit = compte[0]
         
-        # Classe 1-3 = PASSIF, Classe 4-5 = ACTIF (simplifié)
-        if first_digit in '123':
+        # Classe 1 = PASSIF, Classe 2-3 = ACTIF, Classe 4-5 = ACTIF (par défaut)
+        if first_digit == '1':
             return 'PASSIF'
-        else:
+        elif first_digit in '235':
             return 'ACTIF'
+        elif first_digit == '4':
+            # Classe 4 peut être les deux, par défaut ACTIF ou PASSIF ?
+            # On suit la logique majoritaire : 40, 42, 43, 44 (Passif) vs 41 (Actif)
+            # Pour la simplification ici, on reste simple ou on vérifie le second chiffre.
+            if compte.startswith(('40', '42', '43', '44', '45')):
+                return 'PASSIF'
+            return 'ACTIF'
+        return 'ACTIF'
     
     def _determine_bilan_category(self, compte) -> str:
         """Détermine la catégorie du bilan"""

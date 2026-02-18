@@ -926,6 +926,30 @@ class CompteResultatListCreateView(generics.ListCreateAPIView):
         return queryset
 
 
+class BilanDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = BilanSerializer
+    permission_classes = [IsAuthenticated, HasProjectAccess]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        project_id = getattr(self.request, 'project_id', None)
+        if not project_id:
+            return Bilan.objects.none()
+        return Bilan.objects.filter(project_id=project_id)
+
+
+class CompteResultatDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = CompteResultatSerializer
+    permission_classes = [IsAuthenticated, HasProjectAccess]
+    lookup_field = 'id'
+
+    def get_queryset(self):
+        project_id = getattr(self.request, 'project_id', None)
+        if not project_id:
+            return CompteResultat.objects.none()
+        return CompteResultat.objects.filter(project_id=project_id)
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def ai_dashboard_analysis_view(request):
@@ -1048,7 +1072,7 @@ def create_bilan_manual_view(request):
     try:
         FormSource.objects.create(
             project_id=project_id,
-            piece_type="Bilan",
+            piece_type="État financier",
             description=description,
             data_json=request.data,
             date=request.data.get("date")
@@ -1089,7 +1113,7 @@ def create_compte_resultat_manual_view(request):
     try:
         FormSource.objects.create(
             project_id=project_id,
-            piece_type="Compte de résultat",
+            piece_type="État financier",
             description=description,
             data_json=request.data,
             date=request.data.get("date")

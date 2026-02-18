@@ -16,7 +16,7 @@ from rest_framework import status
 from ocr.models import FileSource, FormSource
 from compta.models import Bilan, CompteResultat, Project
 from ocr.serializers import FileSourceSerializer, FormSourceSerializer
-from ocr.utils import detect_file_type, clean_ai_json, generate_description, generate_excel_description
+from ocr.utils import detect_file_type, clean_ai_json, generate_description
 from ocr.openai_vision_ocr import extract_content_with_vision
 from ocr.constants import EXTRACTION_FIELDS_PROMPT
 from compta.permissions import HasProjectAccess
@@ -763,6 +763,7 @@ def excel_save_data_view(request):
     try:
         created_bilans = 0
         created_cr = 0
+        created_journals = 0  # NOUVEAU: Compteur pour les écritures Journal
         errors = []
         file_source = None
         
@@ -821,16 +822,16 @@ def excel_save_data_view(request):
                     "company_metadata": company_metadata
                 }
 
-                # Générer une description fluide via IA avec le prompt spécialisé Excel
+                # Générer une description fluide via IA (même logique que import classique)
                 try:
-                    description = generate_excel_description(
+                    description = generate_description(
                         data=summary_data,
                         json=json,
                         client=client,
                         model=settings.OPENAI_MODEL
                     )
                 except Exception as e:
-                    print(f"[WARNING] Erreur generation description Excel GPT: {e}")
+                    print(f"[WARNING] Erreur generation description GPT: {e}")
                     description_parts = [f"{s.get('sheet_name')} ({s.get('detected_type')}): {len(s.get('rows', []))} lignes" for s in sheets_data]
                     description = f"Import Excel: {file.name}\n" + "\n".join(description_parts)
                 
@@ -848,12 +849,27 @@ def excel_save_data_view(request):
                 if not first_date:
                     first_date = date.today()
                 
+                # Déterminer le piece_type basé sur les types détectés et noms de feuilles
+                detected_types = set(s.get('detected_type') for s in sheets_data)
+                sheet_names_upper = [s.get('sheet_name', '').upper() for s in sheets_data]
+                
+                if 'JOURNAL' in detected_types:
+                    piece_type = "Grand Journal"
+                else:
+                    piece_type = "État financier"
+                
+                # Fallback pour la référence si vide
+                ref_file = company_metadata.get('numero_facture') or company_metadata.get('reference')
+                if not ref_file:
+                    ref_file = file.name
+                
                 # Créer le FileSource
                 file_source = FileSource.objects.create(
                     project=project,
                     file=file,
                     file_name=file.name,
-                    piece_type="Bilan/Compte de Résultat",
+                    ref_file=ref_file,
+                    piece_type=piece_type,  # Type dynamique
                     description=description,
                     ocr_data={
                         "sheets": sheets_data,
@@ -880,27 +896,125 @@ def excel_save_data_view(request):
             rows = sheet.get('rows', [])
             
             print(f"[INFO] Traitement de la feuille: {sheet_name} ({sheet_type})")
+            print(f"   [DEBUG] Nombre de rows: {len(rows)}")
+            if len(rows) > 0:
+                print(f"   [DEBUG] Premier row: {rows[0]}")
+                print(f"   [DEBUG] Clés disponibles: {list(rows[0].keys())}")
+            
+            if 'JOURNAL' in detected_types and sheet_type != 'JOURNAL':
+                print(f"   [SKIP] Ignoré car un Journal est présent dans le fichier.")
+                continue
             
             if sheet_type == 'BILAN':
                 for row in rows:
                     try:
-                        numero_compte = row.get('numero_compte', '').strip()
-                        montant_ar = float(row.get('montant_ar', 0))
+                        # Extraction du numéro de compte (DOIT ÊTRE FAIT EN PREMIER)
+                        numero_compte = str(row.get('numero_compte') or '').strip()
+                        
+                        # Nettoyage et conversion du montant
+                        raw_montant = row.get('montant_ar', 0)
+                        if isinstance(raw_montant, str):
+                            raw_montant = raw_montant.replace(',', '.').replace(' ', '')
+                        try:
+                            montant_ar = float(raw_montant)
+                        except (ValueError, TypeError):
+                            montant_ar = 0.0
+                            
                         if not numero_compte or montant_ar == 0: continue
                         
                         first_digit = numero_compte[0] if numero_compte else '1'
-                        if first_digit in '123':
-                            type_bilan, categorie = 'PASSIF', ('CAPITAUX_PROPRES' if first_digit == '1' else 'PASSIFS_COURANTS')
+                        prefix_2 = numero_compte[:2] if len(numero_compte) >= 2 else first_digit
+                        
+                        # LOGIQUE DE CLASSIFICATION PCG (CONFORME UTILISATEUR)
+                        if first_digit == '1':
+                            type_bilan = 'PASSIF'
+                            # 15, 16, 17 -> Passifs non courants
+                            if prefix_2 in ['15', '16', '17']:
+                                categorie = 'PASSIFS_NON_COURANTS'
+                            else:
+                                categorie = 'CAPITAUX_PROPRES'
+                                
+                        elif first_digit == '2':
+                            type_bilan = 'ACTIF'
+                            categorie = 'ACTIF_NON_COURANTS'
+                            
+                        elif first_digit == '3':
+                            type_bilan = 'ACTIF'
+                            categorie = 'ACTIF_COURANTS'
+                        
+                        elif first_digit == '4':
+                            # Classe 4 mixte
+                            if prefix_2 in ['40', '42', '43', '44', '45', '47', '49']:
+                                type_bilan = 'PASSIF'
+                                categorie = 'PASSIFS_COURANTS'
+                                # Exception 4456 (TVA Déductible) -> Actif ? 
+                                # L'utilisateur a spécifié 44 -> Passif. 4456 -> Actif.
+                                if numero_compte.startswith('4456') or numero_compte.startswith('46') or numero_compte.startswith('48'):
+                                     type_bilan = 'ACTIF'
+                                     categorie = 'ACTIF_COURANTS'
+                            elif prefix_2 == '41':
+                                type_bilan = 'ACTIF'
+                                categorie = 'ACTIF_COURANTS'
+                            elif prefix_2 == '46':
+                                type_bilan = 'ACTIF'
+                                categorie = 'ACTIF_COURANTS'
+                            elif prefix_2 == '48':
+                                type_bilan = 'ACTIF' 
+                                categorie = 'ACTIF_COURANTS'
+                            else:
+                                # Défaut passif pour prudence ou Actif ? 41=Client=Actif. 40=Fourn=Passif.
+                                type_bilan = 'PASSIF'
+                                categorie = 'PASSIFS_COURANTS'
+
+                        elif first_digit == '5':
+                            # 519 = Découvert = Passif
+                            if numero_compte.startswith('519'):
+                                type_bilan = 'PASSIF'
+                                categorie = 'PASSIFS_COURANTS'
+                            else:
+                                type_bilan = 'ACTIF'
+                                categorie = 'ACTIF_COURANTS'
                         else:
-                            type_bilan, categorie = 'ACTIF', ('ACTIF_NON_COURANTS' if first_digit == '2' else 'ACTIF_COURANTS')
+                            # Par défaut (ex: erreur de classe)
+                            type_bilan = 'PASSIF'
+                            categorie = 'PASSIFS_COURANTS'
                         
+                        
+                        # Extraction et validation de la date avec gestion d'erreurs robuste
                         date_val = row.get('date')
-                        date_obj = pd.to_datetime(date_val).date() if date_val else date.today()
+                        date_obj = date.today()  # Valeur par défaut
                         
+                        if date_val and pd.notna(date_val):
+                            try:
+                                # Vérifier que ce n'est pas un nom de colonne ou une chaîne invalide
+                                date_str = str(date_val).strip()
+                                # Ignorer si ça ressemble à un nom de colonne
+                                if '_' in date_str or any(c.isalpha() for c in date_str.replace('-', '').replace('/', '')):
+                                    print(f"   [WARNING] Date invalide ignorée: {date_str}")
+                                else:
+                                    # Si c'est juste une année (ex: 2021 ou "2021")
+                                    date_str_clean = date_str
+                                    if date_str_clean.isdigit() and len(date_str_clean) == 4:
+                                        year_int = int(date_str_clean)
+                                        if 1900 <= year_int <= 2100:
+                                            date_obj = date(year_int, 12, 31)
+                                        else:
+                                            parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                            if pd.notna(parsed_date):
+                                                date_obj = parsed_date.date()
+                                    else:
+                                        parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                        if pd.notna(parsed_date):
+                                            date_obj = parsed_date.date()
+                            except Exception as e:
+                                print(f"   [WARNING] Erreur parsing date '{date_val}': {e}")
+                        
+                        libelle_row = str(row.get('libelle') or '').strip()
+
                         Bilan.objects.create(
                             project=project,
                             numero_compte=numero_compte,
-                            libelle=row.get('libelle', '').strip(),
+                            libelle=libelle_row,
                             montant_ar=montant_ar,
                             date=date_obj,
                             type_bilan=type_bilan,
@@ -908,35 +1022,168 @@ def excel_save_data_view(request):
                         )
                         created_bilans += 1
                     except Exception as e:
+                        print(f"   [ERROR] Erreur Bilan ligne {row.get('row_index')}: {e}")
+                        print(f"      Row: {row}")
                         errors.append({'sheet': sheet_name, 'error': str(e)})
 
             elif sheet_type == 'COMPTE_RESULTAT':
                 for row in rows:
                     try:
-                        numero_compte = row.get('numero_compte', '').strip()
-                        montant_ar = float(row.get('montant_ar', 0))
+                        # Nettoyage montant
+                        raw_montant = row.get('montant_ar', 0)
+                        try:
+                            if isinstance(raw_montant, str): raw_montant = raw_montant.replace(',', '.').replace(' ', '')
+                            montant_ar = float(raw_montant)
+                        except: montant_ar = 0.0
+                        
+                        numero_compte = str(row.get('numero_compte') or '').strip() # Moved here
                         if not numero_compte or montant_ar == 0: continue
                         
                         nature = 'CHARGE' if (numero_compte[0] if numero_compte else '6') == '6' else 'PRODUIT'
-                        date_val = row.get('date')
-                        date_obj = pd.to_datetime(date_val).date() if date_val else date.today()
                         
+                        # Extraction et validation de la date avec gestion d'erreurs robuste
+                        date_val = row.get('date')
+                        date_obj = date.today()  # Valeur par défaut
+                        
+                        if date_val and pd.notna(date_val):
+                            try:
+                                # Vérifier que ce n'est pas un nom de colonne ou une chaîne invalide
+                                date_str = str(date_val).strip()
+                                # Ignorer si ça ressemble à un nom de colonne
+                                if '_' in date_str or any(c.isalpha() for c in date_str.replace('-', '').replace('/', '')):
+                                    print(f"   [WARNING] Date invalide ignorée: {date_str}")
+                                else:
+                                    # Cas spécial: Année seule (ex: 2021) -> 31/12/2021
+                                    date_str_clean = date_str
+                                    if date_str_clean.isdigit() and len(date_str_clean) == 4:
+                                        year_int = int(date_str_clean)
+                                        if 1900 <= year_int <= 2100:
+                                            date_obj = date(year_int, 12, 31)
+                                        else:
+                                            parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                            if pd.notna(parsed_date):
+                                                date_obj = parsed_date.date()
+                                    else:
+                                        parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                        if pd.notna(parsed_date):
+                                            date_obj = parsed_date.date()
+                            except Exception as e:
+                                print(f"   [WARNING] Erreur parsing date '{date_val}': {e}")
+                        
+                        libelle_row = str(row.get('libelle') or '').strip()
+
                         CompteResultat.objects.create(
                             project=project,
                             numero_compte=numero_compte,
-                            libelle=row.get('libelle', '').strip(),
+                            libelle=libelle_row,
                             montant_ar=montant_ar,
                             date=date_obj,
                             nature=nature
                         )
                         created_cr += 1
                     except Exception as e:
+                        print(f"   [ERROR] Erreur CompteResultat ligne {row.get('row_index')}: {e}")
+                        print(f"      Row: {row}")
                         errors.append({'sheet': sheet_name, 'error': str(e)})
+            
+            # NOUVEAU: Support pour JOURNAL
+            elif sheet_type == 'JOURNAL':
+                from compta.models import Journal
+                from decimal import Decimal
+                from ocr.financial_data_structurer import FinancialDataStructurer
+                
+                # Initialiser le structureur pour la détection du type_journal
+                structurer = FinancialDataStructurer()
+                
+                for row in rows:
+                    try:
+                        numero_compte = str(row.get('numero_compte') or '').strip()
+                        if not numero_compte:
+                            continue
+                        
+                        # Extraction et validation de la date avec gestion d'erreurs robuste
+                        date_val = row.get('date')
+                        date_obj = date.today()  # Valeur par défaut
+                        
+                        if date_val:
+                            try:
+                                date_str = str(date_val).strip()
+                                # Ignorer si ça ressemble à un nom de colonne
+                                if '_' in date_str or any(c.isalpha() for c in date_str.replace('-', '').replace('/', '')):
+                                    print(f"   [WARNING] Date invalide ignorée (nom de colonne?): {date_str}")
+                                else:
+                                    # Cas spécial: Année seule (ex: 2021) -> 31/12/2021
+                                    date_str_clean = date_str
+                                    if date_str_clean.isdigit() and len(date_str_clean) == 4:
+                                        year_int = int(date_str_clean)
+                                        if 1900 <= year_int <= 2100:
+                                            date_obj = date(year_int, 12, 31)
+                                        else:
+                                            parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                            if pd.notna(parsed_date):
+                                                date_obj = parsed_date.date()
+                                    else:
+                                        parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                        if pd.notna(parsed_date):
+                                            date_obj = parsed_date.date()
+                            except Exception as e:
+                                print(f"   [WARNING] Erreur parsing date '{date_val}': {e}")
+                                date_obj = date.today()
+                        
+                        numero_piece = row.get('numero_piece', None)
+                        libelle = row.get('libelle', '').strip()
+                        debit = Decimal(str(row.get('debit', 0) or 0))
+                        credit = Decimal(str(row.get('credit', 0) or 0))
+                        
+                        # Validation: au moins débit ou crédit doit être non nul
+                        if debit == 0 and credit == 0:
+                            continue
+                        
+                        # DÉTECTION AUTOMATIQUE DU TYPE_JOURNAL
+                        # Prioriser le type déjà envoyé par le front/structurer
+                        type_journal = row.get('type_journal')
+                        
+                        if not type_journal:
+                            # Utiliser la logique du FinancialDataStructurer en dernier recours
+                            type_journal = structurer._detect_journal_type(libelle, numero_compte)
+                            print(f"   [INFO] Type journal détecté (fallback): {type_journal} pour compte {numero_compte} ({libelle})")
+                        else:
+                            print(f"   [INFO] Type journal utilisé (reçu): {type_journal} pour pièce {numero_piece}")
+                        
+                        Journal.objects.create(
+                            project=project,
+                            date=date_obj,
+                            numero_piece=numero_piece,
+                            type_journal=type_journal,
+                            numero_compte=numero_compte,
+                            libelle=libelle,
+                            debit_ar=debit,
+                            credit_ar=credit
+                        )
+                        created_journals += 1
+                        
+                        # Lier le Journal au FileSource si disponible
+                        if file_source and created_journals == 1:
+                            # Récupérer la dernière écriture créée
+                            last_journal = Journal.objects.filter(
+                                project=project,
+                                numero_compte=numero_compte,
+                                date=date_obj
+                            ).order_by('-id').first()
+                            
+                            if last_journal and not file_source.journal:
+                                file_source.journal = last_journal
+                                file_source.save(update_fields=['journal'])
+                                print(f"   [INFO] FileSource lié au Journal ID={last_journal.id}")
+                    except Exception as e:
+                        errors.append({'sheet': sheet_name, 'row': row, 'error': str(e)})
+
         
         print(f"\n{'='*80}")
         print(f"[SUCCESS] SAUVEGARDE TERMINEE")
         print(f"   - Bilans crees: {created_bilans}")
         print(f"   - Comptes de resultat crees: {created_cr}")
+        print(f"   - Ecritures Journal creees: {created_journals}")
         print(f"   - Erreurs: {len(errors)}")
         print(f"{'='*80}\n")
 
@@ -944,6 +1191,7 @@ def excel_save_data_view(request):
             "status": "success",
             "created_bilans": created_bilans,
             "created_compte_resultat": created_cr,
+            "created_journals": created_journals,  # NOUVEAU
             "errors": errors if errors else None
         }
         

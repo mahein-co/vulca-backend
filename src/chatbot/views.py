@@ -33,6 +33,8 @@ import re
 import json
 from datetime import datetime, date
 from chatbot.services.accounting_queries import AccountingQueryService
+from chatbot.services.text_to_sql import TextToSQLService
+from chatbot.services.query_router import QueryRouter
 
 # OPENAI -------------------------------------------
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -254,7 +256,7 @@ def get_accounting_context(user, project_id, query_info):
     service = AccountingQueryService(project_id=project_id)
     query_type = query_info['type']
     params = query_info['params']
-    include_details = query_info.get('include_details', False)
+    include_details = query_info.get('include_details', True)
     
     context_parts = []
     
@@ -407,7 +409,7 @@ def get_accounting_context(user, project_id, query_info):
         
         
         elif query_type == 'tresorerie':
-            data = service.get_tresorerie(annee=params.get('annee'), include_details=include_details)  # ✅ Ajouter include_details
+            data = service.get_tresorerie(annee=params.get('annee'), include_details=include_details)  
             context_parts.append(f"**Trésorerie** (au {data['date']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Comptes: {data['comptes']}")
@@ -504,7 +506,9 @@ def format_details(data_key, data_dict, include_details):
         if isinstance(details, list):
             text += f"\n**Détails {data_key}** ({data_dict.get('nb_lignes', len(details))} lignes):\n"
             for detail in details[:10]:
-                text += f"  - {detail.get('date')} | {detail.get('compte')} - {detail.get('libelle')}: {detail.get('montant'):,.2f} AR\n"
+                montant = detail.get('montant') or detail.get('solde') or 0
+                libelle = detail.get('libelle') or detail.get('compte') or ''
+                text += f"  - {detail.get('date')} | {detail.get('compte')} - {libelle}: {montant:,.2f} AR\n"
             if data_dict.get('nb_lignes', len(details)) > 10:
                 text += f"  ... et {data_dict.get('nb_lignes') - 10} autres lignes\n"
 
@@ -514,7 +518,9 @@ def format_details(data_key, data_dict, include_details):
             for section, items in details.items():
                 text += f"- {section.capitalize()}:\n"
                 for item in items[:10]:
-                    text += f"  - {item.get('date')} | {item.get('compte')} - {item.get('libelle')}: {item.get('montant'):,.2f} AR\n"
+                    montant = item.get('montant') or item.get('solde') or 0
+                    libelle = item.get('libelle') or item.get('compte') or ''
+                    text += f"  - {item.get('date')} | {item.get('compte')} - {libelle}: {montant:,.2f} AR\n"
                 if len(items) > 10:
                     text += f"  ... et {len(items) - 10} autres lignes\n"
 
@@ -557,16 +563,12 @@ def generate_response(request):
         if filtered_data:
             print(f"[DEBUG] Content of Filtered Data: {json.dumps(filtered_data, indent=2)}")
 
-        # ✅ DÉTECTION DE QUESTION FINANCIÈRE
-        query_info = detect_financial_query(user_input)
-        
-        # ✅ CONSTRUCTION DU CONTEXTE FINANCIER
+       
         accounting_context = ""
 
-        # ✅ FALLBACK LOGIQUE POUR QUESTIONS DE SUIVI ("c'est tout ?", etc.)
         if filtered_data and is_followup_empty_question(user_input):
+            # ← Ce bloc reste identique à ce que tu avais
             has_more = False
-
             for key in ['chiffre_affaires', 'charges', 'resultat_net', 'tresorerie', 'bilan']:
                 if key in filtered_data:
                     details = filtered_data[key].get('details')
@@ -576,57 +578,52 @@ def generate_response(request):
                         for section_items in details.values():
                             if len(section_items) > 10:
                                 has_more = True
-
             if not has_more:
                 ai_response = "Oui, ce sont toutes les informations disponibles pour cette période."
-
                 request.data["ai_response"] = ai_response
                 serializer = ChatMessageSerializer(data=request.data)
                 if serializer.is_valid():
                     message_history = get_object_or_404(MessageHistory, id=message_history_id)
                     serializer.save(user=user, message_history=message_history)
-                    return Response(
-                        {"conversation": serializer.data, "sources": []},
-                        status=status.HTTP_201_CREATED
-                    )
+                    return Response({"conversation": serializer.data, "sources": []}, status=status.HTTP_201_CREATED)
 
-        
-        # NOUVEAU: Utiliser les données filtrées si disponibles
-        if filtered_data:
-            print("=" * 50)
-            print("[INFO] UTILISATION DES DONNÉES FILTRÉES")
-            print(f"Période: {filtered_data.get('filter', {}).get('date_start')} → {filtered_data.get('filter', {}).get('date_end')}")
-            print("=" * 50)
-            
+        elif filtered_data:
             accounting_context = "=== DONNÉES COMPTABLES FILTRÉES ===\n"
             filter_info = filtered_data.get('filter', {})
             accounting_context += f"Période analysée: {filter_info.get('date_start')} au {filter_info.get('date_end')}\n\n"
-            
-            # Formater les données pour le chatbot
             if 'chiffre_affaires' in filtered_data:
                 accounting_context += format_details("Chiffre d'affaires", filtered_data['chiffre_affaires'], True)
-                
             if 'charges' in filtered_data:
-                accounting_context += format_details("Charges", filtered_data['charges'], include_details)
-                
+                accounting_context += format_details("Charges", filtered_data['charges'], True)
             if 'resultat_net' in filtered_data:
-                accounting_context += format_details("Résultat net", filtered_data['resultat_net'], include_details)
-                
+                accounting_context += format_details("Résultat net", filtered_data['resultat_net'], True)
             if 'tresorerie' in filtered_data:
-                accounting_context += format_details("Trésorerie", filtered_data['tresorerie'], include_details)
-                
+                accounting_context += format_details("Trésorerie", filtered_data['tresorerie'], True)
             if 'bilan' in filtered_data:
-                accounting_context += format_details("Bilan", filtered_data['bilan'], include_details)
+                accounting_context += format_details("Bilan", filtered_data['bilan'], True)
+
+        elif project_id:
+            router = QueryRouter(
+                project_id=project_id,
+                openai_client=client,       
+                model=OPENAI_MODEL
+            )
+            result = router.route(user_input)
+
+            if result["source"] == "text_to_sql":
+                nb = result.get("nb_resultats", 0)
+                accounting_context = f"=== DONNÉES BASE DE DONNÉES ({nb} résultats) ===\n"
+                accounting_context += f"Requête exécutée: {result['sql']}\n\n"
+                accounting_context += json.dumps(result["data"][:100], ensure_ascii=False, indent=2)
                 
-        elif query_info and project_id:
-            # Fallback: utiliser l'ancien système si pas de données filtrées
-            accounting_context = get_accounting_context(user, project_id, query_info)
-            print("=" * 50)
-            print("Question comptable détectée (mode classique):")
-            print(f"Type: {query_info['type']}")
-            print(f"Params: {query_info['params']}")
-            print(f"Contexte comptable:\n{accounting_context}")
-            print("=" * 50)
+            elif result["source"] == "calculated":
+                accounting_context = f"=== DONNÉES CALCULÉES ({result['intent']}) ===\n"
+                accounting_context += json.dumps(result["data"], ensure_ascii=False, indent=2)
+                
+            elif result["source"] == "error":
+                accounting_context = f"Erreur lors de la récupération: {result['error']}"
+
+            print(f"[DEBUG] Router source: {result['source']}, intent: {result.get('intent')}")
         
         # ✅ RECHERCHE VECTORIELLE (Documents)
         query_embedding = np.array(generate_embedding(user_input))

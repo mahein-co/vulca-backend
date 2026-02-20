@@ -7,6 +7,7 @@ billiard==4.2.4
 celery==5.6.2
 certifi==2025.10.5
 cffi==2.0.0
+charset-normalizer==3.4.4
 click==8.3.1
 click-didyoumean==0.3.1
 click-plugins==1.1.1.2
@@ -84,6 +85,7 @@ pytz==2025.2
 PyYAML==6.0.3
 realtime==2.24.0
 redis==7.1.0
+reportlab==4.4.10
 scikit-image==0.25.2
 scipy==1.16.3
 sendgrid==6.12.5
@@ -112,4 +114,5 @@ wcwidth==0.2.14
 websockets==15.0.1
 Werkzeug==3.1.4
 whitenoise==6.11.0
+xlsxwriter==3.2.9
 yarl==1.22.0

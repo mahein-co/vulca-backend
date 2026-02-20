@@ -25,6 +25,9 @@ from chatbot.pagination import DocumentPagination
 from chatbot.prompts import SYSTEM_PROMPT
 
 from chatbot.services.embeddings import generate_embedding
+from chatbot.services.query_router import QueryRouter
+from chatbot.services.intent_detector import IntentDetector
+from chatbot.services.export_service import ExportService
 
 # OPENAI -------------------------------------------
 from openai import OpenAI
@@ -35,6 +38,9 @@ from datetime import datetime, date
 from chatbot.services.accounting_queries import AccountingQueryService
 from chatbot.services.text_to_sql import TextToSQLService
 from chatbot.services.query_router import QueryRouter
+from chatbot.services.export_service import ExportService
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 
 # OPENAI -------------------------------------------
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -144,103 +150,19 @@ def is_followup_empty_question(user_input):
 #             return Response(context, status=status.HTTP_201_CREATED)
 #         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-#DETECTION DES QUESTIONS FINANCIÈRES
+#DETECTION DES QUESTIONS FINANCIÈRES (Délégué au service centralisé)
 def detect_financial_query(user_input):
     """
     Détecte le type de question financière et extrait les paramètres
     Retourne: {'type': str, 'params': dict} ou None
     """
-    user_input_lower = user_input.lower()
-    
-    # Patterns de détection
-    patterns = {
-        'ca': r'chiffre.*affaires?|ca\b|ventes?|revenus?',
-        'charges': r'charges?|dépenses?|coûts?|frais',
-        'ebe': r'ebe\b|excédent brut d\'exploitation',
-        'roe': r'roe\b|rentabilité des capitaux propres',
-        'marge_brute': r'marge brute|marge commerciale',
-        'bfr': r'bfr\b|besoin en fonds de roulement',
-        'roa': r'roa\b|rentabilité des actifs',
-        'leverage': r'leverage\b|levier Financier|endettement',
-        'marge_nette': r'marge nette',
-        'marge_operationnelle': r'marge opérationnelle',
-        'current_ratio': r'current ratio|ratio de liquidité',
-        'rotation_stocks': r'rotation des stocks|rotation stock',
-        'resultat': r'résultat|bénéfice|profit|perte',
-        'tresorerie': r'trésorerie|liquidité|banque|caisse',
-        'bilan': r'bilan|actif|passif',
-        'comparaison': r'compar|différence|évolution|versus|vs',
-        'analyse_globale': r'analyser|interpréter|audit|santé|vue|résumé|situation|dashboard|tableau|rapport|exercice|période'
-    }
+    return IntentDetector.detect(user_input)
 
-    # Détecter si l'utilisateur demande des détails
-    demande_details = bool(re.search(
-        r'détails?|liste|lignes?|ventil|décompos|tous les|chaque|par (date|compte|mois)|réparti|précis|exact|quels?|quelles?|combien|montant|composition',
-        user_input_lower
-    ))
-    
-    # 1. Extraction de dates précises (DD/MM/YYYY ou DD-MM-YYYY ou DD.MM.YYYY)
-    date_matches = re.findall(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})', user_input)
-    
-    # 2. Extraction d'années (20XX)
-    annees = re.findall(r'\b(20\d{2})\b', user_input)
-    
-    # Normalisation des dates (remplacer les séparateurs par /)
-    date_matches = [d.replace('-', '/').replace('.', '/') for d in date_matches]
-    
-    # Détection du type
-    query_type = None
-    for key, pattern in patterns.items():
-        if re.search(pattern, user_input_lower):
-            query_type = key
-            break
-    
-    if not query_type:
-        # Si on a des dates mais pas de type, on assume une analyse globale
-        if date_matches or annees:
-            query_type = 'analyse_globale'
-        else:
-            return None
-    
-    # Extraction des paramètres
-    params = {}
-    
-    # Priorité aux dates précises
-    if len(date_matches) >= 2:
-        try:
-            params['start_date'] = datetime.strptime(date_matches[0], '%d/%m/%Y').date()
-            params['end_date'] = datetime.strptime(date_matches[1], '%d/%m/%Y').date()
-        except ValueError:
-            pass
-    elif len(date_matches) == 1:
-        try:
-            # Si une seule date, on considère que c'est la date de fin
-            params['end_date'] = datetime.strptime(date_matches[0], '%d/%m/%Y').date()
-        except ValueError:
-            pass
-            
-    # Sinon on regarde les années
-    if not params.get('start_date') and not params.get('end_date'):
-        if annees:
-            if len(annees) >= 2 and query_type == 'comparaison':
-                params['annee1'] = int(annees[0])
-                params['annee2'] = int(annees[1])
-            elif len(annees) == 1:
-                params['annee'] = int(annees[0])
-            else:
-                params['annee'] = datetime.now().year
-        else:
-            # Par défaut : année en cours
-            params['annee'] = datetime.now().year
-    
-    print(f"[DEBUG] Query Type détecté: {query_type}")
-    print(f"[DEBUG] Paramètres extraits: {params}")
-    print(f"[DEBUG] Détails demandés: {demande_details}")
-    
     return {
         'type': query_type,
         'params': params,
-        'include_details': demande_details
+        'include_details': demande_details,
+        'suggested_filter': suggested_filter
     }
 
 
@@ -565,66 +487,121 @@ def generate_response(request):
 
        
         accounting_context = ""
+        intent_detected = False
+        result = None
+        
+        # 1. ANALYSE DES INTENTS CALCULÉS PRIORITAIRES
+        if project_id:
+            router = QueryRouter(project_id=project_id)
+            intent = router._detect_calculated_intent(user_input)
+            
+            if intent:
+                intent_detected = True
+                result = router.route(user_input)
+                if result["source"] == "calculated":
+                    accounting_context = f"=== DONNÉES CALCULÉES ({result['intent']}) ===\n"
+                    accounting_context += json.dumps(result["data"], ensure_ascii=False, indent=2)
+                    
+                    # GESTION DES EXPORTS (REKAPY Modern Export)
+                    export_keywords = ["générer", "export", "rapport", "états financiers", "excel", "pdf", "télécharger"]
+                    if any(kw in user_input.lower() for kw in export_keywords):
+                        try:
+                            report_type = "Bilan" if any(k in user_input.lower() for k in ["bilan", "états"]) else "Rapport Financier"
+                            if "compar" in user_input.lower():
+                                report_type = "Rapport Comparatif"
+                            
+                            want_pdf = "pdf" in user_input.lower()
+                            want_excel = "excel" in user_input.lower()
+                            # Si aucun n'est spécifié, on propose les deux ou on assume les deux pour un "rapport"
+                            if not want_pdf and not want_excel:
+                                want_pdf = want_excel = True
+                            
+                            backend_url = getattr(settings, "BACKEND_URL", request.build_absolute_uri('/')[:-1])
+                            export_links = []
 
-        if filtered_data and is_followup_empty_question(user_input):
-            # ← Ce bloc reste identique à ce que tu avais
-            has_more = False
-            for key in ['chiffre_affaires', 'charges', 'resultat_net', 'tresorerie', 'bilan']:
-                if key in filtered_data:
-                    details = filtered_data[key].get('details')
-                    if isinstance(details, list) and len(details) > 10:
-                        has_more = True
-                    elif isinstance(details, dict):
-                        for section_items in details.values():
-                            if len(section_items) > 10:
-                                has_more = True
-            if not has_more:
-                ai_response = "Oui, ce sont toutes les informations disponibles pour cette période."
-                request.data["ai_response"] = ai_response
-                serializer = ChatMessageSerializer(data=request.data)
-                if serializer.is_valid():
-                    message_history = get_object_or_404(MessageHistory, id=message_history_id)
-                    serializer.save(user=user, message_history=message_history)
-                    return Response({"conversation": serializer.data, "sources": []}, status=status.HTTP_201_CREATED)
+                            if want_excel:
+                                buffer_excel = ExportService.generate_excel_report(result["data"], report_type=report_type)
+                                filename_excel = f"exports/{report_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                                file_path_excel = default_storage.save(filename_excel, ContentFile(buffer_excel.getvalue()))
+                                full_url_excel = f"{backend_url}{settings.MEDIA_URL}{file_path_excel}"
+                                export_links.append(f"📊 [Télécharger le Rapport Excel]({full_url_excel})")
 
-        elif filtered_data:
-            accounting_context = "=== DONNÉES COMPTABLES FILTRÉES ===\n"
-            filter_info = filtered_data.get('filter', {})
-            accounting_context += f"Période analysée: {filter_info.get('date_start')} au {filter_info.get('date_end')}\n\n"
-            if 'chiffre_affaires' in filtered_data:
-                accounting_context += format_details("Chiffre d'affaires", filtered_data['chiffre_affaires'], True)
-            if 'charges' in filtered_data:
-                accounting_context += format_details("Charges", filtered_data['charges'], True)
-            if 'resultat_net' in filtered_data:
-                accounting_context += format_details("Résultat net", filtered_data['resultat_net'], True)
-            if 'tresorerie' in filtered_data:
-                accounting_context += format_details("Trésorerie", filtered_data['tresorerie'], True)
-            if 'bilan' in filtered_data:
-                accounting_context += format_details("Bilan", filtered_data['bilan'], True)
+                            if want_pdf:
+                                buffer_pdf = ExportService.generate_pdf_report(result["data"], report_type=report_type)
+                                filename_pdf = f"exports/{report_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                                file_path_pdf = default_storage.save(filename_pdf, ContentFile(buffer_pdf.getvalue()))
+                                full_url_pdf = f"{backend_url}{settings.MEDIA_URL}{file_path_pdf}"
+                                export_links.append(f"📄 [Télécharger le Rapport PDF]({full_url_pdf})")
+                            
+                            if export_links:
+                                accounting_context += "\n\n### 📥 EXPORTS DISPONIBLES (REKAPY)\n" + "\n".join(export_links)
 
-        elif project_id:
-            router = QueryRouter(
-                project_id=project_id,
-                #openai_client=client,       
-                #model=OPENAI_MODEL
-                llm_client=client,
-            )
-            result = router.route(user_input)
+                        except Exception as e:
+                            print(f"[ERROR] Export failed: {str(e)}")
+                            accounting_context += f"\n\n(Note: L'export a échoué: {str(e)})"
 
-            if result["source"] == "text_to_sql":
-                nb = result.get("nb_resultats", 0)
-                accounting_context = f"=== DONNÉES BASE DE DONNÉES ({nb} résultats) ===\n"
-                accounting_context += f"Requête exécutée: {result['sql']}\n\n"
-                accounting_context += json.dumps(result["data"][:100], ensure_ascii=False, indent=2)
+        # 2. FALLBACK SUR LES DONNÉES FILTRÉES (Dashboard)
+        if not intent_detected:
+            if filtered_data and is_followup_empty_question(user_input):
+                has_more = False
+                for key in ['chiffre_affaires', 'charges', 'resultat_net', 'tresorerie', 'bilan']:
+                    if key in filtered_data:
+                        details = filtered_data[key].get('details')
+                        if (isinstance(details, list) and len(details) > 10) or \
+                           (isinstance(details, dict) and any(len(v) > 10 for v in details.values())):
+                            has_more = True
+                if not has_more:
+                    ai_response = "Oui, ce sont toutes les informations disponibles pour cette période."
+                    request.data["ai_response"] = ai_response
+                    serializer = ChatMessageSerializer(data=request.data)
+                    if serializer.is_valid():
+                        try:
+                            message_history = MessageHistory.objects.get(id=message_history_id)
+                            serializer.save(user=user, message_history=message_history)
+                            return Response({"conversation": serializer.data, "sources": []}, status=status.HTTP_201_CREATED)
+                        except MessageHistory.DoesNotExist:
+                            print(f"[ERROR] MessageHistory {message_history_id} not found in fallback save")
+                            return Response({"error": f"Historique {message_history_id} introuvable"}, status=status.HTTP_404_NOT_FOUND)
+
+            elif filtered_data:
+                # Éviter le résumé trop proactif sur un simple "Bonjour"
+                is_greeting = any(g == user_input.lower().strip() for g in greetings)
                 
-            elif result["source"] == "calculated":
-                accounting_context = f"=== DONNÉES CALCULÉES ({result['intent']}) ===\n"
-                accounting_context += json.dumps(result["data"], ensure_ascii=False, indent=2)
+                if is_greeting:
+                    accounting_context = "=== CONTEXTE ACTUEL ===\n"
+                    filter_info = filtered_data.get('filter', {})
+                    accounting_context += f"Période active sur le dashboard: {filter_info.get('date_start')} au {filter_info.get('date_end')}\n"
+                    accounting_context += "(Réponds simplement à la salutation sans résumer toutes les données financières sauf si demandé.)\n"
+                else:
+                    accounting_context = "=== DONNÉES COMPTABLES FILTRÉES ===\n"
+                    filter_info = filtered_data.get('filter', {})
+                    accounting_context += f"Période analysée: {filter_info.get('date_start')} au {filter_info.get('date_end')}\n\n"
+                    for key, label in [('chiffre_affaires', "Chiffre d'affaires"), ('charges', "Charges"), 
+                                       ('resultat_net', "Résultat net"), ('tresorerie', "Trésorerie"), ('bilan', "Bilan")]:
+                        if key in filtered_data:
+                            accounting_context += format_details(label, filtered_data[key], True)
                 
-            elif result["source"] == "error":
-                accounting_context = f"Erreur lors de la récupération: {result['error']}"
+                # Permettre l'export même depuis le dashboard si demandé
+                if any(kw in user_input.lower() for kw in ["générer", "export", "rapport", "états financiers", "excel", "pdf"]):
+                    accounting_context += "\n\n(Note: Pour générer un rapport professionnel complet, veuillez préciser l'année ou le format, par exemple 'États financiers 2025 en PDF'.)"
 
-            print(f"[DEBUG] Router source: {result['source']}, intent: {result.get('intent')}")
+            # 3. DERNIER RECOURS : TEXT-TO-SQL
+            elif project_id:
+                result = router.route(user_input)
+                if result["source"] == "text_to_sql":
+                    nb = result.get("nb_resultats", 0)
+                    accounting_context = f"=== DONNÉES BASE DE DONNÉES ({nb} résultats) ===\n"
+                    accounting_context += f"Requête exécutée: {result['sql']}\n\n"
+                    accounting_context += json.dumps(result["data"][:100], ensure_ascii=False, indent=2)
+                elif result["source"] == "error":
+                    accounting_context = f"Erreur: {result['error']}"
+
+            if result:
+                print(f"[DEBUG] Router source: {result['source']}, intent: {result.get('intent')}")
+                # Récupérer le filtre suggéré si disponible (uniquement si détecté explicitement)
+                query_info = IntentDetector.detect(user_input)
+                if query_info and query_info.get('suggested_filter'):
+                    request.data["suggested_filter"] = query_info['suggested_filter']
         
         # ✅ RECHERCHE VECTORIELLE (Documents)
         query_embedding = np.array(generate_embedding(user_input))
@@ -702,13 +679,18 @@ def generate_response(request):
         # ✅ ENREGISTREMENT DU MESSAGE
         serializer = ChatMessageSerializer(data=request.data)
         if serializer.is_valid():
-            message_history = get_object_or_404(MessageHistory, id=message_history_id)
-            serializer.save(user=user, message_history=message_history)
+            try:
+                message_history = MessageHistory.objects.get(id=message_history_id)
+                serializer.save(user=user, message_history=message_history)
+            except MessageHistory.DoesNotExist:
+                print(f"[ERROR] MessageHistory {message_history_id} not found in final save")
+                return Response({"error": f"Historique {message_history_id} introuvable"}, status=status.HTTP_404_NOT_FOUND)
 
             return Response(
                 {
                     "conversation": serializer.data,
                     "sources": unique_sources,
+                    "suggested_filter": request.data.get("suggested_filter")
                 },
                 status=status.HTTP_201_CREATED
             )
@@ -779,8 +761,12 @@ def get_message_histories(request):
 @api_view(["GET", "PUT", "DELETE"])
 @permission_classes([IsAuthenticated])
 def message_history_details(request, id):
+    try:
+        history = MessageHistory.objects.get(id=id, user=request.user)
+    except MessageHistory.DoesNotExist:
+        print(f"[DEBUG] History {id} not found for user {request.user.id}")
+        return Response({"error": f"Historique {id} introuvable"}, status=status.HTTP_404_NOT_FOUND)
     
-    history = get_object_or_404(MessageHistory, id=id, user=request.user)
     # HISTORY DETAILS
     if request.method == "GET":
         history = MessageHistory.objects.prefetch_related('chat_messages').get(id=id, user=request.user)
@@ -826,6 +812,13 @@ def save_new_history_and_new_chat(request):
         if not user_input or not user_input.strip():
             return Response(
                 {"error": "Le message ne peut pas être vide"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        project_id = request.data.get('project_id') or getattr(request, 'project_id', None)
+        if not project_id:
+            return Response(
+                {"error": "project_id est requis"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -923,7 +916,11 @@ def save_new_history_and_new_chat(request):
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
 def rename_history(request, id):
-    history = get_object_or_404(MessageHistory, id=id, user=request.user)
+    try:
+        history = MessageHistory.objects.get(id=id, user=request.user)
+    except MessageHistory.DoesNotExist:
+        print(f"[DEBUG] History {id} not found for rename by user {request.user.id}")
+        return Response({"error": f"Historique {id} introuvable"}, status=status.HTTP_404_NOT_FOUND)
     
     new_title = request.data.get("title")
     if not new_title or not new_title.strip():

@@ -1,7 +1,7 @@
 from django.db.models import Sum, Q, F, Count, Avg, Max, Min
-from decimal import Decimal
+from django.db.models.functions import ExtractYear
 from datetime import datetime, date
-from django.db.models import Sum
+from decimal import Decimal
 from compta.models import (
     Journal, GrandLivre, Balance, 
     CompteResultat, Bilan, Project
@@ -522,28 +522,30 @@ class AccountingQueryService:
         
         return response
     
-    def get_synthese_complete(self, annee=None):
+    def get_synthese_complete(self, start_date=None, end_date=None, annee=None):
         """
         Synthèse financière COMPLÈTE avec tous les indicateurs clés
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
         
+        args = {"start_date": start_date, "end_date": end_date, "annee": annee}
+        
         return {
-            "chiffre_affaires": self.get_chiffre_affaires(annee=annee),
-            "charges": self.get_charges(annee=annee),
-            "resultat_net": self.get_resultat_net(annee=annee),
-            "ebe": self.get_ebe(annee=annee),
-            "marge_brute": self.get_marge_brute(annee=annee),
-            "tresorerie": self.get_tresorerie(annee=annee),
-            "bilan": self.get_bilan_summary(annee=annee),
-            "bfr": self.get_bfr(annee=annee),
+            "chiffre_affaires": self.get_chiffre_affaires(**args),
+            "charges": self.get_charges(**args),
+            "resultat_net": self.get_resultat_net(**args),
+            "ebe": self.get_ebe(**args),
+            "marge_brute": self.get_marge_brute(**args),
+            "tresorerie": self.get_tresorerie(**args),
+            "bilan": self.get_structured_bilan(**args),
+            "bfr": self.get_bfr(**args),
             "ratios": {
-                "roe": self.get_roe(annee=annee),
-                "roa": self.get_roa(annee=annee),
-                "marges": self.get_marges_profitabilite(annee=annee),
-                "structure": self.get_ratios_structure(annee=annee),
-                "rotation_stocks": self.get_rotation_stocks(annee=annee)
+                "roe": self.get_roe(**args),
+                "roa": self.get_roa(**args),
+                "marges": self.get_marges_profitabilite(**args),
+                "structure": self.get_ratios_structure(**args),
+                "rotation_stocks": self.get_rotation_stocks(annee=annee)  # Rotation stock reste annuel souvent
             }
         }
     
@@ -565,7 +567,7 @@ class AccountingQueryService:
             filters &= Q(date__year=annee)
         elif start_date and end_date:
             filters &= Q(date__gte=start_date, date__lte=end_date)
-        
+            
         queryset = CompteResultat.objects.filter(filters, nature='PRODUIT')
         resultat = queryset.aggregate(total=Sum('montant_ar'))
         ca = resultat['total'] or Decimal('0.00')
@@ -593,16 +595,55 @@ class AccountingQueryService:
             response['nb_lignes'] = len(response['details'])
         
         return response
+        
     
+    def get_produits(self, start_date=None, end_date=None, annee=None, include_details=True):
+        """
+        Calcule les produits (nature 'PRODUIT') - Alignement UI
+        """
+        if not self.project: return {"error": "Projet non trouvé"}
+        
+        filters = Q(project_id=self.project_id)
+        if annee: filters &= Q(date__year=annee)
+        elif start_date and end_date: filters &= Q(date__gte=start_date, date__lte=end_date)
+        
+        queryset = CompteResultat.objects.filter(filters, nature='PRODUIT')
+        resultat = queryset.aggregate(total=Sum('montant_ar'))
+        montant = resultat['total'] or Decimal('0.00')
+        
+        response = {
+            "montant": float(montant),
+            "comptes": "Tous les comptes avec nature 'PRODUIT'",
+            "periode": self._format_periode(start_date, end_date, annee)
+        }
+        
+        if include_details:
+            details = queryset.values(
+                'date', 'numero_compte', 'libelle', 'montant_ar'
+            ).order_by('-date')
+            
+            response['details'] = [
+                {
+                    "date": d['date'].strftime('%d/%m/%Y'),
+                    "compte": d['numero_compte'],
+                    "libelle": d['libelle'],
+                    "montant": float(d['montant_ar'])
+                }
+                for d in details
+            ]
+            response['nb_lignes'] = len(response['details'])
+        
+        return response
+
     def get_charges(self, start_date=None, end_date=None, annee=None, include_details=True):
         """
-        Calcule les charges totales (comptes 6xx)
-        PCG 2005: 60-69 = Charges d'exploitation, financières, exceptionnelles
+        Calcule les charges totales (nature 'CHARGE')
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
         
-        filters = Q(project_id=self.project_id) & Q(numero_compte__startswith='6')
+        # Filtres basiques sur le projet
+        filters = Q(project_id=self.project_id)
         
         if annee:
             filters &= Q(date__year=annee)
@@ -611,12 +652,12 @@ class AccountingQueryService:
         
         queryset = CompteResultat.objects.filter(filters, nature='CHARGE')
         resultat = queryset.aggregate(total=Sum('montant_ar'))
-        ca = resultat['total'] or Decimal('0.00')
+        montant = resultat['total'] or Decimal('0.00')
         
         response = {
-            "montant": float(ca),
-            "periode": self._format_periode(start_date, end_date, annee),
-            "comptes": "6xx (Charges)"
+            "montant": float(montant),
+            "comptes": "Tous les comptes avec nature 'CHARGE'",
+            "periode": self._format_periode(start_date, end_date, annee)
         }
 
         if include_details:
@@ -641,24 +682,24 @@ class AccountingQueryService:
         """
         Calcule le résultat net = Produits - Charges
         """
-        ca = self.get_chiffre_affaires(start_date, end_date, annee, include_details=include_details)
+        produits = self.get_produits(start_date, end_date, annee, include_details=include_details)
         charges = self.get_charges(start_date, end_date, annee, include_details=include_details)
         
-        if "error" in ca or "error" in charges:
+        if "error" in produits or "error" in charges:
             return {"error": "Impossible de calculer le résultat"}
         
-        resultat = ca['montant'] - charges['montant']
+        resultat = produits['montant'] - charges['montant']
         
         response = {
             "montant": resultat,
-            "produits": ca['montant'],
+            "produits": produits['montant'],
             "charges": charges['montant'],
-            "periode": ca['periode']
+            "periode": produits['periode']
         }
 
         if include_details:
             response['details'] = {
-                "produits": ca.get('details', []),
+                "produits": produits.get('details', []),
                 "charges": charges.get('details', [])
             }
             response['nb_lignes'] = (
@@ -742,6 +783,10 @@ class AccountingQueryService:
         if not self.project:
             return {"error": "Projet non trouvé"}
             
+    def get_roe(self, start_date=None, end_date=None, annee=None):
+        """
+        Calcule le ROE (Rentabilité des capitaux propres)
+        """
         res_net_data = self.get_resultat_net(start_date, end_date, annee)
         res_net = res_net_data.get('montant', 0)
         
@@ -750,7 +795,8 @@ class AccountingQueryService:
             date_bilan = date(annee, 12, 31)
         elif not date_bilan:
             date_bilan = date.today()
-            
+        
+        # Pour le ROE, on prend les Capitaux Propres à la date de fin
         cp_filters = Q(project_id=self.project_id) & Q(type_bilan='PASSIF') & Q(categorie='CAPITAUX_PROPRES')
         cp_filters &= Q(date__lte=date_bilan)
             
@@ -839,14 +885,14 @@ class AccountingQueryService:
         
         return response
 
-    def get_bfr(self, date_ref=None, annee=None, include_details=True):
+    def get_bfr(self, start_date=None, end_date=None, date_ref=None, annee=None, include_details=True):
         """
         Calcule le BFR = (Stocks + Créances clients) - Dettes fournisseurs
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
             
-        target_date = date_ref or (date(annee, 12, 31) if annee else date.today())
+        target_date = end_date or date_ref or (date(annee, 12, 31) if annee else date.today())
         
         def get_balance_qs(prefix):
             return Balance.objects.filter(
@@ -928,13 +974,13 @@ class AccountingQueryService:
             "periode": res_net_data['periode']
         }
 
-    def get_ratios_structure(self, date_ref=None, annee=None):
+    def get_ratios_structure(self, start_date=None, end_date=None, date_ref=None, annee=None):
         """
         Calcule Leverage et Current Ratio
         """
-        target_date = date_ref or (date(annee, 12, 31) if annee else date.today())
+        target_date = end_date or date_ref or (date(annee, 12, 31) if annee else date.today())
         
-        cp_res = self.get_roe(end_date=target_date, annee=annee)
+        cp_res = self.get_roe(start_date=start_date, end_date=target_date, annee=annee)
         cp = cp_res.get('capitaux_propres', 0)
         
         dettes_fin = Bilan.objects.filter(
@@ -978,14 +1024,14 @@ class AccountingQueryService:
         """
         Calcule Marge Nette et Marge Opérationnelle
         """
-        ca_data = self.get_chiffre_affaires(start_date, end_date, annee)
-        ca = ca_data.get('montant', 0)
+        ca_data = self.get_chiffre_affaires(start_date, end_date, annee) or {}
+        ca = ca_data.get('montant', 0) or 0
         
-        res_net_data = self.get_resultat_net(start_date, end_date, annee)
-        res_net = res_net_data.get('montant', 0)
+        res_net_data = self.get_resultat_net(start_date, end_date, annee) or {}
+        res_net = res_net_data.get('montant', 0) or 0
         
-        ebe_data = self.get_ebe(start_date, end_date, annee)
-        ebe = ebe_data.get('montant', 0)
+        ebe_data = self.get_ebe(start_date, end_date, annee) or {}
+        ebe = ebe_data.get('montant', 0) or 0
         
         marge_nette = (res_net / ca * 100) if ca != 0 else 0
         marge_ope = (ebe / ca * 100) if ca != 0 else 0
@@ -996,20 +1042,20 @@ class AccountingQueryService:
             "ca": ca,
             "resultat_net": res_net,
             "ebe": ebe,
-            "periode": ca_data['periode']
+            "periode": ca_data.get('periode', 'N/A')
         }
 
-    def get_rotation_stocks(self, annee=None):
+    def get_rotation_stocks(self, start_date=None, end_date=None, annee=None):
         """
         Calcule la Rotation des stocks
         """
-        if not annee:
+        if not annee and not (start_date and end_date):
             annee = date.today().year
             
-        marge_brute = self.get_marge_brute(annee=annee)
+        marge_brute = self.get_marge_brute(start_date=start_date, end_date=end_date, annee=annee)
         achats = marge_brute.get('achats', 0)
         
-        bfr = self.get_bfr(annee=annee)
+        bfr = self.get_bfr(start_date=start_date, end_date=end_date, annee=annee)
         stocks = bfr.get('stocks', 0)
         
         rotation = (achats / stocks) if stocks != 0 else 0
@@ -1020,10 +1066,10 @@ class AccountingQueryService:
             "jours_stock": jours,
             "achats": achats,
             "stock_final": stocks,
-            "annee": annee
+            "periode": marge_brute.get('periode', 'N/A')
         }
     
-    def get_tresorerie(self, date_fin=None, annee=None, include_details=True):
+    def get_tresorerie(self, start_date=None, end_date=None, date_fin=None, annee=None, include_details=True):
         """
         Calcule la trésorerie (comptes 51x + 53x)
         """
@@ -1034,12 +1080,15 @@ class AccountingQueryService:
             Q(numero_compte__startswith='51') | Q(numero_compte__startswith='53')
         )
         
+        # Pour la trésorerie (Bilan), on prend l'état à la date de fin
+        target_end = end_date or date_fin
+        
         if annee:
             filters &= Q(date__year__lte=annee)
             final_date_str = f"31/12/{annee}"
-        elif date_fin:
-            filters &= Q(date__lte=date_fin)
-            final_date_str = date_fin.strftime('%d/%m/%Y')
+        elif target_end:
+            filters &= Q(date__lte=target_end)
+            final_date_str = target_end.strftime('%d/%m/%Y')
         else:
             final_date_str = "aujourd'hui"
         
@@ -1270,3 +1319,162 @@ class AccountingQueryService:
             .order_by('annee')
         )
         return [{"annee": r['annee'], "montant": float(r['total'])} for r in resultats]
+
+    # ========================================
+    # NOUVELLES MÉTHODES POUR EXPERT-COMPTABLE
+    # ========================================
+
+    def verify_balance(self, start_date=None, end_date=None, annee=None):
+        """
+        Vérifie l'équilibre Débit/Crédit sur une période donnée
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+            
+        filters = Q(project_id=self.project_id)
+        if annee:
+            filters &= Q(date__year=annee)
+        elif start_date and end_date:
+            filters &= Q(date__gte=start_date, date__lte=end_date)
+            
+        stats = Journal.objects.filter(filters).aggregate(
+            total_debit=Sum('debit_ar'),
+            total_credit=Sum('credit_ar')
+        )
+        
+        debit = stats['total_debit'] or Decimal('0.00')
+        credit = stats['total_credit'] or Decimal('0.00')
+        diff = debit - credit
+        
+        return {
+            "is_balanced": abs(diff) < Decimal('0.01'),
+            "total_debit": float(debit),
+            "total_credit": float(credit),
+            "variation": float(diff),
+            "periode": self._format_periode(start_date, end_date, annee)
+        }
+
+    def get_structured_bilan(self, start_date=None, end_date=None, date_ref=None, annee=None):
+        """
+        Retourne un bilan structuré par préfixes, aligné avec le dashboard UI.
+        """
+        # Filtres de base
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+
+        base_q = Q(project_id=self.project_id)
+        if annee:
+            base_q &= Q(date__year=annee)
+        elif start_date and end_date:
+            base_q &= Q(date__gte=start_date, date__lte=end_date)
+        elif end_date or date_ref:
+            target = end_date or date_ref
+            base_q &= Q(date=target)
+        else:
+            return {"error": "Veuillez préciser une année ou une période"}
+
+        # Vérifier qu'il y a des données
+        if not Bilan.objects.filter(base_q).exists():
+            label = f"Exercice {annee}" if annee else (f"Période {start_date} - {end_date}" if start_date else str(date_ref or end_date))
+            return {
+                "date": label,
+                "actif": {}, "passif_equity": {},
+                "totals": {"total_actif": 0, "total_passif": 0, "total_equity": 0, "equilibre": 0}
+            }
+
+        # Agréger par compte sur toute l'année (identique à la logique du dashboard)
+        def get_items_annual(prefixes, type_bilan):
+            q = Q()
+            for p in prefixes:
+                q |= Q(numero_compte__startswith=p)
+            qs = (
+                Bilan.objects.filter(base_q, type_bilan=type_bilan).filter(q)
+                .values('numero_compte', 'libelle')
+                .annotate(montant=Sum('montant_ar'))
+                .order_by('numero_compte')
+            )
+            return [
+                {"compte": i['numero_compte'], "libelle": i['libelle'], "montant": float(i['montant'] or 0)}
+                for i in qs
+            ]
+
+        # Catégories alignées avec le dashboard UI
+        actif_nc = get_items_annual(["2"], "ACTIF")          # Immobilisations
+        actif_c  = get_items_annual(["3", "4", "5"], "ACTIF") # Stocks, Créances (411...), Trésorerie
+
+        res_net = self.get_resultat_net(start_date=start_date, end_date=end_date, annee=annee)
+        rn_val = float(res_net.get("montant", 0)) if "error" not in res_net else 0.0
+
+        equity    = get_items_annual(["10", "11", "12", "13"], "PASSIF")  # Capitaux propres
+        equity.append({"compte": "RN", "libelle": "Résultat Net de l'exercice", "montant": rn_val})
+        passif_nc = get_items_annual(["15", "16", "17"], "PASSIF")         # Dettes LT
+        passif_c  = get_items_annual(["40", "41", "42", "43", "44", "45", "46", "47", "48", "51", "52"], "PASSIF")  # Dettes CT
+
+        total_actif = sum(i['montant'] for i in actif_nc) + sum(i['montant'] for i in actif_c)
+        total_e     = sum(i['montant'] for i in equity)
+        total_p     = sum(i['montant'] for i in passif_nc) + sum(i['montant'] for i in passif_c)
+
+        label_date = f"Exercice {annee}" if annee else (self._format_periode(start_date, end_date, None) if start_date else str(date_ref or end_date))
+
+        return {
+            "date": label_date,
+            "actif": {
+                "Actifs non courants": actif_nc,
+                "Actifs courants": actif_c
+            },
+            "passif_equity": {
+                "Capitaux propres": equity,
+                "Passifs non courants": passif_nc,
+                "Passifs courants": passif_c
+            },
+            "totals": {
+                "total_actif": round(total_actif, 2),
+                "total_passif": round(total_p, 2),
+                "total_equity": round(total_e, 2),
+                "equilibre": round(total_actif - (total_e + total_p), 2)
+            }
+        }
+    def get_comparative_report(self, annee1, annee2):
+        """
+        Génère un rapport comparatif complet entre deux années
+        """
+        try:
+            comparaison = self.compare_periodes(annee1, annee2)
+            
+            # Enrichir avec variations en pourcentage
+            for key in ["ca", "charges", "resultat"]:
+                val1 = comparaison["annee_1"]["chiffre_affaires"] if key == "ca" else comparaison["annee_1"][key]
+                val2 = comparaison["annee_2"]["chiffre_affaires"] if key == "ca" else comparaison["annee_2"][key]
+                
+                var_abs = comparaison["evolution"][key]
+                var_pct = (var_abs / val1 * 100) if val1 != 0 else 0
+                
+                comparaison["evolution"][f"{key}_pct"] = round(var_pct, 2)
+            
+            # Ajouter analyse stratégique basique
+            analyse = []
+            if comparaison["evolution"]["ca_pct"] > 5:
+                analyse.append(f"Croissance solide du CA (+{comparaison['evolution']['ca_pct']}%).")
+            elif comparaison["evolution"]["ca_pct"] < 0:
+                analyse.append(f"Baisse de l'activité ({comparaison['evolution']['ca_pct']}%). À surveiller.")
+                
+            if comparaison["evolution"]["charges_pct"] > comparaison["evolution"]["ca_pct"]:
+                analyse.append("Attention : les charges augmentent plus vite que le chiffre d'affaires. Risque sur la rentabilité.")
+            
+            comparaison["analyse"] = " ".join(analyse)
+            return comparaison
+            
+        except Exception as e:
+            return {"error": f"Erreur lors de la comparaison: {str(e)}"}
+
+    def get_etats_financiers(self, start_date=None, end_date=None, annee=None):
+        """
+        Génère les états financiers : Bilan + Compte de Résultat
+        """
+        if not self.project:
+            return {"error": "Projet non trouvé"}
+            
+        return {
+            "bilan": self.get_structured_bilan(start_date=start_date, end_date=end_date, annee=annee),
+            "compte_de_resultat": self.get_resultat_net(start_date=start_date, end_date=end_date, annee=annee)
+        }

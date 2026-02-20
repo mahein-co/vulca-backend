@@ -13,29 +13,29 @@ class TextToSQLService:
     DB_SCHEMA = """
     Tables PostgreSQL disponibles (toujours filtrer par project_id):
 
-    compta_journal:
+    journal:
       - id, project_id, date (DATE), numero_piece (VARCHAR)
       - numero_compte (VARCHAR), libelle (VARCHAR)
-      - montant_debit (DECIMAL), montant_credit (DECIMAL)
+      - debit_ar (DECIMAL), credit_ar (DECIMAL)
 
-    compta_grandlivre:
+    grand_livre:
       - id, project_id, date (DATE)
       - numero_compte (VARCHAR), libelle (VARCHAR)
-      - montant_debit (DECIMAL), montant_credit (DECIMAL)
+      - debit (DECIMAL), credit (DECIMAL), solde (DECIMAL)
 
-    compta_balance:
+    balance:
       - id, project_id, date (DATE)
       - numero_compte (VARCHAR), libelle (VARCHAR)
+      - total_debit (DECIMAL), total_credit (DECIMAL)
       - solde_debit (DECIMAL), solde_credit (DECIMAL)
-      - nature (VARCHAR: 'ACTIF' ou 'PASSIF')
 
-    compta_compteresultat:
+    compte_resultat:
       - id, project_id, date (DATE)
       - numero_compte (VARCHAR), libelle (VARCHAR)
       - montant_ar (DECIMAL)
       - nature (VARCHAR: 'PRODUIT' ou 'CHARGE')
 
-    compta_bilan:
+    bilan:
       - id, project_id, date (DATE)
       - numero_compte (VARCHAR), libelle (VARCHAR)
       - montant_ar (DECIMAL)
@@ -69,8 +69,10 @@ class TextToSQLService:
     """
 
     def __init__(self, project_id: int):
+        from openai import OpenAI
+        from vulca_backend import settings
         self.project_id = int(project_id)
-        self.llm_client = llm_client
+        self.llm_client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
     def generate_sql(self, question: str) -> str:
         """Demande au LLM de générer le SQL."""

@@ -1,51 +1,41 @@
 # chatbot/services/query_router.py
 
 import re
+from datetime import datetime
 from .accounting_queries import AccountingQueryService
 from .text_to_sql import TextToSQLService
+from .intent_detector import IntentDetector
 
 class QueryRouter:
     """
     Décide quelle stratégie utiliser pour répondre à la question.
-    
-    Stratégie 1: Méthodes existantes (calculs complexes : ROE, BFR, EBE...)
-    Stratégie 2: Text-to-SQL (tout le reste : questions libres, détails, filtres custom)
     """
 
-    # Questions qui bénéficient des méthodes calculées existantes
-    CALCULATED_PATTERNS = {
-        'roe':              [r'roe', r'rentabilit.* capitaux'],
-        'roa':              [r'roa', r'rentabilit.* actif'],
-        'bfr':              [r'bfr', r'besoin.*fonds.*roulement'],
-        'ebe':              [r'\bebe\b', r'excédent brut'],
-        'marge_brute':      [r'marge brute'],
-        'marges':           [r'marge nette', r'marge opérat'],
-        'rotation_stocks':  [r'rotation.*stock', r'stock.*rotation'],
-        'ratios_structure': [r'leverage', r'current ratio', r'ratio.*structure'],
-        'annees_ca_seuil': [r'années?.*(dépasse|supérieur|plus grand|au-dessus).*\d+'],
-    }
-
-    def __init__(self, project_id: int, llm_client):
+    def __init__(self, project_id: int):
         self.project_id = project_id
-        self.llm_client = llm_client
         self.accounting_service = AccountingQueryService(project_id)
-        self.sql_service = TextToSQLService(project_id, llm_client)
+        self.sql_service = TextToSQLService(project_id)
 
     def route(self, question: str) -> dict:
         """Point d'entrée principal."""
         
-        annee = self._extract_year(question)
-        intent = self._detect_calculated_intent(question)
-
-        if intent:
+        # Utiliser le nouveau détecteur d'intentions centralisé
+        detection = IntentDetector.detect(question)
+        
+        if detection:
+            intent = detection['type']
+            params = detection['params']
+            
             # Utiliser la méthode calculée existante
-            return self._use_calculated_method(intent, annee)
+            return self._use_calculated_method(intent, params)
         else:
             # Text-to-SQL pour toutes les autres questions
             return self._use_text_to_sql(question)
 
-    def _use_calculated_method(self, intent: str, annee: int | None) -> dict:
+    def _use_calculated_method(self, intent: str, params: dict) -> dict:
         method_map = {
+            'ca':               self.accounting_service.get_chiffre_affaires,
+            'charges':          self.accounting_service.get_charges,
             'roe':              self.accounting_service.get_roe,
             'roa':              self.accounting_service.get_roa,
             'bfr':              self.accounting_service.get_bfr,
@@ -54,9 +44,25 @@ class QueryRouter:
             'marges':           self.accounting_service.get_marges_profitabilite,
             'rotation_stocks':  self.accounting_service.get_rotation_stocks,
             'ratios_structure': self.accounting_service.get_ratios_structure,
+            'comparaison':      self.accounting_service.get_comparative_report,
+            'bilan_structuré':  self.accounting_service.get_structured_bilan,
+            'etats_financiers': self.accounting_service.get_etats_financiers,
+            'resultat_structuré': self.accounting_service.get_resultat_net,
+            'analyse_globale':  self.accounting_service.get_synthese_complete,
+            'tresorerie':       self.accounting_service.get_tresorerie,
         }
+        
+        if intent not in method_map:
+            return self._use_text_to_sql(f"Analyse {intent}")
+
         method = method_map[intent]
-        result = method(annee=annee) if annee else method()
+        
+        # Gestion spéciale pour comparaison (nécessite 2 dates/années)
+        if intent == 'comparaison' and 'annee1' in params and 'annee2' in params:
+            result = method(annee1=params['annee1'], annee2=params['annee2'])
+        else:
+            # Passer tous les paramètres extraits (start_date, end_date, annee)
+            result = method(**params)
         
         return {
             "source": "calculated",
@@ -66,13 +72,7 @@ class QueryRouter:
 
     def _use_text_to_sql(self, question: str) -> dict:
         try:
-            response = llm_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0
-            )
-            sql = response.choices[0].message.content
-            #sql = self.sql_service.generate_sql(question, self.llm_client)
+            sql = self.sql_service.generate_sql(question)
             results = self.sql_service.execute(sql)
             
             return {
@@ -89,13 +89,6 @@ class QueryRouter:
             }
 
     def _detect_calculated_intent(self, question: str) -> str | None:
-        q = question.lower()
-        for intent, patterns in self.CALCULATED_PATTERNS.items():
-            for pattern in patterns:
-                if re.search(pattern, q):
-                    return intent
-        return None
-
-    def _extract_year(self, question: str) -> int | None:
-        match = re.search(r'\b(20\d{2})\b', question)
-        return int(match.group(1)) if match else None
+        """Conservé pour compatibilité avec views.py mais délègue au nouveau service"""
+        detection = IntentDetector.detect(question)
+        return detection['type'] if detection else None

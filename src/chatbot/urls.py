@@ -2,6 +2,8 @@ from django.urls import path
 from chatbot import views
 from chatbot.filtered_data_view import get_filtered_accounting_data
 
+print("[DEBUG] chatbot/urls.py loaded")
+
 urlpatterns = [
     path('messages/', views.generate_response, name='generate-response'),
     path('histories/', views.get_message_histories, name='get-message-histories'),

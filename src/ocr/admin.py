@@ -10,4 +10,4 @@ class FileSourceAdmin(admin.ModelAdmin):
 @admin.register(models.FormSource)
 class FormSourceAdmin(admin.ModelAdmin):
     list_display = ['date', 'description','ref_file','piece_type','project','created_at']
-    search_fields = ['piece_type', 'description']  
+    search_fields = ['piece_type', 'description']   

@@ -871,14 +871,14 @@ from decimal import Decimal
 
 # PAGINATION STANDARD
 class StandardPagination(PageNumberPagination):
-    page_size = 20
+    page_size = 30
     page_size_query_param = 'page_size'
     max_page_size = 100
 
 class BilanListCreateView(generics.ListCreateAPIView):
     serializer_class = BilanSerializer
     permission_classes = [IsAuthenticated, HasProjectAccess]
-    pagination_class = None  # Disable pagination to return array for frontend
+    pagination_class = StandardPagination
 
     def get_queryset(self):
         project_id = getattr(self.request, 'project_id', None)
@@ -904,7 +904,7 @@ class BilanListCreateView(generics.ListCreateAPIView):
 class CompteResultatListCreateView(generics.ListCreateAPIView):
     serializer_class = CompteResultatSerializer
     permission_classes = [IsAuthenticated, HasProjectAccess]
-    pagination_class = None  # Disable pagination
+    pagination_class = StandardPagination
 
     def get_queryset(self):
         project_id = getattr(self.request, 'project_id', None)
@@ -4609,6 +4609,8 @@ def bilan_kpis_with_variations_view(request):
             'passif_non_courant': data['passif_non_courant'] or Decimal('0.00'),
             'capitaux_propres': capitaux_propres_total,
             'ratio_endettement': ratio_endettement,
+            'produits': cr_data['produits'] or Decimal('0.00'),
+            'charges': cr_data['charges'] or Decimal('0.00'),
         }
     
     # Calcul période actuelle et précédente
@@ -4634,6 +4636,8 @@ def bilan_kpis_with_variations_view(request):
             'passif_non_courant': float(current_kpis['passif_non_courant']),
             'capitaux_propres': float(current_kpis['capitaux_propres']),
             'ratio_endettement': float(current_kpis['ratio_endettement']),
+            'produits': float(current_kpis['produits']),
+            'charges': float(current_kpis['charges']),
         },
         'previous': {
             'actif_courant': float(previous_kpis['actif_courant']),

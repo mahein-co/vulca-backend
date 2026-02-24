@@ -313,9 +313,12 @@ class CompteResultat(models.Model):
 
     def save(self, *args, **kwargs):
         if self.balance_id:
-            self.numero_compte = self.balance.numero_compte
-            self.libelle = self.balance.libelle
-            self.date = self.balance.date
+            if not self.numero_compte:
+                self.numero_compte = self.balance.numero_compte
+            if not self.libelle:
+                self.libelle = self.balance.libelle
+            if not self.date:
+                self.date = self.balance.date
             # ✅ COPIE DU PROJET DEPUIS LA BALANCE
             if not self.project_id:
                 self.project_id = self.balance.project_id
@@ -373,9 +376,12 @@ class Bilan(models.Model):
 
     def save(self, *args, **kwargs):
         if self.balance_id:
-            self.numero_compte = self.balance.numero_compte
-            self.libelle = self.balance.libelle
-            self.date = self.balance.date
+            if not self.numero_compte:
+                self.numero_compte = self.balance.numero_compte
+            if not self.libelle:
+                self.libelle = self.balance.libelle
+            if not self.date:
+                self.date = self.balance.date
             # ✅ COPIE DU PROJET DEPUIS LA BALANCE
             if not self.project_id:
                 self.project_id = self.balance.project_id

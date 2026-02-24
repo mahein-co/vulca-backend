@@ -360,35 +360,44 @@ def get_accounting_context(user, project_id, query_info):
                 for d in data['details']['passif'][:5]:
                     context_parts.append(f"  - {d['compte']} - {d['libelle']}: {d['montant']:,.2f} AR")
 
-        elif query_type == 'analyse_globale':
-            annee = params.get('annee')
-            ca = service.get_chiffre_affaires(**params)
-            mb = service.get_marge_brute(**params)
-            ebe = service.get_ebe(**params)
-            marges = service.get_marges_profitabilite(**params)
-            roa_data = service.get_roa(**params)
-            bfr = service.get_bfr(date_ref=params.get('end_date'), annee=annee)
-            ratios = service.get_ratios_structure(date_ref=params.get('end_date'), annee=annee)
-            bilan = service.get_bilan_summary(annee=annee, date_bilan=params.get('end_date'))
-            
-            periode = ca.get('periode', str(annee) if annee else "Toute la période")
-            
-            context_parts.append(f"=== ANALYSE GLOBALE ({periode}) ===")
-            
-            if "error" not in ca:
-                context_parts.append(f"**Performance & Rentabilité :**")
-                context_parts.append(f"- Chiffre d'Affaires: {ca.get('montant', 0):,.2f} AR")
-                context_parts.append(f"- Marge Brute: {mb.get('montant', 0):,.2f} AR ({mb.get('taux', 0):.2f}%)")
-                context_parts.append(f"- EBE: {ebe.get('montant', 0):,.2f} AR")
-                context_parts.append(f"- Résultat Net: {marges.get('resultat_net', 0):,.2f} AR ({marges.get('marge_nette', 0):.2f}%)")
-                context_parts.append(f"- Marge Opérationnelle: {marges.get('marge_operationnelle', 0):.2f}%")
-                context_parts.append(f"- ROA (Rentabilité Actifs): {roa_data.get('valeur', 0):.2f}%")
-            
-            context_parts.append(f"\n**Gestion & Structure (au {bilan.get('date')}) :**")
-            context_parts.append(f"- BFR: {bfr.get('montant', 0):,.2f} AR")
-            context_parts.append(f"- Leverage: {ratios.get('leverage', 0):.2f}")
-            context_parts.append(f"- Current Ratio (Liquidité): {ratios.get('current_ratio', 0):.2f}")
-            context_parts.append(f"- Bilan: Actif {bilan.get('actif', 0):,.2f} AR / Passif {bilan.get('passif', 0):,.2f} AR")
+        elif query_type in ('analyse_globale', 'etats_financiers'):
+            data = service.get_dashboard_kpis(**params)
+            if "error" in data:
+                context_parts.append(f"Erreur: {data['error']}")
+            else:
+                periode = data.get('periode', 'Période sélectionnée')
+                context_parts.append(f"=== SYNTHÈSE FINANCIÈRE COMPLÈTE ({periode}) ===")
+                context_parts.append("")
+                context_parts.append("**Compte de Résultat :**")
+                context_parts.append(f"- Chiffre d'Affaires (CA): {data.get('ca', 0):,.2f} Ar")
+                context_parts.append(f"- Total Produits: {data.get('total_produits', 0):,.2f} Ar")
+                context_parts.append(f"- Total Charges: {data.get('total_charges', 0):,.2f} Ar")
+                context_parts.append(f"- Résultat Net: {data.get('resultat_net', 0):,.2f} Ar")
+                context_parts.append(f"- EBE: {data.get('ebe', 0):,.2f} Ar")
+                context_parts.append(f"- CAF: {data.get('caf', 0):,.2f} Ar")
+                context_parts.append(f"- Marge Brute: {data.get('marge_brute', 0):,.2f} Ar")
+                context_parts.append("")
+                context_parts.append("**Indicateurs de Liquidité & Structure :**")
+                context_parts.append(f"- Trésorerie Nette: {data.get('tresorerie', 0):,.2f} Ar")
+                context_parts.append(f"- BFR: {data.get('bfr', 0):,.2f} Ar")
+                context_parts.append(f"- Actifs Courants: {data.get('actifs_courants', 0):,.2f} Ar")
+                context_parts.append(f"- Passifs Courants: {data.get('passifs_courants', 0):,.2f} Ar")
+                context_parts.append(f"- Total Actif: {data.get('total_actif', 0):,.2f} Ar")
+                context_parts.append(f"- Capitaux Propres: {data.get('capitaux_propres', 0):,.2f} Ar")
+                context_parts.append(f"- Dettes Financières: {data.get('dettes_financieres', 0):,.2f} Ar")
+                context_parts.append(f"- Créances Clients: {data.get('creances_clients', 0):,.2f} Ar")
+                context_parts.append(f"- Dettes Fournisseurs: {data.get('dettes_fournisseurs', 0):,.2f} Ar")
+                context_parts.append("")
+                context_parts.append("**Ratios de Rentabilité :**")
+                context_parts.append(f"- ROE: {data.get('roe', 0):.2f}%")
+                context_parts.append(f"- ROA: {data.get('roa', 0):.2f}%")
+                context_parts.append(f"- Marge Nette: {data.get('marge_nette', 0):.2f}%")
+                context_parts.append(f"- Marge Opérationnelle: {data.get('marge_operationnelle', 0):.2f}%")
+                context_parts.append(f"- Current Ratio: {data.get('current_ratio', 0):.2f}")
+                context_parts.append(f"- Quick Ratio: {data.get('quick_ratio', 0):.2f}")
+                context_parts.append(f"- Gearing: {data.get('gearing', 0):.2f}%")
+                context_parts.append(f"- Leverage Brut: {data.get('leverage', 0):.2f}")
+                context_parts.append(f"- Rotation Stocks: {data.get('rotation_stock', 0):.2f}x")
         
         elif query_type == 'comparaison':
             if 'annee1' in params and 'annee2' in params:
@@ -680,11 +689,26 @@ def generate_response(request):
         serializer = ChatMessageSerializer(data=request.data)
         if serializer.is_valid():
             try:
-                message_history = MessageHistory.objects.get(id=message_history_id)
+                # ✅ SÉCURITÉ : Vérifier que l'historique appartient à l'utilisateur ET au projet
+                message_history = MessageHistory.objects.get(
+                    id=message_history_id, 
+                    user=user,
+                    project_id=project_id
+                )
+                
+                # ✅ AUTO-TITRAGE : Si le titre est générique, on le remplace par le début du message
+                generic_titles = ["Nouvelle discussion", "New Chat History", "", "None"]
+                if not message_history.title or message_history.title in generic_titles:
+                    clean_input = user_input.strip()
+                    if clean_input:
+                        new_title = clean_input[:40] + ("..." if len(clean_input) > 40 else "")
+                        message_history.title = new_title
+                        message_history.save()
+                
                 serializer.save(user=user, message_history=message_history)
             except MessageHistory.DoesNotExist:
-                print(f"[ERROR] MessageHistory {message_history_id} not found in final save")
-                return Response({"error": f"Historique {message_history_id} introuvable"}, status=status.HTTP_404_NOT_FOUND)
+                print(f"[ERROR] MessageHistory {message_history_id} not found for user {user.id} and project {project_id}")
+                return Response({"error": f"Historique {message_history_id} introuvable ou accès refusé"}, status=status.HTTP_404_NOT_FOUND)
 
             return Response(
                 {
@@ -761,11 +785,33 @@ def get_message_histories(request):
 @api_view(["GET", "PUT", "DELETE"])
 @permission_classes([IsAuthenticated])
 def message_history_details(request, id):
+    user = request.user
+    project_id = request.data.get('project_id') or request.query_params.get('project_id') or getattr(request, 'project_id', None)
+    
     try:
-        history = MessageHistory.objects.get(id=id, user=request.user)
+        # ✅ SÉCURITÉ : D'abord on vérifie l'existence et l'appartenance à l'utilisateur
+        history = MessageHistory.objects.get(id=id, user=user)
+        
+        # ✅ RESILIENCE : Si l'historique est "orphelin" (legacy), on lui attribue le projet actuel
+        if history.project_id is None and project_id:
+            print(f"[DEBUG] Auto-assigning project {project_id} to legacy history {id}")
+            history.project_id = project_id
+            history.save()
+        
+        # ✅ SÉCURITÉ MULTI-TENANT : Si un projet est spécifié, on vérifie que c'est le bon (sauf si c'était un orphelin qu'on vient de réparer)
+        elif project_id and str(history.project_id) != str(project_id):
+             print(f"[DEBUG] History {id} belongs to project {history.project_id}, but request specified {project_id}")
+             return Response(
+                {"error": f"Accès refusé à cet historique pour le projet actuel"}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+            
     except MessageHistory.DoesNotExist:
-        print(f"[DEBUG] History {id} not found for user {request.user.id}")
-        return Response({"error": f"Historique {id} introuvable"}, status=status.HTTP_404_NOT_FOUND)
+        print(f"[DEBUG] History {id} NOT FOUND for user {user.id}")
+        return Response(
+            {"error": f"Historique {id} introuvable"}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
     
     # HISTORY DETAILS
     if request.method == "GET":
@@ -822,104 +868,133 @@ def save_new_history_and_new_chat(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-         # 1️- Vérification de l’abonnement actif
-        #active_subscription = Subscription.objects.filter(user=request.user.id, is_active=True).order_by('-end_date').first()
-        #if not active_subscription:
-        #    return Response(
-        #        {"error": "Aucun abonnement actif trouvé. Veuillez choisir un plan pour continuer."},
-        #        status=status.HTTP_403_FORBIDDEN
-        #    )
-
-        #if active_subscription.plan.name == "trial" and active_subscription.has_reached_limit:
-        #    return Response(
-        #        {"error": "Votre période d'essai est terminée. Veuillez passer à un plan supérieur pour continuer."},
-        #        status=status.HTTP_403_FORBIDDEN
-        #    )
+        filtered_data = request.data.get('filtered_data')
 
         history_data = {
-            "title": request.data.get("title", "New Chat History"),
-            "user": request.user.id
+            "title": request.data.get("title", "Nouvelle discussion"),
+            "user": request.user.id,
+            "project": project_id  # ✅ CRITICAL: Associer au projet
         }
         new_chat_data = {
-            #"user_input": request.data.get("user_input"),
             "user_input": user_input,
             "user": request.user.id
         }
         history_serializer = MessageHistorySerializer(data=history_data)
 
-        #context = {}
         if history_serializer.is_valid():
             # Save new history
-            history_serializer.save(user=request.user) 
-            new_chat_data["message_history"] = history_serializer.instance
+            history_saved = history_serializer.save(user=request.user, project_id=project_id)
+            new_chat_data["message_history"] = history_saved.id
 
-            # User prompt to be vectorized
+            # ── 1. CONTEXTE FINANCIER (même logique que generate_response) ─────────
+            accounting_context = ""
+            current_system_prompt = SYSTEM_PROMPT
+            router = QueryRouter(project_id=project_id)
+
+            intent = router._detect_calculated_intent(user_input)
+            if intent:
+                result = router.route(user_input)
+                if result["source"] == "calculated":
+                    accounting_context = f"=== DONNÉES CALCULÉES ({result['intent']}) ===\n"
+                    accounting_context += json.dumps(result["data"], ensure_ascii=False, indent=2)
+                    print(f"[DEBUG][new_chat] Intent détecté: {intent}, données injectées.")
+            elif filtered_data:
+                is_greeting = any(g == user_input.lower().strip() for g in greetings)
+                if is_greeting:
+                    accounting_context = "=== CONTEXTE ACTUEL ===\n"
+                    filter_info = filtered_data.get('filter', {})
+                    accounting_context += f"Période active sur le dashboard: {filter_info.get('date_start')} au {filter_info.get('date_end')}\n"
+                    accounting_context += "(Réponds simplement à la salutation sans résumer toutes les données financières sauf si demandé.)\n"
+                else:
+                    accounting_context = "=== DONNÉES COMPTABLES FILTRÉES ===\n"
+                    filter_info = filtered_data.get('filter', {})
+                    accounting_context += f"Période analysée: {filter_info.get('date_start')} au {filter_info.get('date_end')}\n\n"
+                    for key, label in [('chiffre_affaires', "Chiffre d'affaires"), ('charges', "Charges"),
+                                       ('resultat_net', "Résultat net"), ('tresorerie', "Trésorerie"), ('bilan', "Bilan")]:
+                        if key in filtered_data:
+                            accounting_context += format_details(label, filtered_data[key], True)
+                    print(f"[DEBUG][new_chat] filtered_data injecté depuis le dashboard.")
+
+            if accounting_context and filtered_data:
+                dates = filtered_data.get('filter', {})
+                current_system_prompt += f"\n\nNOTE IMPORTANTE : Tu as actuellement accès aux données réelles du tableau de bord pour la période du {dates.get('date_start')} au {dates.get('date_end')}. Analyse ces données pour répondre à l'utilisateur."
+
+            current_system_prompt += "\nSi les données sont à 0.00 AR, cela signifie qu'aucune écriture comptable n'a été trouvée pour ce compte sur la période. Interprète cela comme une absence d'activité importée plutôt que comme une erreur."
+
+            # ── 2. RECHERCHE VECTORIELLE (Documents) ───────────────────────────────
             query_embedding = np.array(generate_embedding(user_input))
-
-            # Vector request
             results = search_similar_pages(query_embedding=query_embedding, project_id=project_id)
             contents = [page["content"] for page in results]
             context_text = "\n\n".join([res for res in contents])
-            
-            # -------------------------------
+
+            # ── 3. CONSTRUCTION DU CONTEXTE COMPLET ───────────────────────────────
+            full_context = ""
+            if accounting_context:
+                full_context += "=== DONNÉES FINANCIÈRES DU TABLEAU DE BORD ===\n"
+                full_context += accounting_context
+                full_context += "\n\n"
+            if context_text:
+                full_context += "=== DOCUMENTS DE RÉFÉRENCE ===\n"
+                full_context += context_text
+
+            print(f"[DEBUG][new_chat] Full context length: {len(full_context)} chars")
+
+            # ── 4. APPEL OPENAI ────────────────────────────────────────────────────
             response = client.chat.completions.create(
-                model=os.getenv('OPENAI_MODEL'),
-                messages = [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": f"Contexte:\n{context_text}\n\nQuestion: {user_input}\n\nRéponds de manière claire et concise."}
-                    ],
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": current_system_prompt},
+                    {"role": "user", "content": f"Contexte:\n{full_context}\n\nQuestion: {user_input}\n\nRéponds de manière claire et concise."}
+                ],
                 temperature=0.2
             )
 
             unique_sources = [
-                {"title":res["document_path"], "path":res["document_path"]} 
+                {"title": res["document_path"], "path": res["document_path"]}
                 for res in results
             ]
-        
+
             ai_response = response.choices[0].message.content
             if unique_sources:
                 ai_response += "\n\n**Source(s) consultée(s) :**\n"
                 for src in unique_sources:
-                    # title = src["title"]
-                    path = src["path"]
-                    ai_response += f"- {path}\n"
-            
+                    ai_response += f"- {src['path']}\n"
+
             new_chat_data["ai_response"] = ai_response
             new_chat_serializer = ChatMessageSerializer(data=new_chat_data)
-            
+
             if new_chat_serializer.is_valid():
-                # save new chat message
                 new_chat_serializer.save(
-                    user=request.user, 
+                    user=request.user,
                     message_history=history_serializer.instance
                 )
-
-
                 return Response(
                     {
-                        "conversation": history_serializer.data,
+                        "conversation": new_chat_serializer.data,
                         "sources": unique_sources,
                     },
                     status=status.HTTP_201_CREATED
                 )
-                #context = {
-                #    "conversation": history_serializer.data, 
-                #    "sources": unique_sources, 
-                #}
 
-                #active_subscription.chat_count += 1
-                #active_subscription.save()
-                
         return Response({"error": "Impossible de créer le chat"}, status=status.HTTP_400_BAD_REQUEST)
 
 
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
 def rename_history(request, id):
+    user = request.user
+    project_id = request.data.get('project_id') or request.query_params.get('project_id') or getattr(request, 'project_id', None)
+    
     try:
-        history = MessageHistory.objects.get(id=id, user=request.user)
+        history = MessageHistory.objects.get(id=id, user=user)
+        # Auto-réparation si orphelin
+        if history.project_id is None and project_id:
+             history.project_id = project_id
+             history.save()
+        elif project_id and str(history.project_id) != str(project_id):
+             return Response({"error": "Accès refusé"}, status=status.HTTP_403_FORBIDDEN)
     except MessageHistory.DoesNotExist:
-        print(f"[DEBUG] History {id} not found for rename by user {request.user.id}")
+        print(f"[DEBUG] History {id} not found for rename by user {user.id}")
         return Response({"error": f"Historique {id} introuvable"}, status=status.HTTP_404_NOT_FOUND)
     
     new_title = request.data.get("title")

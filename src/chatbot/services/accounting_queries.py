@@ -522,32 +522,152 @@ class AccountingQueryService:
         
         return response
     
-    def get_synthese_complete(self, start_date=None, end_date=None, annee=None):
+    def get_dashboard_kpis(self, start_date=None, end_date=None, annee=None):
         """
-        Synthèse financière COMPLÈTE avec tous les indicateurs clés
+        Calcule TOUS les KPIs en utilisant EXACTEMENT les mêmes formules que
+        dashboard_view_optimized.py > calculate_all_kpis().
+        C'est la source de vérité unique pour le chatbot.
         """
         if not self.project:
             return {"error": "Projet non trouvé"}
-        
-        args = {"start_date": start_date, "end_date": end_date, "annee": annee}
-        
-        return {
-            "chiffre_affaires": self.get_chiffre_affaires(**args),
-            "charges": self.get_charges(**args),
-            "resultat_net": self.get_resultat_net(**args),
-            "ebe": self.get_ebe(**args),
-            "marge_brute": self.get_marge_brute(**args),
-            "tresorerie": self.get_tresorerie(**args),
-            "bilan": self.get_structured_bilan(**args),
-            "bfr": self.get_bfr(**args),
-            "ratios": {
-                "roe": self.get_roe(**args),
-                "roa": self.get_roa(**args),
-                "marges": self.get_marges_profitabilite(**args),
-                "structure": self.get_ratios_structure(**args),
-                "rotation_stocks": self.get_rotation_stocks(annee=annee)  # Rotation stock reste annuel souvent
+
+        # ── Résoudre les dates ─────────────────────────────────────────────
+        if annee and not start_date:
+            start_date = f"{annee}-01-01"
+            end_date   = f"{annee}-12-31"
+
+        if not start_date or not end_date:
+            # Pas de filtre date → toutes les écritures
+            filters = {"project_id": self.project_id}
+            cumulative_filters = {"project_id": self.project_id}
+            d_end_str = None
+        else:
+            filters = {"project_id": self.project_id, "date__range": [start_date, end_date]}
+            cumulative_filters = {"project_id": self.project_id, "date__lte": end_date}
+            d_end_str = end_date
+
+        periode = self._format_periode(start_date, end_date, annee)
+
+        def get_sum_cr(prefix_list):
+            q = Q()
+            for p in prefix_list:
+                q |= Q(numero_compte__startswith=p)
+            return CompteResultat.objects.filter(q, **filters).aggregate(
+                total=Sum("montant_ar"))["total"] or Decimal("0.00")
+
+        def get_sum_bilan(prefix_list, type_bilan=None, cumulative=True):
+            q = Q()
+            for p in prefix_list:
+                q |= Q(numero_compte__startswith=p)
+            f = cumulative_filters if cumulative else filters
+            qs = Bilan.objects.filter(q, **f)
+            if type_bilan:
+                qs = qs.filter(type_bilan=type_bilan)
+            return qs.aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+
+        def get_total_balance_live():
+            """Identique au dashboard : somme total_debit de la table Balance"""
+            qs = Balance.objects.filter(**cumulative_filters)
+            res = qs.aggregate(total_debit=Sum("total_debit"), total_credit=Sum("total_credit"))
+            return res["total_debit"] or Decimal("0.00")
+
+        try:
+            # ── 1. MASSES DU COMPTE DE RÉSULTAT ───────────────────────────
+            ca             = get_sum_cr(["70"])
+            total_produits = get_sum_cr(["7"])
+            achats         = get_sum_cr(["60"])
+            charges_ext    = get_sum_cr(["61", "62"])
+            impots         = get_sum_cr(["63"])
+            personnel      = get_sum_cr(["64"])
+            charges_fi     = get_sum_cr(["66"])
+            dotations      = get_sum_cr(["68"])
+            total_charges  = get_sum_cr(["6"])
+            reprises       = get_sum_cr(["78"])
+
+            ebe            = get_sum_cr(["70","71","72","73","74"]) - (achats + charges_ext + impots + personnel)
+            resultat_net   = total_produits - total_charges
+            resultat_exploit = ebe - dotations + reprises
+            caf            = resultat_net + dotations - reprises
+
+            # ── 2. BILAN ──────────────────────────────────────────────────
+            stocks            = get_sum_bilan(["3"],   type_bilan="ACTIF")
+            creances_clients  = get_sum_bilan(["411"], type_bilan="ACTIF")
+            tresorerie_actif  = get_sum_bilan(["5"],   type_bilan="ACTIF")
+            actifs_courants   = stocks + creances_clients + tresorerie_actif
+
+            total_balance_live = get_total_balance_live()
+            total_actif = total_balance_live if total_balance_live > 0 else get_sum_bilan([""], type_bilan="ACTIF")
+
+            capitaux_propres = get_sum_bilan(["10","11","12"], type_bilan="PASSIF") + resultat_net
+            dettes_fi        = get_sum_bilan(["16"], type_bilan="PASSIF") + get_sum_bilan(["512"], type_bilan="PASSIF")
+            dettes_fourn     = get_sum_bilan(["401"], type_bilan="PASSIF")
+            passifs_courants = dettes_fourn + get_sum_bilan(["42","43","44"], type_bilan="PASSIF") + get_sum_bilan(["512"], type_bilan="PASSIF")
+            bfr              = stocks + creances_clients - dettes_fourn
+
+            tresorerie_nette = get_sum_bilan(["5"], type_bilan="ACTIF") - get_sum_bilan(["512"], type_bilan="PASSIF")
+
+            # ── 3. RATIOS ─────────────────────────────────────────────────
+            marge_brute = ca - achats
+            marge_nette = float(resultat_net / ca * 100) if ca != 0 else 0.0
+            marge_op    = float(resultat_exploit / ca * 100) if ca != 0 else 0.0
+            roe         = float(resultat_net / capitaux_propres * 100) if capitaux_propres != 0 else 0.0
+            roa         = float(resultat_net / total_actif * 100) if total_actif != 0 else 0.0
+            cur_ratio   = float(actifs_courants / passifs_courants) if passifs_courants != 0 else 0.0
+            quick_ratio = float((actifs_courants - stocks) / passifs_courants) if passifs_courants != 0 else 0.0
+            gearing     = float(dettes_fi / capitaux_propres) if capitaux_propres != 0 else 0.0
+            cout_ventes = get_sum_cr(["607"])
+            rot_stock   = float(cout_ventes / stocks) if stocks != 0 else 0.0
+            duree_stock = float(360 / rot_stock) if rot_stock != 0 else 0.0
+            leverage    = float(dettes_fi / ebe) if ebe != 0 else 0.0
+            annuite_caf = float(dotations / caf) if caf != 0 else 0.0
+            fi_ebe      = float(charges_fi / ebe) if ebe != 0 else 0.0
+            fi_ca       = float(charges_fi / ca) if ca != 0 else 0.0
+
+            return {
+                "periode": periode,
+                # Masses
+                "ca": float(ca),
+                "total_produits": float(total_produits),
+                "total_charges": float(total_charges),
+                "resultat_net": float(resultat_net),
+                "ebe": float(ebe),
+                "caf": float(caf),
+                "marge_brute": float(marge_brute),
+                "tresorerie": float(tresorerie_nette),
+                "bfr": float(bfr),
+                "leverage": leverage,
+                # Bilan
+                "total_actif": float(total_actif),
+                "actifs_courants": float(actifs_courants),
+                "passifs_courants": float(passifs_courants),
+                "capitaux_propres": float(capitaux_propres),
+                "stocks": float(stocks),
+                "creances_clients": float(creances_clients),
+                "dettes_fournisseurs": float(dettes_fourn),
+                "dettes_financieres": float(dettes_fi),
+                # Ratios
+                "roe": roe,
+                "roa": roa,
+                "marge_nette": marge_nette,
+                "marge_operationnelle": marge_op,
+                "current_ratio": cur_ratio,
+                "quick_ratio": quick_ratio,
+                "gearing": gearing,
+                "rotation_stock": rot_stock,
+                "duree_stock_jours": duree_stock,
+                "annuite_caf": annuite_caf,
+                "fi_ebe": fi_ebe,
+                "fi_ca": fi_ca,
             }
-        }
+        except Exception as e:
+            return {"error": f"Erreur calcul KPIs dashboard: {str(e)}"}
+
+    def get_synthese_complete(self, start_date=None, end_date=None, annee=None):
+        """
+        Synthèse financière COMPLÈTE – délègue à get_dashboard_kpis()
+        pour garantir une cohérence 100% avec le tableau de bord.
+        """
+        return self.get_dashboard_kpis(start_date=start_date, end_date=end_date, annee=annee)
     
     # ========================================
     # MÉTHODES DE CALCUL SPÉCIFIQUES (EXISTANTES)

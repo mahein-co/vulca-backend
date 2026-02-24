@@ -9,6 +9,41 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 from reportlab.lib.units import cm
 
+
+def _format_montant(value):
+    """Format montant avec espace comme séparateur de milliers (ex: 10 000 000.00)."""
+    if value is None:
+        return "0.00"
+    try:
+        f = float(value)
+        return f"{f:,.2f}".replace(",", " ")
+    except (TypeError, ValueError):
+        return "0.00"
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_export_data(data):
+    """
+    Normalise les données pour l'export : supporte data avec 'bilan' imbriqué ou structure directe.
+    Retourne (bilan_data, compte_resultat_data) ou (None, None) en cas d'erreur.
+    """
+    if not data or not isinstance(data, dict):
+        return None, None
+    if data.get("error"):
+        return None, None
+    bilan_data = data.get("bilan", data)
+    if isinstance(bilan_data, dict) and bilan_data.get("error"):
+        bilan_data = None
+    res_data = data.get("compte_de_resultat", data.get("resultat"))
+    return bilan_data, res_data
+
+
 class ExportService:
     """
     Service pour générer des rapports professionnels (Excel & PDF) pour REKAPY.
@@ -64,80 +99,85 @@ class ExportService:
 
         # Titre et Header
         sheet.write(0, 0, f"REKAPY - {report_type}", title_format)
-        sheet.write(1, 0, f"Généré le: {datetime.now().strftime('%d/%m/%Y %H:%M')}", workbook.add_format({'italic': True, 'font_size': 10}))
+        sheet.write(1, 0, f"Généré le: {datetime.now().strftime('%d/%m/%Y à %H:%M')}", workbook.add_format({'italic': True, 'font_size': 10}))
         
         row = 3
         
-        # Logique Bilan / États Financiers
-        if "actif" in data or "passif_equity" in data or "bilan" in data:
-            bilan_data = data.get("bilan", data) # Support direct ou imbriqué
-            
-            sheet.write(row, 0, "Catégorie / Compte", header_format)
+        bilan_data, res_data = _normalize_export_data(data)
+        
+        # Logique Bilan / États Financiers (structure comme les PDFs de référence)
+        if bilan_data and ("actif" in bilan_data or "passif_equity" in bilan_data):
+            # En-têtes identiques au PDF : Compte | Libellé | Montant (Ar)
+            sheet.write(row, 0, "Compte", header_format)
             sheet.write(row, 1, "Libellé", header_format)
-            sheet.write(row, 2, "Montant", header_format)
+            sheet.write(row, 2, "Montant (Ar)", header_format)
             row += 1
             
             # ACTIF
             if "actif" in bilan_data:
-                sheet.merge_range(row, 0, row, 2, "ACTIF", category_format)
+                sheet.merge_range(row, 0, row, 2, "BILAN - ACTIF", category_format)
                 row += 1
                 for cat, items in bilan_data["actif"].items():
                     sheet.write(row, 0, cat, workbook.add_format({'italic': True, 'bold': True, 'font_color': '#334155'}))
                     row += 1
                     if isinstance(items, list):
                         for item in items:
-                            sheet.write(row, 0, item.get("compte", ""))
-                            sheet.write(row, 1, item.get("libelle", ""))
-                            sheet.write(row, 2, item.get("montant", 0), currency_format)
+                            sheet.write(row, 0, str(item.get("compte", "")))
+                            sheet.write(row, 1, str(item.get("libelle", "")))
+                            sheet.write(row, 2, _safe_float(item.get("montant")), currency_format)
                             row += 1
                 
+                total_actif = _safe_float(bilan_data.get("totals", {}).get("total_actif"))
+                sheet.write(row, 0, "")
                 sheet.write(row, 1, "TOTAL ACTIF", total_format)
-                sheet.write(row, 2, bilan_data.get("totals", {}).get("total_actif", 0), total_format)
+                sheet.write(row, 2, total_actif, total_format)
                 row += 2
             
-            # PASSIF
+            # PASSIF & CAPITAUX PROPRES
             if "passif_equity" in bilan_data:
-                sheet.merge_range(row, 0, row, 2, "PASSIF & CAPITAUX PROPRES", category_format)
+                sheet.merge_range(row, 0, row, 2, "BILAN - PASSIF & CAPITAUX PROPRES", category_format)
                 row += 1
                 for cat, items in bilan_data["passif_equity"].items():
                     sheet.write(row, 0, cat, workbook.add_format({'italic': True, 'bold': True, 'font_color': '#334155'}))
                     row += 1
                     if isinstance(items, list):
                         for item in items:
-                            sheet.write(row, 0, item.get("compte", ""))
-                            sheet.write(row, 1, item.get("libelle", ""))
-                            sheet.write(row, 2, item.get("montant", 0), currency_format)
+                            sheet.write(row, 0, str(item.get("compte", "")))
+                            sheet.write(row, 1, str(item.get("libelle", "")))
+                            sheet.write(row, 2, _safe_float(item.get("montant")), currency_format)
                             row += 1
                 
-                sheet.write(row, 1, "TOTAL PASSIF & CAPITAUX PROPRES", total_format)
-                sheet.write(row, 2, (bilan_data.get("totals", {}).get("total_passif", 0) + bilan_data.get("totals", {}).get("total_equity", 0)), total_format)
+                tot_p = _safe_float(bilan_data.get("totals", {}).get("total_passif"))
+                tot_e = _safe_float(bilan_data.get("totals", {}).get("total_equity"))
+                sheet.write(row, 0, "")
+                sheet.write(row, 1, "TOTAL PASSIF & C.P", total_format)
+                sheet.write(row, 2, tot_p + tot_e, total_format)
                 row += 2
 
         # Logique Compte de Résultat
-        if any(k in data for k in ["resultat", "produits", "compte_de_resultat"]):
-            res_data = data.get("compte_de_resultat", data.get("resultat", data))
+        if res_data and isinstance(res_data, dict):
             sheet.merge_range(row, 0, row, 2, "COMPTE DE RÉSULTAT", category_format)
             row += 1
-            if isinstance(res_data, dict):
-                 # Détails si présents dans 'details', sinon cherche à la racine
-                 details = res_data.get("details", res_data)
-                 for key in ["produits", "charges"]:
-                      items = details.get(key, [])
-                      if isinstance(items, list) and items:
-                          sheet.write(row, 0, key.upper(), workbook.add_format({'bold': True}))
-                          row += 1
-                          for item in items:
-                              sheet.write(row, 0, item.get("compte", ""))
-                              sheet.write(row, 1, item.get("libelle", ""))
-                              sheet.write(row, 2, item.get("montant", 0), currency_format)
-                              row += 1
-                 row += 1
-                 res_val = res_data.get("montant", res_data.get("resultat_net", 0))
-                 sheet.write(row, 1, "RÉSULTAT NET", total_format)
-                 try:
-                     sheet.write(row, 2, float(res_val), total_format)
-                 except (TypeError, ValueError):
-                     sheet.write(row, 2, 0.0, total_format)
+            sheet.write(row, 0, "Rubrique", header_format)
+            sheet.write(row, 1, "Détail", header_format)
+            sheet.write(row, 2, "Montant (Ar)", header_format)
+            row += 1
+            details = res_data.get("details", res_data)
+            for key in ["produits", "charges"]:
+                items = details.get(key, []) if isinstance(details, dict) else []
+                if isinstance(items, list) and items:
+                    sheet.write(row, 0, key.upper(), workbook.add_format({'bold': True}))
+                    row += 1
+                    for item in items:
+                        sheet.write(row, 0, str(item.get("compte", "")))
+                        sheet.write(row, 1, str(item.get("libelle", "")))
+                        sheet.write(row, 2, _safe_float(item.get("montant")), currency_format)
+                        row += 1
+            row += 1
+            res_val = _safe_float(res_data.get("montant", res_data.get("resultat_net")))
+            sheet.write(row, 0, "")
+            sheet.write(row, 1, "RÉSULTAT NET", total_format)
+            sheet.write(row, 2, res_val, total_format)
 
         # Logique Comparatif
         elif "annee_1" in data and "evolution" in data:
@@ -188,7 +228,26 @@ class ExportService:
         Génère un PDF moderne et structuré avec ReportLab.
         """
         buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+        
+        def _pdf_footer(canvas, doc):
+            """Pied de page structuré type REKAPY : -- Page N --"""
+            canvas.saveState()
+            page_num = canvas.getPageNumber()
+            canvas.setFont("Helvetica", 9)
+            canvas.setFillColor(colors.HexColor("#64748B"))
+            canvas.drawCentredString(A4[0] / 2, 1.5 * cm, f"-- {page_num} --")
+            canvas.restoreState()
+        
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            rightMargin=2*cm,
+            leftMargin=2*cm,
+            topMargin=2*cm,
+            bottomMargin=2.5*cm,
+            onFirstPage=_pdf_footer,
+            onLaterPages=_pdf_footer,
+        )
         elements = []
         styles = getSampleStyleSheet()
 
@@ -228,11 +287,10 @@ class ExportService:
         elements.append(Paragraph(f"REKAPY - {report_type}", title_style))
         elements.append(Paragraph(f"Généré le: {datetime.now().strftime('%d/%m/%Y à %H:%M')}", subtitle_style))
 
-        # Logique Bilan
-        if "actif" in data or "passif_equity" in data or "bilan" in data:
-            bilan_data = data.get("bilan", data)
-            
-            # ACTIF
+        bilan_data, res_data = _normalize_export_data(data)
+
+        # Logique Bilan (structure identique aux PDFs de référence)
+        if bilan_data and ("actif" in bilan_data or "passif_equity" in bilan_data):
             if "actif" in bilan_data:
                 elements.append(Paragraph("BILAN - ACTIF", section_style))
                 table_data = [["Compte", "Libellé", "Montant (Ar)"]]
@@ -240,13 +298,15 @@ class ExportService:
                     if isinstance(items, list):
                         table_data.append([Paragraph(f"<b>{cat}</b>", styles['Normal']), "", ""])
                         for item in items:
+                            libelle = (item.get("libelle") or "")[:50]
                             table_data.append([
                                 str(item.get("compte", "")),
-                                item.get("libelle", "")[:40],
-                                f"{item.get('montant', 0):,.2f}".replace(",", " ")
+                                libelle,
+                                _format_montant(item.get("montant"))
                             ])
                 
-                table_data.append(["", Paragraph("<b>TOTAL ACTIF</b>", styles['Normal']), f"<b>{bilan_data.get('totals', {}).get('total_actif', 0):,.2f}</b>".replace(",", " ")])
+                total_actif = _format_montant(bilan_data.get("totals", {}).get("total_actif"))
+                table_data.append(["", Paragraph("<b>TOTAL ACTIF</b>", styles['Normal']), f"<b>{total_actif}</b>"])
                 
                 t = Table(table_data, colWidths=[3*cm, 9*cm, 4*cm])
                 t.setStyle(TableStyle([
@@ -261,7 +321,7 @@ class ExportService:
                 elements.append(t)
                 elements.append(Spacer(1, 1*cm))
 
-            # PASSIF
+            # PASSIF & CAPITAUX PROPRES
             if "passif_equity" in bilan_data:
                 elements.append(Paragraph("BILAN - PASSIF & CAPITAUX PROPRES", section_style))
                 table_data = [["Compte", "Libellé", "Montant (Ar)"]]
@@ -269,15 +329,17 @@ class ExportService:
                     if isinstance(items, list):
                         table_data.append([Paragraph(f"<b>{cat}</b>", styles['Normal']), "", ""])
                         for item in items:
+                            libelle = (item.get("libelle") or "")[:50]
                             table_data.append([
                                 str(item.get("compte", "")),
-                                item.get("libelle", "")[:40],
-                                f"{item.get('montant', 0):,.2f}".replace(",", " ")
+                                libelle,
+                                _format_montant(item.get("montant"))
                             ])
                 
-                tot_p = bilan_data.get('totals', {}).get('total_passif', 0)
-                tot_e = bilan_data.get('totals', {}).get('total_equity', 0)
-                table_data.append(["", Paragraph("<b>TOTAL PASSIF & C.P</b>", styles['Normal']), f"<b>{(tot_p + tot_e):,.2f}</b>".replace(",", " ")])
+                tot_p = _safe_float(bilan_data.get('totals', {}).get('total_passif'))
+                tot_e = _safe_float(bilan_data.get('totals', {}).get('total_equity'))
+                total_pe = _format_montant(tot_p + tot_e)
+                table_data.append(["", Paragraph("<b>TOTAL PASSIF & C.P</b>", styles['Normal']), f"<b>{total_pe}</b>"])
                 
                 t = Table(table_data, colWidths=[3*cm, 9*cm, 4*cm])
                 t.setStyle(TableStyle([
@@ -287,43 +349,39 @@ class ExportService:
                     ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
                     ('BOTTOMPADDING', (0,0), (-1,0), 12),
                     ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
                 ]))
                 elements.append(t)
 
-        # Logique Résultat
-        if any(k in data for k in ["resultat_net", "resultat", "produits", "compte_de_resultat"]):
-            res_data = data.get("compte_de_resultat", data.get("resultat", data))
+        # Logique Compte de Résultat
+        if res_data and isinstance(res_data, dict):
             elements.append(PageBreak() if len(elements) > 10 else Spacer(1, 1*cm))
             elements.append(Paragraph("COMPTE DE RÉSULTAT", section_style))
-            
-            if isinstance(res_data, dict):
-                table_data = [["Rubrique", "Détail", "Montant (Ar)"]]
-                details = res_data.get("details", res_data)
+            table_data = [["Rubrique", "Détail", "Montant (Ar)"]]
+            details = res_data.get("details", res_data)
+            if isinstance(details, dict):
                 for key in ["produits", "charges"]:
                     items = details.get(key, [])
                     if isinstance(items, list) and items:
                         table_data.append([Paragraph(f"<b>{key.upper()}</b>", styles['Normal']), "", ""])
                         for item in items:
+                            libelle = (item.get("libelle") or "")[:50]
                             table_data.append([
                                 str(item.get("compte", "")),
-                                item.get("libelle", "")[:40],
-                                f"{item.get('montant', 0):,.2f}".replace(",", " ")
+                                libelle,
+                                _format_montant(item.get("montant"))
                             ])
-                
-                res_val = res_data.get("montant", res_data.get("resultat_net", 0))
-                try:
-                    res_val_f = float(res_val)
-                except (TypeError, ValueError):
-                    res_val_f = 0.0
-                
-                table_data.append(["", Paragraph("<b>RÉSULTAT NET</b>", styles['Normal']), f"<b>{res_val_f:,.2f}</b>".replace(",", " ")])
-                t = Table(table_data, colWidths=[3*cm, 9*cm, 4*cm])
-                t.setStyle(TableStyle([
-                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F8FAFC')),
-                    ('ALIGN', (2,0), (2,-1), 'RIGHT'),
-                    ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
-                ]))
-                elements.append(t)
+            
+            res_val_f = _safe_float(res_data.get("montant", res_data.get("resultat_net")))
+            table_data.append(["", Paragraph("<b>RÉSULTAT NET</b>", styles['Normal']), f"<b>{_format_montant(res_val_f)}</b>"])
+            t = Table(table_data, colWidths=[3*cm, 9*cm, 4*cm])
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#F8FAFC')),
+                ('ALIGN', (2,0), (2,-1), 'RIGHT'),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ]))
+            elements.append(t)
 
         # Logique Comparatif
         elif "annee_1" in data and "evolution" in data:
@@ -354,6 +412,13 @@ class ExportService:
                 elements.append(Spacer(1, 1*cm))
                 elements.append(Paragraph("ANALYSE COMPTABLE", styles['Heading3']))
                 elements.append(Paragraph(data["analyse"], styles['Normal']))
+
+        # Si aucun contenu structuré (données manquantes ou erreur)
+        if len(elements) <= 2:
+            elements.append(Paragraph(
+                "Aucune donnée disponible pour la période demandée. Veuillez préciser une année ou une période.",
+                styles['Normal']
+            ))
 
         # Génération
         doc.build(elements)

@@ -46,9 +46,10 @@ class QueryRouter:
             'ratios_structure': self.accounting_service.get_ratios_structure,
             'comparaison':      self.accounting_service.get_comparative_report,
             'bilan_structuré':  self.accounting_service.get_structured_bilan,
-            'etats_financiers': self.accounting_service.get_etats_financiers,
+            # ── Ces deux intents utilisent maintenant la source de vérité unique ──
+            'etats_financiers': self.accounting_service.get_dashboard_kpis,
             'resultat_structuré': self.accounting_service.get_resultat_net,
-            'analyse_globale':  self.accounting_service.get_synthese_complete,
+            'analyse_globale':  self.accounting_service.get_dashboard_kpis,
             'tresorerie':       self.accounting_service.get_tresorerie,
         }
         

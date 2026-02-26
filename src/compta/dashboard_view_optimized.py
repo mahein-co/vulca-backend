@@ -43,16 +43,26 @@ def dashboard_indicators_view(request):
             return qs.aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
 
         def get_sum_bilan(prefix_list, type_bilan=None, cumulative=True):
-            q = Q()
-            for p in prefix_list:
-                q |= Q(numero_compte__startswith=p)
+            # Anti double-comptage : prendre le dernier état par compte
+            q = Q(project_id=project_id, date__lte=d_end)
+            if prefix_list:
+                pq = Q()
+                for p in prefix_list: pq |= Q(numero_compte__startswith=p)
+                q &= pq
+            if type_bilan: q &= Q(type_bilan=type_bilan)
             
-            f = cumulative_filters if cumulative else filters
-            qs = Bilan.objects.filter(q, **f)
-            if type_bilan:
-                qs = qs.filter(type_bilan=type_bilan)
+            # Group by account and get latest date
+            latest_dates = Bilan.objects.filter(q).values('numero_compte').annotate(max_d=Max('date'))
             
-            return qs.aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+            total = Decimal('0.00')
+            for item in latest_dates:
+                last_rec = Bilan.objects.filter(
+                    project_id=project_id, 
+                    numero_compte=item['numero_compte'], 
+                    date=item['max_d']
+                ).first()
+                if last_rec: total += last_rec.montant_ar
+            return total
 
         from compta.models import Balance
         def get_total_balance_live(d_end):

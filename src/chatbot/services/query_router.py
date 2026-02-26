@@ -19,20 +19,18 @@ class QueryRouter:
     def route(self, question: str) -> dict:
         """Point d'entrée principal."""
         
-        # Utiliser le nouveau détecteur d'intentions centralisé
         detection = IntentDetector.detect(question)
         
         if detection:
-            intent = detection['type']
+            # On utilise maintenant la liste 'types' pour agréger les résultats
+            intents = detection['types']
             params = detection['params']
             
-            # Utiliser la méthode calculée existante
-            return self._use_calculated_method(intent, params)
+            return self._use_calculated_methods(intents, params)
         else:
-            # Text-to-SQL pour toutes les autres questions
             return self._use_text_to_sql(question)
 
-    def _use_calculated_method(self, intent: str, params: dict) -> dict:
+    def _use_calculated_methods(self, intents: list, params: dict) -> dict:
         method_map = {
             'ca':               self.accounting_service.get_chiffre_affaires,
             'charges':          self.accounting_service.get_charges,
@@ -46,30 +44,38 @@ class QueryRouter:
             'ratios_structure': self.accounting_service.get_ratios_structure,
             'comparaison':      self.accounting_service.get_comparative_report,
             'bilan_structuré':  self.accounting_service.get_structured_bilan,
-            # ── Ces deux intents utilisent maintenant la source de vérité unique ──
             'etats_financiers': self.accounting_service.get_dashboard_kpis,
             'resultat_structuré': self.accounting_service.get_resultat_net,
             'analyse_globale':  self.accounting_service.get_dashboard_kpis,
             'tresorerie':       self.accounting_service.get_tresorerie,
+            'bilan':            self.accounting_service.get_bilan_summary,
+            'resultat':         self.accounting_service.get_resultat_net,
         }
         
-        if intent not in method_map:
-            return self._use_text_to_sql(f"Analyse {intent}")
+        results = {}
+        for intent in intents:
+            if intent in method_map:
+                method = method_map[intent]
+                try:
+                    if intent == 'comparaison' and 'annee1' in params and 'annee2' in params:
+                        results[intent] = method(annee1=params['annee1'], annee2=params['annee2'])
+                    else:
+                        results[intent] = method(**params)
+                except Exception as e:
+                    results[intent] = {"error": str(e)}
 
-        method = method_map[intent]
-        
-        # Gestion spéciale pour comparaison (nécessite 2 dates/années)
-        if intent == 'comparaison' and 'annee1' in params and 'annee2' in params:
-            result = method(annee1=params['annee1'], annee2=params['annee2'])
-        else:
-            # Passer tous les paramètres extraits (start_date, end_date, annee)
-            result = method(**params)
-        
+        if not results:
+            return self._use_text_to_sql(f"Analyse {' '.join(intents)}")
+
         return {
             "source": "calculated",
-            "intent": intent,
-            "data": result
+            "intents": intents,
+            "data": results
         }
+
+    def _use_calculated_method(self, intent: str, params: dict) -> dict:
+        """Conservé pour rétrocompatibilité"""
+        return self._use_calculated_methods([intent], params)
 
     def _use_text_to_sql(self, question: str) -> dict:
         try:

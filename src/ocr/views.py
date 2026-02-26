@@ -761,6 +761,7 @@ def excel_save_data_view(request):
         return Response({"error": "Aucune donnée à sauvegarder."}, status=400)
     
     try:
+        detected_types = set(s.get('detected_type') for s in sheets_data)
         created_bilans = 0
         created_cr = 0
         created_journals = 0  # NOUVEAU: Compteur pour les écritures Journal
@@ -849,8 +850,6 @@ def excel_save_data_view(request):
                 if not first_date:
                     first_date = date.today()
                 
-                # Déterminer le piece_type basé sur les types détectés et noms de feuilles
-                detected_types = set(s.get('detected_type') for s in sheets_data)
                 sheet_names_upper = [s.get('sheet_name', '').upper() for s in sheets_data]
                 
                 if 'JOURNAL' in detected_types:

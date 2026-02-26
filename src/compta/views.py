@@ -3631,35 +3631,6 @@ def get_min_journal_date_view(request):
          return Response({"min_date": f"{date.today().year}-01-01"})
 
 
-@api_view(["GET"])
-@permission_classes([IsAuthenticated, HasProjectAccess])
-def get_available_years_view(request):
-    """
-    Retourne la liste des années disponibles dans les écritures comptables.
-    Triées par ordre décroissant (plus récent en premier).
-    """
-    from django.db.models.functions import ExtractYear
-    from datetime import date
-    
-    # PROJECT FILTER
-    project_id = getattr(request, "project_id", None)
-    years = (
-        Journal.objects
-        .filter(project_id=project_id)
-        .annotate(year=ExtractYear('date'))
-        .values_list('year', flat=True)
-        .distinct()
-        .order_by('-year')
-    )
-    
-    # Filtrer les None éventuels et convertir en liste
-    available_years = [y for y in years if y is not None]
-    
-    # Si vide, retourner l'année courante par défaut
-    if not available_years:
-        available_years = [date.today().year]
-        
-    return Response(available_years)
 
 
 @api_view(["GET"])
@@ -4666,15 +4637,18 @@ def bilan_kpis_with_variations_view(request):
 def get_available_years_view(request):
     """
     Retourne la liste des années disponibles dans les écritures comptables,
-    le Bilan et le Compte de Résultat.
+    le Bilan et le Compte de Résultat pour le projet sélectionné.
     Triées par ordre décroissant (plus récent en premier).
     """
     from django.db.models.functions import ExtractYear
     from datetime import date
     
+    # 1. Filtre par PROJET (STRICT)
+    project_id = getattr(request, 'project_id', None)
+    
     # 1. Années du Journal des écritures
     journal_years = set(
-        Journal.objects
+        Journal.objects.filter(project_id=project_id)
         .annotate(year=ExtractYear('date'))
         .values_list('year', flat=True)
         .distinct()
@@ -4682,7 +4656,7 @@ def get_available_years_view(request):
     
     # 2. Années du Bilan
     bilan_years = set(
-        Bilan.objects
+        Bilan.objects.filter(project_id=project_id)
         .annotate(year=ExtractYear('date'))
         .values_list('year', flat=True)
         .distinct()
@@ -4690,7 +4664,7 @@ def get_available_years_view(request):
 
     # 3. Années du Compte de Résultat
     cr_years = set(
-        CompteResultat.objects
+        CompteResultat.objects.filter(project_id=project_id)
         .annotate(year=ExtractYear('date'))
         .values_list('year', flat=True)
         .distinct()
@@ -4702,7 +4676,7 @@ def get_available_years_view(request):
     # Filtrer les None éventuels, convertir en liste et trier
     available_years = sorted([y for y in all_years_set if y is not None], reverse=True)
     
-    # Si vide, retourner l'année courante par défaut
+    # Si vide, retourner l'année en cours par défaut (comportement d'origine)
     if not available_years:
         available_years = [date.today().year]
         

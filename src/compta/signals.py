@@ -204,8 +204,6 @@ def generate_financial_statements(sender, instance, **kwargs):
                 }
             )
             
-            # Recalculer les CP car le résultat change
-            _update_calculated_equity(project, instance.date)
             return
 
         # ===================================================
@@ -260,70 +258,9 @@ def generate_financial_statements(sender, instance, **kwargs):
                 }
             )
         
-        # Mise à jour de l'équilibrage (CP calculés)
-        _update_calculated_equity(project, instance.date)
 
     except Exception as e:
         print(f"[ERROR] ERREUR SIGNAL STATEMENTS pour {instance.numero_compte} : {e}")
 
 
-def _update_calculated_equity(project, date_val):
-    """
-    Helper pour recalculer les Capitaux Propres temporaires (équilibrage) pour un projet/date précis.
-    """
-    # 1. Vérifier si un capital réel (10x) existe pour ce projet
-    capital_reel_existe = Bilan.objects.filter(
-        project=project,
-        date=date_val,
-        numero_compte__startswith='10',
-        type_bilan='PASSIF'
-    ).exclude(libelle__icontains='calculé').exists()
 
-    if capital_reel_existe:
-        Bilan.objects.filter(project=project, date=date_val, numero_compte='101', libelle__icontains='calculé').delete()
-        return
-
-    # 2. Calculer l'écart Actif - Passif - Résultat
-    total_actif = Bilan.objects.filter(project=project, date=date_val, type_bilan='ACTIF').aggregate(t=Sum('montant_ar'))['t'] or Decimal('0')
-    total_passif = Bilan.objects.filter(project=project, date=date_val, type_bilan='PASSIF').exclude(numero_compte='101').aggregate(t=Sum('montant_ar'))['t'] or Decimal('0')
-    
-    res_agg = CompteResultat.objects.filter(project=project, date=date_val).aggregate(
-        p=Sum('montant_ar', filter=models.Q(nature='PRODUIT')),
-        c=Sum('montant_ar', filter=models.Q(nature='CHARGE'))
-    )
-    resultat_net = (res_agg['p'] or Decimal('0')) - (res_agg['c'] or Decimal('0'))
-    
-    cp_temp = total_actif - (total_passif + resultat_net)
-    
-    if cp_temp > Decimal('0.01'):
-        balance_cp, _ = Balance.objects.get_or_create(
-            project=project,
-            numero_compte='101',
-            date=date_val,
-            defaults={'libelle': 'Capitaux propres (calculé)', 'solde_credit': cp_temp}
-        )
-        Bilan.objects.update_or_create(
-            project=project,
-            numero_compte='101',
-            date=date_val,
-            defaults={
-                'balance': balance_cp,
-                'libelle': 'Capitaux propres (calculé)',
-                'montant_ar': cp_temp,
-                'type_bilan': 'PASSIF',
-                'categorie': 'CAPITAUX_PROPRES'
-            }
-        )
-    else:
-        Bilan.objects.filter(project=project, date=date_val, numero_compte='101').delete()
-
-
-@receiver(post_save, sender=Bilan)
-def recalculate_cp_on_manual_bilan(sender, instance, created, **kwargs):
-    if created and not instance.numero_compte == '101':
-        _update_calculated_equity(instance.project, instance.date)
-
-@receiver(post_save, sender=CompteResultat)
-def recalculate_cp_on_manual_cr(sender, instance, created, **kwargs):
-    if created:
-        _update_calculated_equity(instance.project, instance.date)

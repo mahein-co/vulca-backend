@@ -188,6 +188,8 @@ def get_accounting_context(user, project_id, query_info):
             context_parts.append(f"**Chiffre d'affaires** ({data['periode']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Comptes: {data['comptes']}")
+            if 'formule' in data:
+                context_parts.append(f"- Formule: {data['formule']}")
 
             # Afficher les détails si disponibles
             if 'details' in data:
@@ -204,6 +206,8 @@ def get_accounting_context(user, project_id, query_info):
             context_parts.append(f"**Charges** ({data['periode']}):")
             context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
             context_parts.append(f"- Comptes: {data['comptes']}")
+            if 'formule' in data:
+                context_parts.append(f"- Formule: {data['formule']}")
 
             if 'details' in data:
                 context_parts.append(f"\n**Détails des charges** ({data['nb_lignes']} lignes):")
@@ -403,18 +407,23 @@ def get_accounting_context(user, project_id, query_info):
             if 'annee1' in params and 'annee2' in params:
                 data = service.compare_periodes(params['annee1'], params['annee2'])
                 context_parts.append(f"**Comparaison {params['annee1']} vs {params['annee2']}:**")
-                context_parts.append(f"\n**Année {params['annee1']}:**")
-                context_parts.append(f"- CA: {data['annee_1']['chiffre_affaires']:,.2f} AR")
-                context_parts.append(f"- Charges: {data['annee_1']['charges']:,.2f} AR")
+                context_parts.append(f"\n**Année {params['annee1']} ({data['annee_1']['nb_mois_enregistres']} mois):**")
+                context_parts.append(f"- CA Total: {data['annee_1']['chiffre_affaires']:,.2f} AR")
+                context_parts.append(f"- Moyenne mensuelle CA: {data['annee_1']['moyenne_mensuelle_ca']:,.2f} AR")
+                context_parts.append(f"- Charges Totales: {data['annee_1']['charges']:,.2f} AR")
+                context_parts.append(f"- Moyenne mensuelle Charges: {data['annee_1']['moyenne_mensuelle_charges']:,.2f} AR")
                 context_parts.append(f"- Résultat: {data['annee_1']['resultat']:,.2f} AR")
-                context_parts.append(f"\n**Année {params['annee2']}:**")
-                context_parts.append(f"- CA: {data['annee_2']['chiffre_affaires']:,.2f} AR")
-                context_parts.append(f"- Charges: {data['annee_2']['charges']:,.2f} AR")
+                
+                context_parts.append(f"\n**Année {params['annee2']} ({data['annee_2']['nb_mois_enregistres']} mois):**")
+                context_parts.append(f"- CA Total: {data['annee_2']['chiffre_affaires']:,.2f} AR")
+                context_parts.append(f"- Moyenne mensuelle CA: {data['annee_2']['moyenne_mensuelle_ca']:,.2f} AR")
+                context_parts.append(f"- Charges Totales: {data['annee_2']['charges']:,.2f} AR")
+                context_parts.append(f"- Moyenne mensuelle Charges: {data['annee_2']['moyenne_mensuelle_charges']:,.2f} AR")
                 context_parts.append(f"- Résultat: {data['annee_2']['resultat']:,.2f} AR")
                 context_parts.append(f"\n**Évolution:**")
-                context_parts.append(f"- CA: {data['evolution']['ca']:+,.2f} AR")
-                context_parts.append(f"- Charges: {data['evolution']['charges']:+,.2f} AR")
-                context_parts.append(f"- Résultat: {data['evolution']['resultat']:+,.2f} AR")
+                context_parts.append(f"- CA: {data['evolution']['ca']:+,.2f} AR ({data['evolution']['ca_pct']:.2f}%)")
+                context_parts.append(f"- Charges: {data['evolution']['charges']:+,.2f} AR ({data['evolution']['charges_pct']:.2f}%)")
+                context_parts.append(f"- Résultat: {data['evolution']['resultat']:+,.2f} AR ({data['evolution']['resultat_pct']:.2f}%)")
     
     except Exception as e:
         context_parts.append(f"Erreur lors de la récupération des données: {str(e)}")
@@ -502,14 +511,43 @@ def generate_response(request):
         # 1. ANALYSE DES INTENTS CALCULÉS PRIORITAIRES
         if project_id:
             router = QueryRouter(project_id=project_id)
-            intent = router._detect_calculated_intent(user_input)
+            detection = IntentDetector.detect(user_input)
             
-            if intent:
+            if detection:
+                # --- MEMOIRE DE CONTEXTE (Dates) ---
+                # Si aucune date n'est détectée dans la question actuelle, 
+                # on cherche si une période a été définie précédemment dans cette discussion.
+                params = detection.get('params', {})
+                if not params.get('start_date') or not params.get('end_date'):
+                    last_messages = ChatMessage.objects.filter(
+                        message_history_id=message_history_id
+                    ).order_by('-timestamp')[:5]
+                    
+                    for msg in last_messages:
+                        # On cherche une détection de date dans l'input utilisateur précédent
+                        prev_detection = IntentDetector.detect(msg.user_input)
+                        if prev_detection and prev_detection.get('params'):
+                            p = prev_detection['params']
+                            if p.get('start_date') and p.get('end_date'):
+                                # Héritage des dates si elles manquent
+                                if not params.get('start_date'): params['start_date'] = p['start_date']
+                                if not params.get('end_date'): params['end_date'] = p['end_date']
+                                if not params.get('annee') and p.get('annee'): params['annee'] = p['annee']
+                                print(f"[DEBUG] Context Inherited: {params['start_date']} to {params['end_date']}")
+                                break
+                
                 intent_detected = True
-                result = router.route(user_input)
-                if result["source"] == "calculated":
-                    accounting_context = f"=== DONNÉES CALCULÉES ({result['intent']}) ===\n"
-                    accounting_context += json.dumps(result["data"], ensure_ascii=False, indent=2)
+                result = router._use_calculated_methods(detection['types'], params)
+                
+                if result.get("source") == "calculated":
+                    all_intents = result.get("intents", [result.get("intent", "inconnu")])
+                    intents_str = ", ".join(all_intents)
+                    accounting_context = f"=== DONNÉES CALCULÉES ({intents_str}) ===\n"
+                    context_data = result.get("data", {})
+                    accounting_context += json.dumps(context_data, ensure_ascii=False, indent=2)
+                    
+                    # Instruction d'analyse pour l'IA
+                    accounting_context += "\n\nINSTRUCTION ANALYSE : Priorise STRICTEMENT les chiffres du bloc 'DONNÉES CALCULÉES' ci-dessus. Si l'utilisateur demande plusieurs indicateurs (ex: EBE, BFR, CAF), utilise les données correspondantes dans le JSON. Ne mélange pas ces données avec d'autres sources."
                     
                     # GESTION DES EXPORTS (REKAPY Modern Export)
                     export_keywords = ["générer", "export", "rapport", "états financiers", "excel", "pdf", "télécharger"]

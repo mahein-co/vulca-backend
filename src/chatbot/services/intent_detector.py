@@ -41,16 +41,37 @@ class IntentDetector:
     @staticmethod
     def _extract_month_year(text: str):
         """
-        Cherche des expressions 'mois AAAA' dans le texte (ordre quelconque).
-        Retourne une liste de (mois_num, annee) triée par ordre d'apparition.
+        Cherche des expressions 'mois AAAA' ou 'JJ mois AAAA' dans le texte.
+        Retourne une liste de (jour, mois_num, annee) triée par ordre d'apparition.
         """
-        pattern = r'(janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre)\s+(20\d{2})'
-        matches = re.findall(pattern, text, re.IGNORECASE)
+        # Mois avec gestion des typos communes (f[ée]vrier, fervier, etc.)
+        mois_regex = r'(janvier|f[ée]vrier|fervier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre)'
+        
+        # Pattern 1: DD mois YYYY
+        pattern_full = rf'(\d{{1,2}})\s+{mois_regex}\s+(20\d{{2}})'
+        matches_full = re.findall(pattern_full, text, re.IGNORECASE)
+        
+        # Pattern 2: mois YYYY
+        pattern_month_year = rf'{mois_regex}\s+(20\d{{2}})'
+        matches_my = re.findall(pattern_month_year, text, re.IGNORECASE)
+        
         result = []
-        for mois_str, annee_str in matches:
-            mois_num = MOIS_FR.get(mois_str.lower())
-            if mois_num:
-                result.append((mois_num, int(annee_str)))
+        # On garde une trace des positions pour trier si besoin, mais ici on va simplifier
+        # Priorité aux dates complètes
+        for d, m_str, y in matches_full:
+            m_num = MOIS_FR.get(m_str.lower()) or 2 if 'ferv' in m_str.lower() else MOIS_FR.get(m_str.lower())
+            if m_num:
+                result.append(date(int(y), m_num, int(d)))
+        
+        # Ajouter les mois-années s'ils ne font pas partie d'une date complète déjà trouvée
+        for m_str, y in matches_my:
+            m_num = MOIS_FR.get(m_str.lower()) or 2 if 'ferv' in m_str.lower() else MOIS_FR.get(m_str.lower())
+            if m_num:
+                # Vérifier si on n'a pas déjà cette année/mois en date complète
+                exists = any(d.year == int(y) and d.month == m_num for d in result)
+                if not exists:
+                    result.append((m_num, int(y)))
+        
         return result
 
     @staticmethod
@@ -59,13 +80,25 @@ class IntentDetector:
         Détecte l'intention et extrait les paramètres.
         """
         user_input_lower = user_input.lower()
+        import calendar
 
-        # 1. Détection du type de requête
-        query_type = None
+        # 1. Détection du type de requête (Multi-intents)
+        query_types = []
         for key, pattern in IntentDetector.PATTERNS.items():
             if re.search(pattern, user_input_lower):
-                query_type = key
-                break
+                query_types.append(key)
+        
+        # Priorisation : Si on a des indicateurs précis, on peut supprimer 'analyse_globale'
+        # pour éviter les messages d'avertissement inutiles.
+        if any(t in query_types for t in ['ca', 'charges', 'ebe', 'roe', 'roa', 'bfr', 'tresorerie', 'resultat']):
+            if 'analyse_globale' in query_types:
+                query_types.remove('analyse_globale')
+
+        if not query_types:
+            query_type = None
+        else:
+            # Pour la rétrocompatibilité si besoin, on garde le premier
+            query_type = query_types[0]
 
         # 2. Détection de la demande de détails
         demande_details = bool(re.search(
@@ -73,93 +106,99 @@ class IntentDetector:
             user_input_lower
         ))
 
-        # 3. Extraction des dates et années
-        # Priorité 1: dates au format DD/MM/YYYY ou DD-MM-YYYY
-        date_matches = re.findall(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4})', user_input)
-        date_matches = [d.replace('-', '/').replace('.', '/') for d in date_matches]
+        # 3. Extraction de toutes les dates possibles
+        found_start_dates = []
+        found_end_dates = []
 
-        # Priorité 2: expressions "mois AAAA"
-        month_year_pairs = IntentDetector._extract_month_year(user_input_lower)
+        # A. Format numérique JJ/MM/AAAA
+        date_matches = re.findall(r'(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})', user_input)
+        for d_str in date_matches:
+            d_str = d_str.replace('-', '/').replace('.', '/')
+            try:
+                # Gérer JJ/MM/AAAA ou J/M/AAAA
+                dt = datetime.strptime(d_str, '%d/%m/%Y').date()
+                found_start_dates.append(dt)
+                found_end_dates.append(dt)
+            except ValueError:
+                pass
 
-        # Toutes les années présentes dans le texte
-        annees = re.findall(r'\b(20\d{2})\b', user_input)
+        # B. Format littéral (mars 2024, 03 mars 2024, etc.)
+        literal_dates = IntentDetector._extract_month_year(user_input_lower)
+        for d in literal_dates:
+            if isinstance(d, date):
+                found_start_dates.append(d)
+                found_end_dates.append(d)
+            else:
+                m_num, y = d
+                found_start_dates.append(date(y, m_num, 1))
+                last_day = calendar.monthrange(y, m_num)[1]
+                found_end_dates.append(date(y, m_num, last_day))
 
-        if not query_type and (date_matches or month_year_pairs or annees):
+        # C. Années seules (en évitant les années faisant partie d'une date JJ/MM/AAAA ou mois AAAA)
+        # On extrait d'abord toutes les occurrences potentielles d'années
+        potential_years = re.findall(r'(?<![\/\-\.\d])(20\d{2})(?![\/\-\.\d])', user_input)
+        annees = []
+        for y_str in potential_years:
+            y_val = int(y_str)
+            # On vérifie si cette année n'est pas déjà présente dans les dates littérales trouvées
+            is_redundant = False
+            for d in literal_dates:
+                if isinstance(d, date) and d.year == y_val:
+                    is_redundant = True; break
+                elif isinstance(d, tuple) and d[1] == y_val:
+                    is_redundant = True; break
+            
+            if not is_redundant:
+                annees.append(y_val)
+
+        for y in annees:
+            found_start_dates.append(date(y, 1, 1))
+            found_end_dates.append(date(y, 12, 31))
+
+        if not query_types and (found_start_dates or annees):
+            query_types = ['analyse_globale']
             query_type = 'analyse_globale'
 
-        if not query_type:
+        if not query_types:
             return None
 
-        # 4. Construction des paramètres
+        # 4. Synthèse des paramètres
         params = {}
-
-        # Cas A: deux dates DD/MM/YYYY explicites
-        if len(date_matches) >= 2:
-            try:
-                params['start_date'] = datetime.strptime(date_matches[0], '%d/%m/%Y').date()
-                params['end_date']   = datetime.strptime(date_matches[1], '%d/%m/%Y').date()
-            except ValueError:
-                pass
-        elif len(date_matches) == 1:
-            try:
-                params['end_date'] = datetime.strptime(date_matches[0], '%d/%m/%Y').date()
-            except ValueError:
-                pass
-
-        # Cas B: expressions "mois AAAA" (priorité si pas de dates DD/MM/YYYY)
-        if not params.get('start_date') and not params.get('end_date') and month_year_pairs:
-            if len(month_year_pairs) >= 2:
-                # Plage : du premier mois au dernier mois détectés
-                first = month_year_pairs[0]
-                last  = month_year_pairs[-1]
-                # 1er jour du premier mois
-                params['start_date'] = date(first[1], first[0], 1)
-                # Dernier jour du dernier mois
-                import calendar
-                last_day = calendar.monthrange(last[1], last[0])[1]
-                params['end_date'] = date(last[1], last[0], last_day)
-            elif len(month_year_pairs) == 1:
-                # Un seul mois → tout le mois
-                import calendar
-                m, y = month_year_pairs[0]
-                params['start_date'] = date(y, m, 1)
-                last_day = calendar.monthrange(y, m)[1]
-                params['end_date']   = date(y, m, last_day)
-
-        # Cas C: années seules (si aucune date trouvée)
-        if not params.get('start_date') and not params.get('end_date'):
-            if annees:
-                if len(annees) >= 2 and query_type == 'comparaison':
-                    params['annee1'] = int(annees[0])
-                    params['annee2'] = int(annees[1])
-                elif len(annees) >= 2:
-                    # Deux années différentes → plage (ex: "2024 et 2025")
-                    y1, y2 = int(annees[0]), int(annees[-1])
-                    if y1 != y2:
-                        params['start_date'] = date(min(y1, y2), 1, 1)
-                        params['end_date']   = date(max(y1, y2), 12, 31)
-                    else:
-                        params['annee'] = y1
-                elif len(annees) == 1:
-                    params['annee'] = int(annees[0])
+        
+        if found_start_dates and found_end_dates:
+            # Cas particulier comparaison : on garde les deux premières années si comparaison
+            if query_type == 'comparaison' and len(annees) >= 2:
+                params['annee1'] = annees[0]
+                params['annee2'] = annees[1]
+            else:
+                # Sinon on prend l'enveloppe globale de toutes les dates mentionnées
+                params['start_date'] = min(found_start_dates)
+                params['end_date'] = max(found_end_dates)
+                
+                # Si l'enveloppe couvre exactement une année civile, on met aussi le flag 'annee'
+                if params['start_date'].day == 1 and params['start_date'].month == 1 and \
+                   params['end_date'].day == 31 and params['end_date'].month == 12 and \
+                   params['start_date'].year == params['end_date'].year:
+                    params['annee'] = params['start_date'].year
 
         # 5. Filtre suggéré pour le frontend
         suggested_filter = {
             'type': 'date',
             'value': {
-                'start': params.get('start_date').isoformat() if params.get('start_date') else
-                         (date(params['annee'], 1, 1).isoformat() if 'annee' in params else None),
-                'end':   params.get('end_date').isoformat() if params.get('end_date') else
-                         (date(params['annee'], 12, 31).isoformat() if 'annee' in params else None)
+                'start': params.get('start_date').isoformat() if params.get('start_date') else None,
+                'end':   params.get('end_date').isoformat() if params.get('end_date') else None
             },
-            'label': f"Période {params.get('annee')}" if 'annee' in params else "Période personnalisée"
+            'label': "Période personnalisée"
         }
-
-        if 'annee1' in params and 'annee2' in params:
+        
+        if 'annee' in params:
+            suggested_filter['label'] = f"Année {params['annee']}"
+        elif 'annee1' in params and 'annee2' in params:
             suggested_filter['label'] = f"Comparaison {params['annee1']} vs {params['annee2']}"
 
         return {
-            'type': query_type,
+            'type': query_type,       # Premier intent (rétrocompatibilité)
+            'types': query_types,     # Liste de tous les intents détectés
             'params': params,
             'include_details': demande_details,
             'suggested_filter': suggested_filter

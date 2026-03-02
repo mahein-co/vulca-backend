@@ -209,9 +209,11 @@ INSTRUCTIONS IMPORTANTES POUR L'EXTRACTION:
    - **EXTRAIS TOUTES LES COLONNES NUMÉRIQUES**. Si tu vois des chiffres pour chaque ligne, crée une colonne correspondante.
    - Si une colonne de montants correspond à une année, utilise l'année comme titre (ex: "2024").
 
-5. **AUCUN OUBLI** :
-   - Extraits TOUTES les lignes, y compris les lignes de totaux et les lignes sans numéro de compte.
-   - Si une ligne contient une description et un montant, elle DOIT être extraite.
+5. **EXTRACTION EXHAUSTIVE (CRUCIAL)** :
+   - Extraits TOUTES les lignes du document, du début à la fin.
+   - **NE FILTRE PAS PAR ANNÉE** : Même si la feuille s'appelle "{sheet_name}", tu dois extraire TOUTES les dates présentes (1900, 2020, 2024, etc.).
+   - Ne saute aucune ligne sous prétexte qu'elle appartient à une ancienne période.
+   - Si le document fait 500 lignes, tu dois extraire les 500 lignes.
 
 VOICI LES DONNÉES DE LA FEUILLE (format CSV brut pour référence si l'image est floue):
 ---
@@ -268,6 +270,28 @@ NE RETOURNE QUE LE JSON, AUCUN TEXTE SUPPLÉMENTAIRE."""
         
         content = response.choices[0].message.content.strip()
         
+        # --- GESTION DES REFUS OPENAI (SAFETY REFUSAL) ---
+        if "I'm sorry" in content or "m'excuse" in content or "peux pas" in content or len(content) < 50:
+            print(f"   [WARNING] Refus Vision pour {sheet_name} (ou réponse non-JSON). Tentative de fallback texte uniquement...")
+            
+            # Nouveau prompt simplifié pour le mode texte uniquement
+            fallback_prompt = f"""Analyse ces données CSV issues de la feuille Excel "{sheet_name}" et extrais les données structurées.
+            
+            DONNÉES (CSV):
+            {df_text}
+            
+            {prompt.split('INSTRUCTIONS IMPORTANTES')[1] if 'INSTRUCTIONS IMPORTANTES' in prompt else prompt}
+            """
+            
+            fallback_response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": fallback_prompt}],
+                max_tokens=8000,
+                temperature=0
+            )
+            content = fallback_response.choices[0].message.content.strip()
+            print(f"   [INFO] Reponse fallback recue (longueur: {len(content)})")
+
         # Nettoyer le JSON avec plusieurs stratégies
         original_content = content  # Garder pour le debug
         
@@ -299,10 +323,6 @@ NE RETOURNE QUE LE JSON, AUCUN TEXTE SUPPLÉMENTAIRE."""
             print(f"   [ERROR] Erreur parsing JSON pour {sheet_name}")
             print(f"   Position erreur: ligne {json_err.lineno}, colonne {json_err.colno}")
             print(f"   Message: {json_err.msg}")
-            print(f"   Contenu nettoye (premiers 500 chars):")
-            print(f"   {content[:500]}")
-            print(f"   Contenu original (premiers 500 chars):")
-            print(f"   {original_content[:500]}")
             
             # Tentative de réparation du JSON tronqué
             try:
@@ -310,11 +330,9 @@ NE RETOURNE QUE LE JSON, AUCUN TEXTE SUPPLÉMENTAIRE."""
                 content_fixed = content.strip()
                 
                 # 0. Supprimer les caractères tronqués à la fin (non-structuraux)
-                # On recule jusqu'à trouver un caractère structural JSON : } ] , "
                 while content_fixed and content_fixed[-1] not in ('}', ']', ',', '"'):
                     content_fixed = content_fixed[:-1].strip()
                 
-                # Si ça finit par une virgule, on l'enlève car elle attend une suite tronquée
                 if content_fixed.endswith(','):
                     content_fixed = content_fixed[:-1].strip()
                 
@@ -326,37 +344,24 @@ NE RETOURNE QUE LE JSON, AUCUN TEXTE SUPPLÉMENTAIRE."""
                 open_braces = content_fixed.count('{') - content_fixed.count('}')
                 open_brackets = content_fixed.count('[') - content_fixed.count(']')
                 
-                # Fermer d'abord les éléments internes
                 for _ in range(open_brackets):
                     content_fixed += ']'
                 for _ in range(open_braces):
                     content_fixed += '}'
                 
-                # Nettoyer les virgules orphelines finales (cas particulier après ajout de clôtures)
                 content_fixed = re.sub(r',\s*}', '}', content_fixed)
                 content_fixed = re.sub(r',\s*]', ']', content_fixed)
                 
                 result = json.loads(content_fixed)
                 print(f"   [SUCCESS] JSON repare avec succes !")
-                # Ajouter une métadonnée pour indiquer la troncature
                 if "metadata" not in result: result["metadata"] = {}
                 result["metadata"]["is_truncated"] = True
-                result["metadata"]["repair_warning"] = "La reponse a ete tronquee et reparee. Certaines donnees peuvent manquer."
             except Exception as repair_err:
                 print(f"   [ERROR] Echec de la reparation: {repair_err}")
-                # Si la réparation sophistiquée échoue, tenter une réparation basique de virgules
-                try:
-                    content_fixed = re.sub(r',\s*}', '}', content)
-                    content_fixed = re.sub(r',\s*]', ']', content_fixed)
-                    result = json.loads(content_fixed)
-                    print(f"   [SUCCESS] JSON repare (virgules uniquement)")
-                except Exception:
-                    # Si tout échoue, lever l'erreur originale avec plus de contexte
-                    raise ValueError(
-                        f"Impossible de parser la reponse JSON de OpenAI pour la feuille '{sheet_name}'. "
-                        f"Erreur: {json_err.msg} a la position ligne {json_err.lineno}, colonne {json_err.colno}. "
-                        f"Contenu (premiers 500 chars): {content[:500]}"
-                    ) from json_err
+                raise ValueError(
+                    f"Impossible de parser la reponse de OpenAI pour '{sheet_name}'. "
+                    f"Contenu: {content[:100]}..."
+                ) from json_err
         
         return result
         
@@ -542,19 +547,36 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
         df_text = df_original.to_csv(index=False, sep=';')
         
         # Extraire avec Vision API
-        vision_data = extract_sheet_data_with_vision(image, client, model, sheet_name, df_text=df_text)
-        
-        # Convertir en DataFrame
-        df_extracted = parse_vision_response_to_dataframe(vision_data)
-        
-        if df_extracted.empty:
-            print(f"   [WARNING] Extraction vide, utilisation des donnees originales")
+        try:
+            vision_data = extract_sheet_data_with_vision(image, client, model, sheet_name, df_text=df_text)
+            
+            # Convertir en DataFrame
+            df_extracted = parse_vision_response_to_dataframe(vision_data)
+            
+            # --- VÉRIFICATION DE LA COMPLÉTUDE (ANTI-TRONCATURE) ---
+            original_row_count = len(df_original)
+            extracted_row_count = len(df_extracted)
+            
+            # Si l'IA a extrait moins de 80% des lignes pour un fichier significatif (> 50 lignes)
+            # OU si le DataFrame est vide, on bascule sur les données originales
+            if (original_row_count > 50 and extracted_row_count < (original_row_count * 0.8)) or df_extracted.empty:
+                print(f"   [WARNING] Extraction potentiellement incomplete ({extracted_row_count}/{original_row_count} lignes).")
+                print(f"   [INFO] Bascule sur les donnees Excel originales pour garantir l'exhaustivite.")
+                df_extracted = df_original
+                # On garde quand même le type détecté par l'IA si possible
+                detected_type = vision_data.get('detected_type', 'UNKNOWN')
+                confidence = vision_data.get('confidence', 0.5)
+            else:
+                detected_type = vision_data.get('detected_type', 'UNKNOWN')
+                confidence = vision_data.get('confidence', 0.5)
+                print(f"   [INFO] Extraction complete consideree valide ({extracted_row_count} lignes)")
+        except Exception as e:
+            print(f"   [ERROR] Echec critique extraction pour '{sheet_name}': {e}")
+            print(f"   [INFO] Utilisation des donnees originales par défaut pour cette feuille")
             df_extracted = df_original
+            vision_data = {} # Pour éviter les erreurs plus bas
             detected_type = 'UNKNOWN'
             confidence = 0.0
-        else:
-            detected_type = vision_data.get('detected_type', 'UNKNOWN')
-            confidence = vision_data.get('confidence', 0.5)
         
         # 🧹 NETTOYAGE AUTOMATIQUE DES DONNÉES
         print(f"   [INFO] Nettoyage automatique des donnees (feuille: {sheet_name})...")
@@ -601,6 +623,12 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
                 pre_detected_type=detected_type
             )
             print(f"   [SUCCESS] Structuration reussie")
+            
+            # Mettre à jour detected_type si le structureur a trouvé quelque chose de mieux
+            if structured_data and structured_data.get('type_document') and structured_data.get('type_document') != 'UNKNOWN':
+                if detected_type == 'UNKNOWN':
+                    print(f"   [INFO] Mise à jour du type: {detected_type} -> {structured_data.get('type_document')} (via structuration)")
+                    detected_type = structured_data.get('type_document')
         except Exception as e:
             print(f"   [WARNING] Erreur structuration: {e}")
             structured_data = None
@@ -620,7 +648,8 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
             'unmapped_rows': unmapped_rows,
             'total_rows': len(df_extracted),
             'extraction_method': 'OCR',
-            'structured_data': structured_data  # Données structurées
+            'structured_data': structured_data,  # Données structurées
+            'rows': df_extracted.to_dict(orient='records') # Full data for save_view
         }
         
         result['sheets'].append(sheet_info)

@@ -462,14 +462,19 @@ class FinancialDataStructurer:
         
         if not compte_col or compte_col not in df.columns:
             # Si pas de colonne 'compte' explicite, chercher une colonne qui en contient
-            # IMPORTANT: Ne pas confondre les montants (grands nombres) avec les numéros de compte
-            for col in df.columns:
-                col_str = str(col).lower()
-                # Priorité 1: Nom de colonne contient "compte"
-                if 'compte' in col_str:
-                    compte_col = col
-                    print(f"   [INFO] Colonne compte détectée par nom: {col}")
-                    break
+            # PRIORITÉ: Une colonne appelée exactement "compte"
+            exact_match = next((col for col in df.columns if str(col).lower().strip() in ['compte', 'compte n°', 'n° compte', 'numero compte', 'numéro compte']), None)
+            if exact_match:
+                compte_col = exact_match
+                print(f"   [INFO] Colonne compte détectée par correspondance exacte: {exact_match}")
+            else:
+                # Sinon, chercher par nom partiel avec exclusions
+                for col in df.columns:
+                    col_str = str(col).lower()
+                    if 'compte' in col_str and not any(x in col_str for x in ['libelle', 'libellé', 'intitule', 'intitulé', 'piece', 'pièce', 'description', 'date']):
+                        compte_col = col
+                        print(f"   [INFO] Colonne compte détectée par nom: {col}")
+                        break
             
             # Priorité 2: Chercher une colonne avec des numéros de compte (3-6 chiffres UNIQUEMENT)
             if not compte_col:
@@ -496,7 +501,7 @@ class FinancialDataStructurer:
             # Chercher une colonne de texte qui pourrait être le libellé
             for col in df.columns:
                 col_str = str(col).lower()
-                if any(x in col_str for x in ['libelle', 'libellé', 'description', 'designation', 'poste', 'intitule']):
+                if any(x in col_str for x in ['libelle', 'libellé', 'description', 'designation', 'poste', 'intitule', 'intitulé']):
                     libelle_col = col
                     print(f"   [INFO] Colonne libellé détectée par nom: {col}")
                     break
@@ -801,20 +806,25 @@ class FinancialDataStructurer:
         for col_lower, col_original in columns_lower.items():
             if 'date' in col_lower:
                 date_col = col_original
-            elif ('compte' in col_lower or 'n°' in col_lower or 'numero' in col_lower) and not any(x in col_lower for x in ['libelle', 'intitule', 'piece', 'pièce', 'piéce', 'description', 'date']):
+            # PRIORITÉ: Une colonne appelée exactement "compte" ou "n° compte" est préférée
+            elif col_lower in ['compte', 'compte n°', 'n° compte', 'numero compte', 'numéro compte']:
                 compte_col = col_original
-            # PRIORITÉ: Intitulé avant Libellé
-            elif 'intitul' in col_lower and not libelle_col:
-                libelle_col = col_original
+            # Sinon, chercher une colonne contenant "compte" mais sans les mots exclus (avec gestion accents)
+            elif ('compte' in col_lower or 'n°' in col_lower or 'numero' in col_lower) and not any(x in col_lower for x in ['libelle', 'libellé', 'intitule', 'intitulé', 'piece', 'pièce', 'piéce', 'description', 'date']):
+                # On ne remplace pas une colonne exacte déjà trouvée
+                if not compte_col or (col_lower in ['compte', 'compte n°']):
+                     compte_col = col_original
+
+            # PRIORITÉ: Libellé/Description avant Intitulé du compte (pour les journaux)
             elif ('libelle' in col_lower or 'libellé' in col_lower or 'description' in col_lower) and not libelle_col:
+                libelle_col = col_original
+            elif any(x in col_lower for x in ['intitule', 'intitulé']) and not libelle_col:
                 libelle_col = col_original
             elif 'debit' in col_lower or 'débit' in col_lower:
                 debit_col = col_original
             elif 'credit' in col_lower or 'crédit' in col_lower:
                 credit_col = col_original
             elif ('piece' in col_lower or 'pièce' in col_lower or 'piéce' in col_lower or 'n_p' in col_lower or 'n°_p' in col_lower or 'num_p' in col_lower):
-                # Accepter n'importe quelle colonne contenant "piece" ou "pièce"
-                # Ex: "N_Pièce", "N° Pièce", "Numero_Piece", "n_piece", etc.
                 piece_col = col_original
             elif 'type' in col_lower and 'journal' in col_lower:
                 type_journal_col = col_original
@@ -896,7 +906,15 @@ class FinancialDataStructurer:
             if date_raw and str(date_raw) != 'nan':
                 try:
                     import pandas as pd
-                    date_obj = pd.to_datetime(date_raw, errors='coerce', dayfirst=True)
+                    # Détecter si c'est déjà au format ISO YYYY-MM-DD ou DD-MM-YYYY
+                    date_val_str = str(date_raw)
+                    if re.match(r'^\d{4}-\d{2}-\d{2}$', date_val_str):
+                        date_obj = pd.to_datetime(date_raw)
+                    elif re.match(r'^\d{2}[-/]\d{2}[-/]\d{4}$', date_val_str):
+                        date_obj = pd.to_datetime(date_raw, dayfirst=True)
+                    else:
+                        date_obj = pd.to_datetime(date_raw, errors='coerce', dayfirst=True)
+                        
                     if pd.notna(date_obj):
                         date_str = date_obj.strftime('%Y-%m-%d')
                         last_valid_date = date_str
@@ -956,12 +974,37 @@ class FinancialDataStructurer:
                     "type_journal": type_journal
                 })
         
-        print(f"[INFO] {len(lignes_final)} lignes structurées")
+        # ÉTAPE 4: Regrouper par année (demande utilisateur: comme Bilan/CDR)
+        donnees_par_annee = {}
+        all_years = set()
+        
+        for ligne in lignes_final:
+            try:
+                # Extraire l'année de "YYYY-MM-DD"
+                annee = ligne['date'].split('-')[0]
+                if not annee.isdigit() or len(annee) != 4:
+                    annee = "Inconnu"
+            except:
+                annee = "Inconnu"
+                
+            if annee not in donnees_par_annee:
+                donnees_par_annee[annee] = []
+            donnees_par_annee[annee].append(ligne)
+            if annee != "Inconnu":
+                all_years.add(annee)
+        
+        sorted_years = sorted(list(all_years), reverse=True)
+        if "Inconnu" in donnees_par_annee:
+            sorted_years.append("Inconnu")
+
+        print(f"[INFO] {len(lignes_final)} lignes structurées sur {len(sorted_years)} année(s)")
         print("=" * 80)
         
         return {
             "type_document": "JOURNAL",
-            "lignes": lignes_final
+            "annees": sorted_years,
+            "lignes": lignes_final, # Flat list for backward compatibility with frontend/views
+            "donnees_par_annee": donnees_par_annee # Grouped data for the UI
         }
     
     def _detect_journal_type_for_piece(self, piece_lignes: List[Dict]) -> str:

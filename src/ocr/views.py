@@ -998,11 +998,20 @@ def excel_save_data_view(request):
                                         if 1900 <= year_int <= 2100:
                                             date_obj = date(year_int, 12, 31)
                                         else:
-                                            parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                            if isinstance(date_val, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_val.strip()):
+                                                parsed_date = pd.to_datetime(date_val)
+                                            else:
+                                                parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
                                             if pd.notna(parsed_date):
                                                 date_obj = parsed_date.date()
                                     else:
-                                        parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                                            parsed_date = pd.to_datetime(date_val)
+                                        else:
+                                            if isinstance(date_val, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_val.strip()):
+                                                parsed_date = pd.to_datetime(date_val)
+                                            else:
+                                                parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
                                         if pd.notna(parsed_date):
                                             date_obj = parsed_date.date()
                             except Exception as e:
@@ -1059,7 +1068,10 @@ def excel_save_data_view(request):
                                         if 1900 <= year_int <= 2100:
                                             date_obj = date(year_int, 12, 31)
                                         else:
-                                            parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                            if isinstance(date_val, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_val.strip()):
+                                                parsed_date = pd.to_datetime(date_val)
+                                            else:
+                                                parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
                                             if pd.notna(parsed_date):
                                                 date_obj = parsed_date.date()
                                     else:
@@ -1094,7 +1106,19 @@ def excel_save_data_view(request):
                 # Initialiser le structureur pour la détection du type_journal
                 structurer = FinancialDataStructurer()
                 
-                for row in rows:
+                # Charger les lignes depuis le nouveau format groupé si possible
+                journal_rows = rows
+                if not rows and sheet.get('structured_data'):
+                    sd = sheet.get('structured_data')
+                    if sd.get('donnees_par_annee'):
+                        # Aplatir toutes les années pour la sauvegarde
+                        journal_rows = []
+                        for year_rows in sd.get('donnees_par_annee').values():
+                            journal_rows.extend(year_rows)
+                    elif sd.get('lignes'):
+                        journal_rows = sd.get('lignes')
+
+                for row in journal_rows:
                     try:
                         numero_compte = str(row.get('numero_compte') or '').strip()
                         if not numero_compte:
@@ -1118,7 +1142,10 @@ def excel_save_data_view(request):
                                         if 1900 <= year_int <= 2100:
                                             date_obj = date(year_int, 12, 31)
                                         else:
-                                            parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
+                                            if isinstance(date_val, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_val.strip()):
+                                                parsed_date = pd.to_datetime(date_val)
+                                            else:
+                                                parsed_date = pd.to_datetime(date_val, errors='coerce', dayfirst=True)
                                             if pd.notna(parsed_date):
                                                 date_obj = parsed_date.date()
                                     else:

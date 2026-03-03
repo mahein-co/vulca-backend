@@ -14,7 +14,6 @@ class CustomUser(AbstractUser):
     ROLE_CHOICES = (
         ("expert_comptable", "Expert Comptable"),
         ("admin", "Administrateur"),
-        ("assistant", "Assistant"),
     )
      
     profile_picture = models.ImageField(upload_to="profiles/", blank=True, null=True)

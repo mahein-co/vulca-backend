@@ -83,7 +83,10 @@ class ProjectMiddleware:
                 'detail': f'Vous n\'avez pas accès au projet {project_id}. Veuillez soumettre une demande d\'accès.'
             }, status=403)
         
-        # Injecter project_id dans request
-        request.project_id = project_id
+        # Injecter project_id dans request (casté en int pour la consistance)
+        try:
+            request.project_id = int(project_id)
+        except (ValueError, TypeError):
+            request.project_id = project_id # Fallback au cas où, mais le middleware a déjà validé l'existence
         
         return self.get_response(request)

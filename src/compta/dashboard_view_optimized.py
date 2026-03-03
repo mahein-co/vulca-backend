@@ -2,12 +2,14 @@
 from decimal import Decimal
 from datetime import datetime, timedelta
 
-from django.db.models import Sum, Q
+from django.db.models import Sum, Q, Max
+import traceback
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from compta.models import GrandLivre, Bilan, CompteResultat
+from compta.kpi_utils import get_latest_bilan_sum, get_cr_sum, get_resultat_net
 
 from compta.permissions import HasProjectAccess
 from rest_framework.permissions import IsAuthenticated
@@ -23,6 +25,12 @@ def dashboard_indicators_view(request):
     header_project_id = request.headers.get('X-Project-ID')
     param_project_id = request.query_params.get('project_id')
     project_id = header_project_id or param_project_id or getattr(request, 'project_id', None)
+    
+    # Secure project_id type
+    try:
+        project_id = int(project_id) if project_id else None
+    except (ValueError, TypeError):
+        project_id = None
 
     date_start_str = request.GET.get("date_start")
     date_end_str = request.GET.get("date_end")
@@ -32,58 +40,23 @@ def dashboard_indicators_view(request):
         if not d_start or not d_end:
             return {}
             
-        filters = {"project_id": project_id, "date__range": [d_start, d_end]}
-        cumulative_filters = {"project_id": project_id, "date__lte": d_end}
-
         def get_sum_cr(prefix_list):
-            q = Q()
-            for p in prefix_list:
-                q |= Q(numero_compte__startswith=p)
-            qs = CompteResultat.objects.filter(q, **filters)
-            return qs.aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+            return get_cr_sum(project_id, d_start, d_end, prefix_list=prefix_list)
 
-        def get_sum_bilan(prefix_list, type_bilan=None, cumulative=True):
-            # Anti double-comptage : prendre le dernier état par compte
-            q = Q(project_id=project_id, date__lte=d_end)
-            if prefix_list:
-                pq = Q()
-                for p in prefix_list: pq |= Q(numero_compte__startswith=p)
-                q &= pq
-            if type_bilan: q &= Q(type_bilan=type_bilan)
-            
-            # Group by account and get latest date
-            latest_dates = Bilan.objects.filter(q).values('numero_compte').annotate(max_d=Max('date'))
-            
-            total = Decimal('0.00')
-            for item in latest_dates:
-                last_rec = Bilan.objects.filter(
-                    project_id=project_id, 
-                    numero_compte=item['numero_compte'], 
-                    date=item['max_d']
-                ).first()
-                if last_rec: total += last_rec.montant_ar
-            return total
+        def get_sum_bilan(prefix_list, type_bilan=None, cumulative=False):
+            return get_latest_bilan_sum(project_id, d_start, d_end, prefix_list=prefix_list, type_bilan=type_bilan, cumulative=cumulative)
 
         from compta.models import Balance
-        def get_total_balance_live(d_end):
-            # Calculer le total actif (comptes 1-5 débiteurs) à partir de la table Balance
-            # Note: Pour une balance, total actif = somme des soldes débiteurs des comptes de classe 1 à 5
-            # Mais ici le dashboard semble vouloir le total du bilan
-            # On va utiliser la même logique que BalanceModal mais filtré sur les actifs
-            qs = Balance.objects.filter(project_id=project_id, date__lte=d_end)
-            # Agrégation par compte pour avoir le dernier état à d_end
-            # En fait, la table Balance est déjà agrégée par jour.
-            # Pour avoir la situation à une date T, on prend le cumul.
+        def get_total_balance_live(d_start, d_end):
+            # Utiliser le même filtre que BalanceModal (date_range) pour avoir des valeurs cohérentes.
+            # BalanceModal filtre avec date__range=[date_start, date_end]
+            qs = Balance.objects.filter(project_id=project_id, date__range=[d_start, d_end])
+            # Agréger le total débit (= total débit de la balance générale)
             res = qs.aggregate(
                 total_debit=Sum("total_debit"),
                 total_credit=Sum("total_credit")
             )
             debit = res["total_debit"] or Decimal("0.00")
-            credit = res["total_credit"] or Decimal("0.00")
-            # Pour le total bilan (actif), on prend généralement le total débit de la balance 
-            # ou on suit la logique spécifique du projet. 
-            # L'utilisateur se plaint que Dashboard != Modal.
-            # Dans BalanceModal: totalDebit = balanceData.reduce((sum, item) => sum + cleanAmount(item.debit), 0);
             return debit
 
         try:
@@ -113,8 +86,8 @@ def dashboard_indicators_view(request):
             tresorerie_actif = get_sum_bilan(["5"], type_bilan="ACTIF")
             actifs_courants = stocks + creances_clients + tresorerie_actif 
             
-            # ⚡ [LIVE FIX] : Utiliser Balance au lieu de Bilan pour le total_balance du dashboard
-            total_balance_live = get_total_balance_live(d_end)
+            # ⚡ [LIVE FIX] : Utiliser Balance pour le total_balance du dashboard (même logique que BalanceModal)
+            total_balance_live = get_total_balance_live(d_start, d_end)
             if total_balance_live > 0:
                 total_actif = total_balance_live
             else:
@@ -162,7 +135,9 @@ def dashboard_indicators_view(request):
                 "cout_ventes": get_sum_cr(["607"]), "chiffre_affaire": ca, "charges_exploitation": charges_exploit,
                 "resultat_operationnel": resultat_exploit
             }
-        except:
+        except Exception as e:
+            print(f"[ERROR] calculate_all_kpis failed: {e}")
+            traceback.print_exc()
             return {}
 
     # EXECUTION

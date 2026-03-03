@@ -2211,29 +2211,15 @@ def evolution_roe_view(request):
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
     def get_roe_for_period(start, end):
-        filters = {"project_id": project_id, "date__range": [start, end]}
+        from compta.kpi_utils import get_latest_bilan_sum, get_resultat_net
         
-        # 1. Résultat Net : dernière date disponible dans la période
-        latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
-        
-        resultat_net = Decimal("0.00")
-        if latest_res_date:
-            agg_res = CompteResultat.objects.filter(project_id=project_id, date=latest_res_date).aggregate(
-                prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
-                char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
-            )
-            resultat_net = (agg_res["prod"] or Decimal("0.00")) - (agg_res["char"] or Decimal("0.00"))
+        # 1. Résultat Net
+        resultat_net = get_resultat_net(project_id, start, end)
 
-        # 2. Fonds propres : dernière date disponible dans la période
-        latest_bilan_date = Bilan.objects.filter(categorie="CAPITAUX_PROPRES", **filters).aggregate(Max('date'))['date__max']
-        
-        fonds_propres = Decimal("0.00")
-        if latest_bilan_date:
-            fonds_propres = (
-                Bilan.objects
-                .filter(project_id=project_id, type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", date=latest_bilan_date)
-                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-            )
+        # 2. Fonds propres
+        fonds_propres = get_latest_bilan_sum(
+            project_id, start, end, categorie="CAPITAUX_PROPRES", type_bilan="PASSIF"
+        )
 
         # 3. Calcul du ROE
         roe = None
@@ -2308,29 +2294,15 @@ def evolution_roa_view(request):
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
     def get_roa_for_period(start, end):
-        filters = {"project_id": project_id, "date__range": [start, end]}
+        from compta.kpi_utils import get_latest_bilan_sum, get_resultat_net
         
-        # 1. Résultat Net : dernière date disponible dans la période
-        latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
-        
-        resultat_net = Decimal("0.00")
-        if latest_res_date:
-            agg_res = CompteResultat.objects.filter(project_id=project_id, date=latest_res_date).aggregate(
-                prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
-                char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
-            )
-            resultat_net = (agg_res["prod"] or Decimal("0.00")) - (agg_res["char"] or Decimal("0.00"))
+        # 1. Résultat Net
+        resultat_net = get_resultat_net(project_id, start, end)
 
-        # 2. Total Actif : dernière date disponible dans la période
-        latest_bilan_date = Bilan.objects.filter(type_bilan="ACTIF", **filters).aggregate(Max('date'))['date__max']
-        
-        total_actif = Decimal("0.00")
-        if latest_bilan_date:
-            total_actif = (
-                Bilan.objects
-                .filter(project_id=project_id, type_bilan="ACTIF", date=latest_bilan_date)
-                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-            )
+        # 2. Total Actif
+        total_actif = get_latest_bilan_sum(
+            project_id, start, end, type_bilan="ACTIF"
+        )
 
         # 3. Calcul du ROA
         roa = None
@@ -3893,22 +3865,17 @@ def current_ratio_view(request):
 
     def calculate_current_ratio(start_date, end_date):
         """Fonction helper pour calculer le Current Ratio pour une période donnée"""
+        from compta.kpi_utils import get_latest_bilan_sum
+        
         # PROJECT FILTER
         project_id = getattr(request, "project_id", None)
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
         
-        actifs_courants = (
-            Bilan.objects
-            .filter(type_bilan="ACTIF", categorie="ACTIF_COURANTS", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        actifs_courants = get_latest_bilan_sum(
+            project_id, start_date, end_date, categorie="ACTIF_COURANTS", type_bilan="ACTIF"
         )
 
-        passifs_courants = (
-            Bilan.objects
-            .filter(type_bilan="PASSIF", categorie="PASSIFS_COURANTS", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        passifs_courants = get_latest_bilan_sum(
+            project_id, start_date, end_date, categorie="PASSIFS_COURANTS", type_bilan="PASSIF"
         )
 
         current_ratio = (actifs_courants / passifs_courants) if passifs_courants != 0 else None
@@ -3977,31 +3944,24 @@ def quick_ratio_view(request):
 
     def calculate_quick_ratio(start_date, end_date):
         """Fonction helper pour calculer le Quick Ratio pour une période donnée"""
+        from compta.kpi_utils import get_latest_bilan_sum
+        
         # PROJECT FILTER
         project_id = getattr(request, "project_id", None)
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-
+        
         # Actifs courants
-        actifs_courants = (
-            Bilan.objects
-            .filter(type_bilan="ACTIF", categorie="ACTIF_COURANTS", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        actifs_courants = get_latest_bilan_sum(
+            project_id, start_date, end_date, categorie="ACTIF_COURANTS", type_bilan="ACTIF"
         )
 
         # Stocks (classe 3)
-        stocks = (
-            Bilan.objects
-            .filter(type_bilan="ACTIF", numero_compte__startswith="3", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        stocks = get_latest_bilan_sum(
+            project_id, start_date, end_date, prefix_list=["3"], type_bilan="ACTIF"
         )
 
         # Passifs courants
-        passifs_courants = (
-            Bilan.objects
-            .filter(type_bilan="PASSIF", categorie="PASSIFS_COURANTS", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        passifs_courants = get_latest_bilan_sum(
+            project_id, start_date, end_date, categorie="PASSIFS_COURANTS", type_bilan="PASSIF"
         )
 
         quick_ratio = (
@@ -4077,24 +4037,19 @@ def gearing_view(request):
 
     def calculate_gearing(start_date, end_date):
         """Fonction helper pour calculer le Gearing pour une période donnée"""
+        from compta.kpi_utils import get_latest_bilan_sum
+        
         # PROJECT FILTER
         project_id = getattr(request, "project_id", None)
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-
+        
         # Dettes financières (classe 16)
-        dettes_financieres = (
-            Bilan.objects
-            .filter(type_bilan="PASSIF", numero_compte__startswith="16", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        dettes_financieres = get_latest_bilan_sum(
+            project_id, start_date, end_date, prefix_list=["16"], type_bilan="PASSIF"
         )
 
         # Fonds propres
-        fonds_propres = (
-            Bilan.objects
-            .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        fonds_propres = get_latest_bilan_sum(
+            project_id, start_date, end_date, categorie="CAPITAUX_PROPRES", type_bilan="PASSIF"
         )
 
         gearing = (
@@ -4168,24 +4123,17 @@ def rotation_stock_view(request):
 
     def calculate_rotation_stock(start_date, end_date):
         """Fonction helper pour calculer la Rotation des stocks pour une période donnée"""
+        from compta.kpi_utils import get_latest_bilan_sum, get_cr_sum
+        
         # PROJECT FILTER
         project_id = getattr(request, "project_id", None)
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-
+        
         # Coût des ventes (charges classe 6)
-        cout_ventes = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="6", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
+        cout_ventes = get_cr_sum(project_id, start_date, end_date, prefix_list=["6"], nature="CHARGE")
 
         # Stock moyen (simplifié : stock fin de période)
-        stocks = (
-            Bilan.objects
-            .filter(type_bilan="ACTIF", numero_compte__startswith="3", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
+        stocks = get_latest_bilan_sum(
+            project_id, start_date, end_date, prefix_list=["3"], type_bilan="ACTIF"
         )
 
         rotation_stock = (
@@ -4267,52 +4215,19 @@ def marge_operationnelle_view(request):
 
     def calculate_marge_operationnelle(start_date, end_date):
         """Fonction helper pour calculer la Marge opérationnelle pour une période donnée"""
+        from compta.kpi_utils import get_cr_sum
+        
         # PROJECT FILTER
         project_id = getattr(request, "project_id", None)
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-        elif end_date:
-            filters["date__lte"] = end_date
-
+        
         # CA = Comptes 70, 71, 72 (PRODUITS uniquement)
-        chiffre_affaire = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        chiffre_affaire += (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="71", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        chiffre_affaire += (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="72", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
+        chiffre_affaire = get_cr_sum(project_id, start_date, end_date, prefix_list=["70", "71", "72"], nature="PRODUIT")
 
         # Produits opérationnels = 70 + 71 + 72 + 74 + 75 (PRODUITS uniquement)
-        produits_operationnels = chiffre_affaire  # 70+71+72 déjà calculé
-        produits_operationnels += (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="74", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        produits_operationnels += (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="75", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
+        produits_operationnels = get_cr_sum(project_id, start_date, end_date, prefix_list=["70", "71", "72", "74", "75"], nature="PRODUIT")
 
         # Charges d'exploitation = 60 + 61 + 62 + 63 + 64 + 65 (CHARGES uniquement)
-        charges_exploitation = Decimal("0.00")
-        for compte_prefix in ["60", "61", "62", "63", "64", "65"]:
-            charges_exploitation += (
-                CompteResultat.objects
-                .filter(nature="CHARGE", numero_compte__startswith=compte_prefix, **filters)
-                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-            )
+        charges_exploitation = get_cr_sum(project_id, start_date, end_date, prefix_list=["60", "61", "62", "63", "64", "65"], nature="CHARGE")
 
         # Résultat opérationnel = Produits opérationnels - Charges d'exploitation
         res_op = produits_operationnels - charges_exploitation

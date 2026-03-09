@@ -1,4 +1,4 @@
-from decimal import Decimal
+﻿from decimal import Decimal
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.db.models import Sum
@@ -17,6 +17,12 @@ def generate_grand_livre(sender, instance, created, **kwargs):
         return
 
     def _generate():
+        # ✅ SÉCURITÉ : Conversion date si string
+        current_date = instance.date
+        if isinstance(current_date, str):
+            from dateutil import parser as date_parser
+            current_date = date_parser.parse(current_date).date()
+
         # ✅ FILTRE PAR PROJET OBLIGATOIRE
         last_entry = (
             GrandLivre.objects
@@ -34,7 +40,7 @@ def generate_grand_livre(sender, instance, created, **kwargs):
             project=instance.project, # ✅ ASSIGNATION PROJET
             journal=instance,
             numero_compte=instance.numero_compte,
-            date=instance.date,
+            date=current_date,
             numero_piece=instance.numero_piece,
             libelle=instance.libelle,
             debit=debit_ar,
@@ -103,10 +109,16 @@ def detect_payslip_payment(sender, instance, created, **kwargs):
     else:
         return
     
+    # ✅ SÉCURITÉ : Conversion date si string
+    current_date = instance.date
+    if isinstance(current_date, str):
+        from dateutil import parser as date_parser
+        current_date = date_parser.parse(current_date).date()
+
     # ✅ FILTRE PAR PROJET POUR EXISTENCE
     existing = Journal.objects.filter(
         project=instance.project,
-        date=instance.date,
+        date=current_date,
         numero_piece=instance.numero_piece,
         type_journal="BANQUE",
         numero_compte=compte_debit,
@@ -116,7 +128,7 @@ def detect_payslip_payment(sender, instance, created, **kwargs):
     if not existing:
         Journal.objects.create(
             project=instance.project, # ✅ ASSIGNATION PROJET
-            date=instance.date,
+            date=current_date,
             numero_piece=instance.numero_piece,
             type_journal="BANQUE",
             numero_compte=compte_debit,
@@ -131,11 +143,17 @@ def generate_balance(sender, instance, **kwargs):
     """
     Met à jour automatiquement la Balance après chaque écriture du Grand Livre
     """
+    # ✅ SÉCURITÉ : Conversion date si string
+    current_date = instance.date
+    if isinstance(current_date, str):
+        from dateutil import parser as date_parser
+        current_date = date_parser.parse(current_date).date()
+
     # ✅ FILTRE PAR PROJET OBLIGATOIRE DANS GET_OR_CREATE
     balance, created = Balance.objects.get_or_create(
         project=instance.project,
         numero_compte=instance.numero_compte,
-        date=instance.date,
+        date=current_date,
         defaults={"libelle": instance.libelle}
     )
     balance.calculate_from_grand_livre()
@@ -170,6 +188,13 @@ def generate_financial_statements(sender, instance, **kwargs):
     try:
         code = instance.numero_compte
         project = instance.project
+        
+        # ✅ SÉCURITÉ : Conversion date si string
+        current_date = instance.date
+        if isinstance(current_date, str):
+            from dateutil import parser as date_parser
+            current_date = date_parser.parse(current_date).date()
+
         if not code or not isinstance(code, str):
             return
 
@@ -196,7 +221,7 @@ def generate_financial_statements(sender, instance, **kwargs):
                 project=project, # ✅ PROJET
                 balance=instance,
                 numero_compte=code,
-                date=instance.date,
+                date=current_date,
                 defaults={
                     'libelle': label,
                     'montant_ar': montant,
@@ -217,8 +242,6 @@ def generate_financial_statements(sender, instance, **kwargs):
         if code.startswith('10'):
             type_bilan, categorie, montant = 'PASSIF', 'CAPITAUX_PROPRES', solde_credit - solde_debit
             if montant <= 0:
-                Bilan.objects.filter(project=project, balance=instance, numero_compte=code, date=instance.date).delete()
-                _update_calculated_equity(project, instance.date)
                 return
         elif code.startswith('41'):
             type_bilan, categorie, montant = 'ACTIF', 'ACTIF_COURANTS', max(solde_debit - solde_credit, Decimal('0.00'))
@@ -243,13 +266,13 @@ def generate_financial_statements(sender, instance, **kwargs):
         if is_negative: montant = -montant
 
         if montant == 0 and not code.startswith(('40', '41')):
-            Bilan.objects.filter(project=project, balance=instance, numero_compte=code, date=instance.date).delete()
+            Bilan.objects.filter(project=project, balance=instance, numero_compte=code, date=current_date).delete()
         else:
             Bilan.objects.update_or_create(
                 project=project, # ✅ PROJET
                 balance=instance,
                 numero_compte=code,
-                date=instance.date,
+                date=current_date,
                 defaults={
                     'libelle': label,
                     'montant_ar': montant,
@@ -260,7 +283,9 @@ def generate_financial_statements(sender, instance, **kwargs):
         
 
     except Exception as e:
+        import traceback
         print(f"[ERROR] ERREUR SIGNAL STATEMENTS pour {instance.numero_compte} : {e}")
+        print(traceback.format_exc())
 
 
 

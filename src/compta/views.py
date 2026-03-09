@@ -26,6 +26,10 @@ from compta.serializers import (
     MargeOperationnelleSerializer, MargeBruteSerializer, DelaisClientsSerializer, DelaisFournisseursSerializer,
     ProjectSerializer, ProjectAccessSerializer, ProjectListSerializer
 )
+from compta.kpi_utils import (
+    get_latest_bilan_sum, get_cr_sum, get_resultat_net, 
+    get_capitaux_propres, get_chiffre_affaire, get_ebe
+)
 from compta.permissions import HasProjectAccess
 from ocr.pcg_loader import PCG_MAPPING, get_pcg_label
 
@@ -458,22 +462,25 @@ def generate_journal_from_pcg(document_json):
         numero_piece = "N/A"
     date_facture_raw = document_json.get("date") or document_json.get("date_facture") or str(dt_date.today())
     
-    # ✅ CONVERSION DE DATE : "5 septembre 2024" → "2024-09-05"
-    # ⚠️ IMPORTANT: Si la date est déjà au format ISO (YYYY-MM-DD), ne pas la re-parser
+    # ✅ CONVERSION DE DATE : "5 septembre 2024" → date(2024, 9, 5)
     try:
-        date_facture_raw = date_facture_raw.replace('\xa0', ' ').strip()
-        
-        # Vérifier si la date est déjà au format ISO (YYYY-MM-DD)
-        import re
-        if re.match(r'^\d{4}-\d{2}-\d{2}$', date_facture_raw):
-            # Date déjà au format ISO, ne pas la parser
-            date_facture = date_facture_raw
+        from datetime import date as dt_date_type, datetime as dt_datetime_type
+        if isinstance(date_facture_raw, (dt_date_type, dt_datetime_type)):
+            date_facture = date_facture_raw.date() if isinstance(date_facture_raw, dt_datetime_type) else date_facture_raw
         else:
-            # Parser la date avec dayfirst=True pour format français
-            parsed_date = date_parser.parse(date_facture_raw, dayfirst=True)
-            date_facture = parsed_date.strftime("%Y-%m-%d")
+            date_facture_raw = str(date_facture_raw).replace('\xa0', ' ').strip()
+            
+            # Vérifier si la date est déjà au format ISO (YYYY-MM-DD)
+            import re
+            if re.match(r'^\d{4}-\d{2}-\d{2}$', date_facture_raw):
+                from datetime import datetime
+                date_facture = datetime.strptime(date_facture_raw, '%Y-%m-%d').date()
+            else:
+                # Parser la date avec dayfirst=True pour format français
+                parsed_date = date_parser.parse(date_facture_raw, dayfirst=True)
+                date_facture = parsed_date.date()
     except:
-        date_facture = str(dt_date.today())
+        date_facture = dt_date.today()
     
     # ✅ UTILISATION DE L'IA POUR CLASSIFIER SELON PCG
     # L'IA expert-comptable détermine automatiquement les comptes depuis le PCG PDF
@@ -1182,17 +1189,7 @@ def chiffre_affaire_view(request):
 
     def calculate_ca(start_date, end_date):
         """Fonction helper pour calculer le CA pour une période donnée"""
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-        
-        total_ca = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        return total_ca
+        return get_chiffre_affaire(project_id, start_date, end_date)
 
     # Calcul période courante
     current_ca = calculate_ca(date_start, date_end)
@@ -1262,81 +1259,8 @@ def ebe_view(request):
     def calculate_ebe(start_date, end_date):
         """
         Fonction helper pour calculer l'EBE pour une période donnée
-        Formule PCG 2005 : EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
         """
-        # PROJECT FILTER
-        project_id = getattr(request, "project_id", None)
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-
-        # Ventes de marchandises (70)
-        compte_70 = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Production stockée (71)
-        compte_71 = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="71", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Production immobilisée (72)
-        compte_72 = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="72", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Subventions d'exploitation (74)
-        compte_74 = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="74", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Achats consommés (60)
-        compte_60 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="60", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Services extérieurs A (61)
-        compte_61 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="61", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Services extérieurs B (62)
-        compte_62 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="62", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Impôts et taxes (63)
-        compte_63 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="63", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Charges de personnel (64)
-        compte_64 = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="64", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
-        ebe = (compte_70 + compte_71 + compte_72) - (compte_60 + compte_61 + compte_62) + compte_74 - compte_63 - compte_64
-
-        return ebe
+        return get_ebe(project_id, start_date, end_date)
 
     # Calcul période courante
     current_ebe = calculate_ebe(date_start, date_end)
@@ -1491,36 +1415,10 @@ def marge_nette_view(request):
 
     def calculate_marge_nette(start_date, end_date):
         """Fonction helper pour calculer la Marge Nette pour une période donnée"""
-        # PROJECT FILTER
-        project_id = getattr(request, "project_id", None)
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
+        ca = get_chiffre_affaire(project_id, start_date, end_date)
+        resultat_net = get_resultat_net(project_id, start_date, end_date)
         
-        # Calcul du Chiffre d'Affaires (compte 70)
-        ca = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="70", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        # Calcul du Résultat Net (Produits classe 7 - Charges classe 6)
-        produits = (
-            CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__startswith="7", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        charges = (
-            CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__startswith="6", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        resultat_net = produits - charges
-        
-        # Calcul de la marge nette en pourcentage
-        if ca != 0 and abs(ca) > 1000:  # Éviter division par zéro et CA trop faible
+        if ca != 0 and abs(ca) > 1000:
             marge_nette = (resultat_net / ca) * 100
         else:
             marge_nette = None
@@ -2416,41 +2314,18 @@ def resultat_net_view(request):  #partie corriger
 
     def calculate_resultat(d_start, d_end):
         """
-        Calcul du résultat net à partir de CompteResultat
-        (Inclut les saisies manuelles ET les données générées via Balance)
+        Calcul du résultat net unifié (Classe 7 - Classe 6)
         """
-        qs = CompteResultat.objects.filter(project_id=project_id)
-        if d_start and d_end:
-            qs = qs.filter(date__range=[d_start, d_end])
-        elif d_end:
-            qs = qs.filter(date__lte=d_end)
-        
-        # Agrégation par nature
-        data = qs.aggregate(
-            total_produits=Sum(Case(
-                When(nature='PRODUIT', then='montant_ar'),
-                default=Decimal('0.00'),
-                output_field=DecimalField()
-            )),
-            total_charges=Sum(Case(
-                When(nature='CHARGE', then='montant_ar'),
-                default=Decimal('0.00'),
-                output_field=DecimalField()
-            ))
-        )
-        
-        produits = data['total_produits'] or Decimal('0.00')
-        charges = data['total_charges'] or Decimal('0.00')
-        res_net = produits - charges
+        res_net = get_resultat_net(project_id, d_start, d_end)
         
         return {
-            "produits": produits,
-            "charges_exploitation": charges,  # Simplifié pour compatibilité
-            "charges_financieres": Decimal('0.00'),
-            "produits_financiers": Decimal('0.00'),
-            "charges_exceptionnelles": Decimal('0.00'),
-            "produits_exceptionnels": Decimal('0.00'),
-            "impots_benefices": Decimal('0.00'),
+            "produits": Decimal("0.00"), # Non utilisé par le front pour le RN direct
+            "charges_exploitation": Decimal("0.00"),
+            "charges_financieres": Decimal("0.00"),
+            "produits_financiers": Decimal("0.00"),
+            "charges_exceptionnelles": Decimal("0.00"),
+            "produits_exceptionnels": Decimal("0.00"),
+            "impots_benefices": Decimal("0.00"),
             "resultat_net": res_net,
         }
 
@@ -3659,38 +3534,11 @@ def roe_view(request):
 
     def calculate_roe(start_date, end_date):
         """Fonction helper pour calculer le ROE pour une période donnée"""
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-        elif end_date:
-            filters["date__lte"] = end_date
-        
-        # 1. Résultat Net : On prend la dernière date disponible dans la période pour CompteResultat
-        latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
-        
-        resultat_net = Decimal("0.00")
-        if latest_res_date:
-            agg_res = CompteResultat.objects.filter(date=latest_res_date).aggregate(
-                prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
-                char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
-            )
-            resultat_net = (agg_res["prod"] or Decimal("0.00")) - (agg_res["char"] or Decimal("0.00"))
+        resultat_net = get_resultat_net(project_id, start_date, end_date)
+        fonds_propres = get_capitaux_propres(project_id, start_date, end_date)
 
-        # 2. Fonds propres : On prend la dernière date disponible dans la période pour Bilan
-        latest_bilan_date = Bilan.objects.filter(categorie="CAPITAUX_PROPRES", **filters).aggregate(Max('date'))['date__max']
-        
-        fonds_propres = Decimal("0.00")
-        if latest_bilan_date:
-            fonds_propres = (
-                Bilan.objects
-                .filter(type_bilan="PASSIF", categorie="CAPITAUX_PROPRES", date=latest_bilan_date)
-                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-            )
-
-        # 3. Calcul du ROE
         if fonds_propres != 0 and abs(fonds_propres) >= 100000:
             roe = (resultat_net / fonds_propres * 100)
-            # Protection contre les extrêmes
             if roe > 1000: roe = 1000
             elif roe < -1000: roe = -1000
         else:
@@ -3764,35 +3612,11 @@ def roa_view(request):
 
     def calculate_roa(start_date, end_date):
         """Fonction helper pour calculer le ROA pour une période donnée"""
-        filters = {"project_id": project_id}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-        elif end_date:
-            filters["date__lte"] = end_date
+        resultat_net = get_resultat_net(project_id, start_date, end_date)
         
-        # 1. Résultat Net : On prend la dernière date disponible dans la période pour CompteResultat
-        latest_res_date = CompteResultat.objects.filter(**filters).aggregate(Max('date'))['date__max']
-        
-        resultat_net = Decimal("0.00")
-        if latest_res_date:
-            agg_res = CompteResultat.objects.filter(date=latest_res_date).aggregate(
-                prod=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
-                char=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
-            )
-            resultat_net = (agg_res["prod"] or Decimal("0.00")) - (agg_res["char"] or Decimal("0.00"))
+        # Total Actif unifié via get_latest_bilan_sum
+        total_actif = get_latest_bilan_sum(project_id, start_date, end_date, prefix_list=[""], type_bilan="ACTIF")
 
-        # 2. Total Actif : On prend la dernière date disponible dans la période pour Bilan
-        latest_bilan_date = Bilan.objects.filter(type_bilan="ACTIF", **filters).aggregate(Max('date'))['date__max']
-        
-        total_actif = Decimal("0.00")
-        if latest_bilan_date:
-            total_actif = (
-                Bilan.objects
-                .filter(type_bilan="ACTIF", date=latest_bilan_date)
-                .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-            )
-
-        # 3. Calcul du ROA
         if total_actif != 0 and abs(total_actif) >= 100000:
             roa = (resultat_net / total_actif * 100)
             if roa > 1000: roa = 1000
@@ -4037,20 +3861,13 @@ def gearing_view(request):
 
     def calculate_gearing(start_date, end_date):
         """Fonction helper pour calculer le Gearing pour une période donnée"""
-        from compta.kpi_utils import get_latest_bilan_sum
-        
-        # PROJECT FILTER
-        project_id = getattr(request, "project_id", None)
-        
-        # Dettes financières (classe 16)
+        # Dettes financières (classe 16) + Concours bancaires (512 Passif)
         dettes_financieres = get_latest_bilan_sum(
-            project_id, start_date, end_date, prefix_list=["16"], type_bilan="PASSIF"
+            project_id, start_date, end_date, prefix_list=["16", "512"], type_bilan="PASSIF"
         )
 
-        # Fonds propres
-        fonds_propres = get_latest_bilan_sum(
-            project_id, start_date, end_date, categorie="CAPITAUX_PROPRES", type_bilan="PASSIF"
-        )
+        # Fonds propres unifiés
+        fonds_propres = get_capitaux_propres(project_id, start_date, end_date)
 
         gearing = (
             (dettes_financieres / fonds_propres) * 100
@@ -4977,9 +4794,7 @@ class ProjectListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        # All authenticated users can see the list of active projects
-        # This allows them to request access to projects they don't belong to yet
-        return Project.objects.filter(is_active=True)
+        return Project.objects.filter(is_active=True).prefetch_related('user_accesses')
 
     def perform_create(self, serializer):
         project = serializer.save(created_by=self.request.user)
@@ -4991,7 +4806,6 @@ class ProjectListCreateView(generics.ListCreateAPIView):
             approved_by=self.request.user, # Auto-approuvé
             approved_at=datetime.now()
         )
-
 class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
     GET, PUT, DELETE un projet spécifique.
@@ -5001,6 +4815,38 @@ class ProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated, HasProjectAccess]
     lookup_field = 'id'
+
+    def perform_destroy(self, instance):
+        """
+        Suppression optimisée et sécurisée d'un projet.
+        Utilise des suppressions par bloc pour éviter l'explosion des signaux Django.
+        """
+        from compta.models import Journal, Balance, GrandLivre, Bilan, CompteResultat
+        from chatbot.models import AccountingIndex, MessageHistory, Document
+        
+        project_id = instance.id
+        print(f"[INFO] Démarrage suppression rapide du Projet {project_id}...")
+        
+        # 1. Suppression brutale des données comptables (bypasse les signaux Journal)
+        # On utilise .delete() sur le QuerySet, ce qui est une opération SQL unique
+        Journal.objects.filter(project_id=project_id).delete()
+        GrandLivre.objects.filter(project_id=project_id).delete()
+        Balance.objects.filter(project_id=project_id).delete()
+        Bilan.objects.filter(project_id=project_id).delete()
+        CompteResultat.objects.filter(project_id=project_id).delete()
+        
+        # 2. Nettoyage Chatbot & RAG
+        AccountingIndex.objects.filter(project_id=project_id).delete()
+        MessageHistory.objects.filter(project_id=project_id).delete()
+        
+        # 3. Documents (attention aux fichiers physiques)
+        docs = Document.objects.filter(project_id=project_id)
+        for doc in docs:
+            doc.delete() # On garde le .delete() individuel pour Document car il y a peu de fichiers et on veut supprimer le disque
+            
+        # 4. Enfin, supprimer le projet lui-même
+        instance.delete()
+        print(f"[SUCCESS] Projet {project_id} supprimé avec succès.")
 
 class UserProjectsView(generics.ListAPIView):
     """
@@ -5013,7 +4859,7 @@ class UserProjectsView(generics.ListAPIView):
     def get_queryset(self):
         # On retourne tous les projets actifs pour que l'utilisateur puisse demander l'accès
         # Le serializer enrichira avec le statut d'accès
-        return Project.objects.filter(is_active=True)
+        return Project.objects.filter(is_active=True).prefetch_related('user_accesses')
 
 class ProjectAccessRequestView(generics.CreateAPIView):
     """

@@ -49,7 +49,7 @@ def generate_journal_on_filesource_save(sender, instance, created, **kwargs):
                 "type_document": detected_type,
                 "file_source": instance.id,
                 "description": f"Import Excel - {sheet_name}",
-                "date": str(instance.date) if instance.date else None,
+                "date": instance.date if instance.date else None,
             }
             
             # Ajouter les métadonnées d'entreprise si disponibles

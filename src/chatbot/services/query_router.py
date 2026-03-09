@@ -46,22 +46,44 @@ class QueryRouter:
             'bilan_structuré':  self.accounting_service.get_structured_bilan,
             'etats_financiers': self.accounting_service.get_dashboard_kpis,
             'resultat_structuré': self.accounting_service.get_resultat_net,
-            'analyse_globale':  self.accounting_service.get_dashboard_kpis,
+            'analyse_globale':  self.accounting_service.get_structured_bilan,
             'tresorerie':       self.accounting_service.get_tresorerie,
-            'bilan':            self.accounting_service.get_bilan_summary,
+            'bilan':            self.accounting_service.get_structured_bilan,
             'resultat':         self.accounting_service.get_resultat_net,
+            'tva':              self.accounting_service.get_tva_report,
+            'factures':         self.accounting_service.get_impayes_report,
+            'anomalies':        self.accounting_service.detect_anomalies,
+            'grand_livre':      self.accounting_service.get_compte_details,
         }
         
         results = {}
         for intent in intents:
             if intent in method_map:
+                import inspect
                 method = method_map[intent]
                 try:
-                    if intent == 'comparaison' and 'annee1' in params and 'annee2' in params:
-                        results[intent] = method(annee1=params['annee1'], annee2=params['annee2'])
+                    # Inspection de la signature pour ne passer que les arguments valides
+                    sig = inspect.signature(method)
+                    valid_params = {
+                        k: v for k, v in params.items() 
+                        if k in sig.parameters
+                    }
+                    
+                    if intent == 'comparaison':
+                        if 'start_date1' in params and 'start_date2' in params:
+                            results[intent] = self.accounting_service.compare_custom_periods(
+                                start1=params['start_date1'], end1=params['end_date1'],
+                                start2=params['start_date2'], end2=params['end_date2']
+                            )
+                        elif 'annee1' in params and 'annee2' in params:
+                            results[intent] = method(annee1=params['annee1'], annee2=params['annee2'])
+                        else:
+                            # Fallback si pas assez de params pour comparaison
+                            results[intent] = method(**valid_params)
                     else:
-                        results[intent] = method(**params)
+                        results[intent] = method(**valid_params)
                 except Exception as e:
+                    print(f"[ERROR] Error calling method for intent {intent}: {str(e)}")
                     results[intent] = {"error": str(e)}
 
         if not results:

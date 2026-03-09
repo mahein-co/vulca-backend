@@ -1,9 +1,19 @@
-import PyPDF2
 import re
 import os
+import PyPDF2
+import unicodedata
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PDF_PCG = os.path.join(BASE_DIR, "plan-comptable-general-2005.pdf")
+
+def simplify(text):
+    if not text:
+        return ""
+    # Normaliser pour enlever les accents (é -> e)
+    text = unicodedata.normalize('NFD', str(text).lower())
+    text = "".join([c for c in text if unicodedata.category(c) != 'Mn'])
+    # Garder uniquement l'alphanumérique
+    return re.sub(r'[^a-z0-9]', '', text)
 
 def load_pcg_mapping_from_pdf(pdf_path=PDF_PCG):
     """
@@ -93,10 +103,16 @@ def get_account_suggestions(description: str, top_n: int = 5):
         "autresproduitsdegestioncourante": "758",
         "produitsdegestioncourante": "758",
         "produitdegestioncourante": "758",
+        "dotation": "681",
+        "dotations": "681",
+        "amortissement": "681",
+        "amortissements": "681",
+        "dotationsauxamortissements": "681",
+        "dotationsauxprovisions": "681",
+        "dotationsauxamortissementsdesimmobilisationsincorporellesetcorporelles": "6811",
+        "dotationsauxprovisionspourrisquesetcharges": "6815",
+        "dotationsauxprovisionspourdepreciation": "6817",
     }
-
-    def simplify(text):
-        return re.sub(r'[^a-z0-9]', '', str(text).lower())
 
     desc_simplified = simplify(description)
     

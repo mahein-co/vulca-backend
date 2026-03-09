@@ -9,7 +9,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from compta.models import GrandLivre, Bilan, CompteResultat
-from compta.kpi_utils import get_latest_bilan_sum, get_cr_sum, get_resultat_net
+from compta.kpi_utils import get_latest_bilan_sum, get_cr_sum, get_resultat_net, get_capitaux_propres, get_chiffre_affaire, get_ebe
 
 from compta.permissions import HasProjectAccess
 from rest_framework.permissions import IsAuthenticated
@@ -60,8 +60,8 @@ def dashboard_indicators_view(request):
             return debit
 
         try:
-            # 1. CALCULS DES MASSES
-            ca = get_sum_cr(["70"])
+            # 1. CALCULS DES MASSES (Unifiés via kpi_utils)
+            ca = get_chiffre_affaire(project_id, d_start, d_end)
             total_produits = get_sum_cr(["7"])
             
             achats = get_sum_cr(["60"])
@@ -73,8 +73,8 @@ def dashboard_indicators_view(request):
             total_charges = get_sum_cr(["6"])
             charges_exploit = achats + charges_externes + impots + personnel + dotations 
             
-            ebe = (get_sum_cr(["70", "71", "72", "73", "74"])) - (achats + charges_externes + impots + personnel)
-            resultat_net = total_produits - total_charges
+            ebe = get_ebe(project_id, d_start, d_end)
+            resultat_net = get_resultat_net(project_id, d_start, d_end)
             resultat_exploit = ebe - dotations + get_sum_cr(["78"])
             
             reprises = get_sum_cr(["78"])
@@ -93,7 +93,7 @@ def dashboard_indicators_view(request):
             else:
                 total_actif = get_sum_bilan([""], type_bilan="ACTIF")
             
-            capitaux_propres = get_sum_bilan(["10", "11", "12"], type_bilan="PASSIF") + resultat_net
+            capitaux_propres = get_capitaux_propres(project_id, d_start, d_end)
             dettes_fi = get_sum_bilan(["16"], type_bilan="PASSIF") + get_sum_bilan(["512"], type_bilan="PASSIF")
             dettes_fournisseurs = get_sum_bilan(["401"], type_bilan="PASSIF")
             passifs_courants = dettes_fournisseurs + get_sum_bilan(["42", "43", "44"], type_bilan="PASSIF") + get_sum_bilan(["512"], type_bilan="PASSIF")

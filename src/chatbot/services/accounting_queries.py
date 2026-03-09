@@ -6,6 +6,10 @@ from compta.models import (
     Journal, GrandLivre, Balance, 
     CompteResultat, Bilan, Project
 )
+from compta.kpi_utils import (
+    get_latest_bilan_sum, get_cr_sum, get_resultat_net, 
+    get_capitaux_propres, get_chiffre_affaire, get_ebe
+)
 
 class AccountingQueryService:
     """Service pour interroger les données comptables d'un projet"""
@@ -301,12 +305,21 @@ class AccountingQueryService:
         stats_actif = queryset.filter(type_bilan='ACTIF').aggregate(total=Sum('montant_ar'))
         stats_passif = queryset.filter(type_bilan='PASSIF').aggregate(total=Sum('montant_ar'))
         
+        # --- AJOUT DU RÉSULTAT NET POUR L'ÉQUILIBRE ET LES CP ---
+        d_start = date(latest_date.year, 1, 1)
+        d_end = latest_date
+        # On récupère le résultat net de l'exercice en cours au moment du bilan
+        rn = get_resultat_net(self.project_id, d_start, d_end)
+        
+        total_actif = stats_actif['total'] or Decimal('0.00')
+        total_passif = (stats_passif['total'] or Decimal('0.00')) + rn
+        
         response = {
             "date": latest_date.strftime('%d/%m/%Y'),
-            "total_actif": float(stats_actif['total'] or 0),
-            "total_passif": float(stats_passif['total'] or 0),
-            "equilibre": float((stats_actif['total'] or 0) - (stats_passif['total'] or 0)),
-            "nb_lignes": queryset.count()
+            "total_actif": float(total_actif),
+            "total_passif": float(total_passif),
+            "equilibre": float(total_actif - total_passif),
+            "nb_lignes": queryset.count() + (1 if rn != 0 else 0)
         }
         
         if include_details:
@@ -332,6 +345,16 @@ class AccountingQueryService:
                     "numero_compte": ligne.numero_compte,
                     "libelle": ligne.libelle,
                     "montant": float(ligne.montant_ar)
+                })
+            
+            # Injecter le résultat net dans les détails du passif
+            if rn != 0:
+                if 'CAPITAUX_PROPRES' not in response['passif']:
+                    response['passif']['CAPITAUX_PROPRES'] = []
+                response['passif']['CAPITAUX_PROPRES'].append({
+                    "numero_compte": "120/129",
+                    "libelle": "Résultat de l'exercice (calculé)",
+                    "montant": float(rn)
                 })
         
         return response
@@ -559,7 +582,36 @@ class AccountingQueryService:
 
         def get_sum_bilan(prefix_list, type_bilan=None):
             # Utilisation de la nouvelle logique anti-double-comptage
-            return self._get_latest_bilan_sum(prefix_list, d_end, type_bilan=type_bilan)
+            # Et fallback sur le dernier solde connu si nécessaire
+            res = self._get_latest_bilan_sum(prefix_list, d_end, type_bilan=type_bilan)
+            if res == 0 and prefix_list and "1" in [p[0] for p in prefix_list if p]:
+                # Fallback : chercher le dernier solde connu sans limite de date pour les capitaux
+                res_obj = Bilan.objects.filter(
+                    project_id=self.project_id,
+                    numero_compte__iregex=f"^({'|'.join(prefix_list)})"
+                ).order_by("-date").values("montant_ar").first()
+                res = res_obj["montant_ar"] if res_obj else Decimal("0.00")
+            return res
+
+        def get_sum_bilan_by_category(category):
+            """Récupère la somme des comptes d'une catégorie avec fallback et sécurité (Dernier solde uniquement)"""
+            # Filtre strict : Capital (10x), Réserves (106x), Report à nouveau (110x, 119x)
+            q_safety = Q(numero_compte__startswith="10") | Q(numero_compte__startswith="110") | Q(numero_compte__startswith="119")
+            
+            # Recherche des derniers IDs par compte pour cette catégorie AVANT d_end
+            last_ids_qs = Bilan.objects.filter(project_id=self.project_id, categorie=category, date__lte=d_end)\
+                .values("numero_compte").annotate(max_id=Max("id"))
+            
+            ids = [item["max_id"] for item in last_ids_qs]
+            
+            if not ids:
+                # 2. Si aucun ID trouvé (peut-être pas de date renseignée), fallback global sur les derniers connus
+                last_ids_global = Bilan.objects.filter(project_id=self.project_id, categorie=category)\
+                    .values("numero_compte").annotate(max_id=Max("id"))
+                ids = [item["max_id"] for item in last_ids_global]
+            
+            res = Bilan.objects.filter(id__in=ids).filter(q_safety).aggregate(s=Sum("montant_ar"))["s"] or Decimal("0.00")
+            return res
 
         def get_total_balance_live():
             """Identique au dashboard : somme total_debit de la table Balance"""
@@ -568,24 +620,22 @@ class AccountingQueryService:
             return res["total_debit"] or Decimal("0.00")
 
         try:
-            # ── 1. MASSES DU COMPTE DE RÉSULTAT ───────────────────────────
-            ca             = get_sum_cr(["70"])
+            # ── 1. MASSES DU COMPTE DE RÉSULTAT (Unifiés) ─────────────────
+            ca             = get_chiffre_affaire(self.project_id, start_date, end_date)
+            ebe            = get_ebe(self.project_id, start_date, end_date)
+            resultat_net   = get_resultat_net(self.project_id, start_date, end_date)
+            
             total_produits = get_sum_cr(["7"])
-            achats         = get_sum_cr(["60"])
-            charges_ext    = get_sum_cr(["61", "62"])
-            impots         = get_sum_cr(["63"])
-            personnel      = get_sum_cr(["64"])
-            charges_fi     = get_sum_cr(["66"])
-            dotations      = get_sum_cr(["68"])
             total_charges  = get_sum_cr(["6"])
-            reprises       = get_sum_cr(["78"])
+            achats         = get_sum_cr(["60"])
+            charges_fi     = get_sum_cr(["66"])
 
-            ebe            = get_sum_cr(["70","71","72","73","74"]) - (achats + charges_ext + impots + personnel)
-            resultat_net   = total_produits - total_charges
+            dotations      = get_sum_cr(["68"])
+            reprises       = get_sum_cr(["78"])
             resultat_exploit = ebe - dotations + reprises
             caf            = resultat_net + dotations - reprises
 
-            # ── 2. BILAN ──────────────────────────────────────────────────
+            # ── 2. BILAN (Unifiés) ────────────────────────────────────────
             stocks            = get_sum_bilan(["3"],   type_bilan="ACTIF")
             creances_clients  = get_sum_bilan(["411"], type_bilan="ACTIF")
             tresorerie_actif  = get_sum_bilan(["5"],   type_bilan="ACTIF")
@@ -594,7 +644,7 @@ class AccountingQueryService:
             total_balance_live = get_total_balance_live()
             total_actif = total_balance_live if total_balance_live > 0 else get_sum_bilan([""], type_bilan="ACTIF")
 
-            capitaux_propres = get_sum_bilan(["10","11","12"], type_bilan="PASSIF") + resultat_net
+            capitaux_propres = get_capitaux_propres(self.project_id, start_date, end_date)
             dettes_fi        = get_sum_bilan(["16"], type_bilan="PASSIF") + get_sum_bilan(["512"], type_bilan="PASSIF")
             dettes_fourn     = get_sum_bilan(["401"], type_bilan="PASSIF")
             passifs_courants = dettes_fourn + get_sum_bilan(["42","43","44"], type_bilan="PASSIF") + get_sum_bilan(["512"], type_bilan="PASSIF")
@@ -719,14 +769,16 @@ class AccountingQueryService:
         if not self.project:
             return {"error": "Projet non trouvé"}
         
+        # Harmonisation avec Dashboard: préfixe 70 est la source de vérité
         filters = Q(project_id=self.project_id) & Q(numero_compte__startswith='70')
         
         if start_date and end_date:
-            filters &= Q(date__gte=start_date, date__lte=end_date)
+            filters &= Q(date__range=[start_date, end_date])
         elif annee:
             filters &= Q(date__year=annee)
             
-        queryset = CompteResultat.objects.filter(filters, nature='PRODUIT')
+        # On inclut tous les comptes 70x, car c'est ainsi que le Dashboard calcule le CA
+        queryset = CompteResultat.objects.filter(filters)
         resultat = queryset.aggregate(total=Sum('montant_ar'))
         ca = resultat['total'] or Decimal('0.00')
         
@@ -802,14 +854,15 @@ class AccountingQueryService:
             return {"error": "Projet non trouvé"}
         
         # Filtres basiques sur le projet
-        filters = Q(project_id=self.project_id)
+        # Harmonisation avec Dashboard: Les charges sont les comptes commençant par 6
+        filters = Q(project_id=self.project_id) & Q(numero_compte__startswith='6')
         
         if start_date and end_date:
-            filters &= Q(date__gte=start_date, date__lte=end_date)
+            filters &= Q(date__range=[start_date, end_date])
         elif annee:
             filters &= Q(date__year=annee)
         
-        queryset = CompteResultat.objects.filter(filters, nature='CHARGE')
+        queryset = CompteResultat.objects.filter(filters)
         resultat = queryset.aggregate(total=Sum('montant_ar'))
         montant = resultat['total'] or Decimal('0.00')
         
@@ -943,41 +996,20 @@ class AccountingQueryService:
         if not self.project:
             return {"error": "Projet non trouvé"}
             
-    def get_roe(self, start_date=None, end_date=None, annee=None):
-        """
-        Calcule le ROE (Rentabilité des capitaux propres)
-        """
         res_net_data = self.get_resultat_net(start_date, end_date, annee)
-        res_net = res_net_data.get('montant', 0)
+        res_net = float(res_net_data.get('montant', 0))
         
-        date_bilan = end_date
-        if annee and not date_bilan:
-            date_bilan = date(annee, 12, 31)
-        elif not date_bilan:
-            date_bilan = date.today()
-        
-        # Pour le ROE, on prend les Capitaux Propres à la date de fin
-        cp_filters = Q(project_id=self.project_id) & Q(type_bilan='PASSIF') & Q(categorie='CAPITAUX_PROPRES')
-        cp_filters &= Q(date__lte=date_bilan)
-            
-        latest_cp_date = Bilan.objects.filter(cp_filters).order_by('-date').values_list('date', flat=True).first()
-        
-        if latest_cp_date:
-            cp_res = Bilan.objects.filter(
-                project_id=self.project_id,
-                date=latest_cp_date,
-                categorie='CAPITAUX_PROPRES'
-            ).aggregate(total=Sum('montant_ar'))
-            cp_total = cp_res['total'] or Decimal('0.00')
+        # Période pour les CP
+        if annee:
+            d_start, d_end = date(annee, 1, 1), date(annee, 12, 31)
         else:
-            cp_res = Balance.objects.filter(
-                project_id=self.project_id, 
-                numero_compte__regex=r'^1[0-4]',
-                date__lte=date_bilan
-            ).order_by('-date').values('numero_compte').annotate(latest_balance=F('solde_credit') - F('solde_debit')).aggregate(total=Sum('latest_balance'))
-            cp_total = cp_res['total'] or Decimal('0.00')
-            
+            d_start = start_date or date(end_date.year, 1, 1) if end_date else date.today().replace(month=1, day=1)
+            d_end = end_date or date.today()
+
+        # Utilisation de la logique unifiée
+        cp_total = get_capitaux_propres(self.project_id, d_start, d_end)
         cp_total_float = float(cp_total)
+        
         roe = (res_net / cp_total_float * 100) if cp_total_float != 0 else 0
         
         return {
@@ -1344,13 +1376,30 @@ class AccountingQueryService:
         )
 
         actif_total = actif_qs.aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
-        passif_total = passif_qs.aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
+        passif_total_base = passif_qs.aggregate(total=Sum('montant_ar'))['total'] or Decimal('0.00')
         
+        # --- AJOUT DU RÉSULTAT NET ET CP ---
+        d_start = date(latest_date.year, 1, 1)
+        d_end = latest_date
+        rn = get_resultat_net(self.project_id, d_start, d_end)
+        cp_total = get_capitaux_propres(self.project_id, d_start, d_end)
+        
+        passif_total = passif_total_base + rn
+    
+        # Déterminer le libellé de la période pour éviter que l'IA ne pense que c'est une projection
+        periode_label = latest_date.strftime('%d/%m/%Y')
+        if annee:
+            periode_label = f"Année {annee}"
+        elif date_bilan:
+            periode_label = f"Au {target_date.strftime('%d/%m/%Y')}"
+
         response = {
             "actif": float(actif_total),
             "passif": float(passif_total),
+            "capitaux_propres": float(cp_total),
             "equilibre": float(actif_total - passif_total),
-            "date": latest_date.strftime('%d/%m/%Y')
+            "date": periode_label,
+            "latest_data_date": latest_date.strftime('%d/%m/%Y')
         }
 
         if include_details:
@@ -1370,6 +1419,15 @@ class AccountingQueryService:
                     } for d in passif_qs.values('numero_compte', 'libelle', 'montant_ar')
                 ]
             }
+            
+            # Ajouter le résultat net aux détails
+            if rn != 0:
+                response['details']['passif'].append({
+                    "compte": "12",
+                    "libelle": "Résultat de l'exercice (calculé)",
+                    "montant": float(rn)
+                })
+                
             response['nb_lignes'] = (
                 len(response['details']['actif']) +
                 len(response['details']['passif'])
@@ -1381,56 +1439,67 @@ class AccountingQueryService:
         """
         Compare deux années (CA, Charges, Résultat) avec analyse au prorata
         """
-        data_annee1 = {
-            "ca": self.get_chiffre_affaires(annee=annee1),
-            "charges": self.get_charges(annee=annee1),
-            "resultat": self.get_resultat_net(annee=annee1)
+        from datetime import date
+        return self.compare_custom_periods(
+            start1=date(annee1, 1, 1), end1=date(annee1, 12, 31),
+            start2=date(annee2, 1, 1), end2=date(annee2, 12, 31),
+            label1=str(annee1), label2=str(annee2)
+        )
+
+    def compare_custom_periods(self, start1, end1, start2, end2, label1=None, label2=None):
+        """
+        Compare deux périodes arbitraires
+        """
+        data1 = {
+            "ca": self.get_chiffre_affaires(start_date=start1, end_date=end1),
+            "charges": self.get_charges(start_date=start1, end_date=end1),
+            "resultat": self.get_resultat_net(start_date=start1, end_date=end1)
         }
         
-        data_annee2 = {
-            "ca": self.get_chiffre_affaires(annee=annee2),
-            "charges": self.get_charges(annee=annee2),
-            "resultat": self.get_resultat_net(annee=annee2)
+        data2 = {
+            "ca": self.get_chiffre_affaires(start_date=start2, end_date=end2),
+            "charges": self.get_charges(start_date=start2, end_date=end2),
+            "resultat": self.get_resultat_net(start_date=start2, end_date=end2)
         }
 
-        # Calculer le nombre de mois uniques avec des mouvements pour chaque année
-        def count_months(annee):
+        # Calculer le nombre de mois uniques avec des mouvements
+        def count_months(s, e):
             return CompteResultat.objects.filter(
                 project_id=self.project_id, 
-                date__year=annee
-            ).values('date__month').distinct().count() or 1 # Éviter division par 0
+                date__gte=s, date__lte=e
+            ).values('date__month').distinct().count() or 1
 
-        nb_mois1 = count_months(annee1)
-        nb_mois2 = count_months(annee2)
+        nb_mois1 = count_months(start1, end1)
+        nb_mois2 = count_months(start2, end2)
         
         return {
-            "annee_1": {
-                "annee": annee1,
-                "chiffre_affaires": data_annee1["ca"]["montant"],
-                "moyenne_mensuelle_ca": data_annee1["ca"]["montant"] / nb_mois1,
-                "charges": data_annee1["charges"]["montant"],
-                "moyenne_mensuelle_charges": data_annee1["charges"]["montant"] / nb_mois1,
-                "resultat": data_annee1["resultat"]["montant"],
+            "periode_1": {
+                "label": label1 or self._format_periode(start1, end1, None),
+                "chiffre_affaires": data1["ca"]["montant"],
+                "moyenne_mensuelle_ca": data1["ca"]["montant"] / nb_mois1,
+                "charges": data1["charges"]["montant"],
+                "moyenne_mensuelle_charges": data1["charges"]["montant"] / nb_mois1,
+                "resultat": data1["resultat"]["montant"],
                 "nb_mois_enregistres": nb_mois1
             },
-            "annee_2": {
-                "annee": annee2,
-                "chiffre_affaires": data_annee2["ca"]["montant"],
-                "moyenne_mensuelle_ca": data_annee2["ca"]["montant"] / nb_mois2,
-                "charges": data_annee2["charges"]["montant"],
-                "moyenne_mensuelle_charges": data_annee2["charges"]["montant"] / nb_mois2,
-                "resultat": data_annee2["resultat"]["montant"],
+            "periode_2": {
+                "label": label2 or self._format_periode(start2, end2, None),
+                "chiffre_affaires": data2["ca"]["montant"],
+                "moyenne_mensuelle_ca": data2["ca"]["montant"] / nb_mois2,
+                "charges": data2["charges"]["montant"],
+                "moyenne_mensuelle_charges": data2["charges"]["montant"] / nb_mois2,
+                "resultat": data2["resultat"]["montant"],
                 "nb_mois_enregistres": nb_mois2
             },
             "evolution": {
-                "ca": data_annee2["ca"]["montant"] - data_annee1["ca"]["montant"],
-                "ca_pct": ((data_annee2["ca"]["montant"] - data_annee1["ca"]["montant"]) / data_annee1["ca"]["montant"] * 100) if data_annee1["ca"]["montant"] != 0 else 0,
+                "ca": data2["ca"]["montant"] - data1["ca"]["montant"],
+                "ca_pct": ((data2["ca"]["montant"] - data1["ca"]["montant"]) / data1["ca"]["montant"] * 100) if data1["ca"]["montant"] != 0 else 0,
                 
-                "charges": data_annee2["charges"]["montant"] - data_annee1["charges"]["montant"],
-                "charges_pct": ((data_annee2["charges"]["montant"] - data_annee1["charges"]["montant"]) / data_annee1["charges"]["montant"] * 100) if data_annee1["charges"]["montant"] != 0 else 0,
+                "charges": data2["charges"]["montant"] - data1["charges"]["montant"],
+                "charges_pct": ((data2["charges"]["montant"] - data1["charges"]["montant"]) / data1["charges"]["montant"] * 100) if data1["charges"]["montant"] != 0 else 0,
                 
-                "resultat": data_annee2["resultat"]["montant"] - data_annee1["resultat"]["montant"],
-                "resultat_pct": ((data_annee2["resultat"]["montant"] - data_annee1["resultat"]["montant"]) / abs(data_annee1["resultat"]["montant"]) * 100) if data_annee1["resultat"]["montant"] != 0 else 0
+                "resultat": data2["resultat"]["montant"] - data1["resultat"]["montant"],
+                "resultat_pct": ((data2["resultat"]["montant"] - data1["resultat"]["montant"]) / abs(data1["resultat"]["montant"]) * 100) if data1["resultat"]["montant"] != 0 else 0
             }
         }
     
@@ -1606,8 +1675,8 @@ class AccountingQueryService:
         res_net = self.get_resultat_net(start_date=start_date, end_date=end_date, annee=annee)
         rn_val = float(res_net.get("montant", 0)) if "error" not in res_net else 0.0
 
-        equity    = get_items_annual(["10", "11", "12", "13"], "PASSIF")  # Capitaux propres
-        equity.append({"compte": "RN", "libelle": "Résultat Net de l'exercice", "montant": rn_val})
+        equity    = get_items_annual(["10", "11"], "PASSIF")  # Capitaux propres (Hors 12 pour éviter double-comptage)
+        equity.append({"compte": "RN", "libelle": "Résultat Net de l'exercice (Calculé)", "montant": rn_val})
         passif_nc = get_items_annual(["15", "16", "17"], "PASSIF")         # Dettes LT
         passif_c  = get_items_annual(["40", "41", "42", "43", "44", "45", "46", "47", "48", "51", "52"], "PASSIF")  # Dettes CT
 
@@ -1678,4 +1747,75 @@ class AccountingQueryService:
         return {
             "bilan": self.get_structured_bilan(start_date=start_date, end_date=end_date, annee=annee),
             "compte_de_resultat": self.get_resultat_net(start_date=start_date, end_date=end_date, annee=annee)
+        }
+
+    # ========================================
+    # NOUVELLES FONCTIONNALITÉS AVANCÉES
+    # ========================================
+
+    def get_tva_report(self, start_date=None, end_date=None, annee=None):
+        """
+        Calcule la TVA collectée (4457), déductible (4456) et nette
+        """
+        if not self.project: return {"error": "Projet non trouvé"}
+        
+        filters = Q(project_id=self.project_id)
+        if annee: filters &= Q(date__year=annee)
+        elif start_date and end_date: filters &= Q(date__range=[start_date, end_date])
+
+        # PCG 2005: 4456 (Déductible), 4457 (Collectée)
+        deductible = Journal.objects.filter(filters, numero_compte__startswith='4456').aggregate(total=Sum('debit_ar'))['total'] or 0
+        collectee = Journal.objects.filter(filters, numero_compte__startswith='4457').aggregate(total=Sum('credit_ar'))['total'] or 0
+        
+        return {
+            "tva_collectee": float(collectee),
+            "tva_deductible": float(deductible),
+            "tva_net": float(collectee - deductible),
+            "periode": self._format_periode(start_date, end_date, annee)
+        }
+
+    def get_impayes_report(self):
+        """
+        Analyse les comptes Clients (411) et Fournisseurs (401) pour détecter les impayés
+        """
+        if not self.project: return {"error": "Projet non trouvé"}
+
+        clients = Balance.objects.filter(project_id=self.project_id, numero_compte__startswith='411').values('numero_compte', 'libelle').annotate(solde=Sum(F('solde_debit') - F('solde_credit'))).filter(solde__gt=0.01)
+        fournisseurs = Balance.objects.filter(project_id=self.project_id, numero_compte__startswith='401').values('numero_compte', 'libelle').annotate(solde=Sum(F('solde_credit') - F('solde_debit'))).filter(solde__gt=0.01)
+
+        return {
+            "clients_debiteurs": [{"compte": c['numero_compte'], "libelle": c['libelle'], "reste_a_payer": float(c['solde'])} for c in clients],
+            "fournisseurs_crediteurs": [{"compte": f['numero_compte'], "libelle": f['libelle'], "reste_a_payer": float(f['solde'])} for f in fournisseurs],
+            "total_impayes_clients": float(sum(c['solde'] for c in clients)),
+            "total_impayes_fournisseurs": float(sum(f['solde'] for f in fournisseurs))
+        }
+
+    def detect_anomalies(self):
+        """
+        Détecte les anomalies comptables de base
+        """
+        if not self.project: return {"error": "Projet non trouvé"}
+        
+        anomalies = []
+        
+        # 1. Écritures non équilibrées
+        unbalanced = Journal.objects.filter(project_id=self.project_id).values('numero_piece', 'date').annotate(diff=Sum(F('debit_ar') - F('credit_ar'))).filter(Q(diff__gt=0.01) | Q(diff__lt=-0.01))
+        if unbalanced.exists():
+            anomalies.append({
+                "type": "DÉSEQUILIBRE",
+                "message": f"Il y a {unbalanced.count()} pièces comptables non équilibrées.",
+                "pieces": [u['numero_piece'] for u in unbalanced[:5]]
+            })
+
+        # 2. Doublons potentiels (même date, même compte, même montant)
+        potential_dupes = Journal.objects.filter(project_id=self.project_id).values('date', 'numero_compte', 'debit_ar', 'credit_ar').annotate(cnt=Count('id')).filter(cnt__gt=1)
+        if potential_dupes.exists():
+             anomalies.append({
+                "type": "DOUBLONS",
+                "message": f"Détection de {potential_dupes.count()} lignes potentiellement en doublon.",
+            })
+
+        return {
+            "nb_anomalies": len(anomalies),
+            "details": anomalies
         }

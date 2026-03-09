@@ -13,6 +13,7 @@ import pandas as pd
 import re
 from typing import Dict, List, Tuple, Optional, Any
 from decimal import Decimal
+from datetime import datetime, date
 
 # Import du validateur de compte
 from ocr.account_validator import AccountValidator
@@ -900,12 +901,11 @@ class FinancialDataStructurer:
             type_journal_excel = str(row.get(type_journal_col, '')) if type_journal_col else ''
             type_journal_excel = type_journal_excel.strip().upper() if type_journal_excel and type_journal_excel != 'nan' else None
 
-            # 6. Date (avec propagation)
+            # 6. Date (avec propagation et conversion en objet date)
             date_raw = row.get(date_col, '') if date_col else ''
-            date_str = ''
+            res_date = None
             if date_raw and str(date_raw) != 'nan':
                 try:
-                    import pandas as pd
                     # Détecter si c'est déjà au format ISO YYYY-MM-DD ou DD-MM-YYYY
                     date_val_str = str(date_raw)
                     if re.match(r'^\d{4}-\d{2}-\d{2}$', date_val_str):
@@ -916,24 +916,22 @@ class FinancialDataStructurer:
                         date_obj = pd.to_datetime(date_raw, errors='coerce', dayfirst=True)
                         
                     if pd.notna(date_obj):
-                        date_str = date_obj.strftime('%Y-%m-%d')
-                        last_valid_date = date_str
+                        res_date = date_obj.date()
+                        last_valid_date = res_date
                     else:
-                        date_str = str(date_raw)
-                        if date_str != 'nan': last_valid_date = date_str
+                        res_date = None
                 except:
-                    date_str = str(date_raw)
-                    if date_str != 'nan': last_valid_date = date_str
+                    res_date = None
             
-            if not date_str or date_str == 'nan':
-                date_str = last_valid_date if last_valid_date else "2025-12-31"
+            if res_date is None:
+                res_date = last_valid_date if last_valid_date else date(2025, 12, 31)
 
             lignes_raw.append({
                 "numero_compte": numero_compte,
                 "libelle": libelle,
                 "debit": debit,
                 "credit": credit,
-                "date": date_str,
+                "date": res_date,
                 "numero_piece": numero_piece,
                 "type_journal_excel": type_journal_excel
             })

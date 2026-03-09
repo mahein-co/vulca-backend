@@ -7,6 +7,8 @@ load_dotenv()
 # DJANGO -------------------------------------------
 from django.shortcuts import get_object_or_404
 from django.conf import settings
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
 
 # REST FRAMEWORK -----------------------------------
 from rest_framework.response import Response
@@ -25,6 +27,8 @@ from chatbot.pagination import DocumentPagination
 from chatbot.prompts import SYSTEM_PROMPT
 
 from chatbot.services.embeddings import generate_embedding
+from chatbot.services.langchain_service import LangchainRAGService
+from langchain_core.messages import HumanMessage, AIMessage
 from chatbot.services.query_router import QueryRouter
 from chatbot.services.intent_detector import IntentDetector
 from chatbot.services.export_service import ExportService
@@ -49,6 +53,16 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 greetings = ["bonjour", "bonsoir", "salut", "coucou", "allô", "bon après-midi", "hey", "yo", "coucou toi", "enchanté(e)", "hello", "hi", "salam", "hola", "ciao"]
+
+def format_fr(value):
+    """Formatte un nombre avec des espaces pour les milliers et une virgule pour les décimales (ex: 1 000 000,00)"""
+    try:
+        if value is None: return "0,00"
+        # On utilise le formatage standard US (1,234,567.89) puis on permute
+        formatted = f"{float(value):,.2f}"
+        return formatted.replace(",", " ").replace(".", ",")
+    except (ValueError, TypeError):
+        return str(value)
 
 # SEARCH VECTOR SIMILARY ------------------------------------------------
 def search_similar_pages(query_embedding, project_id, top_k=5, threshold=0.9):
@@ -169,266 +183,234 @@ def detect_financial_query(user_input):
 #RECUPERER LES DONNEES COMPTABLES
 def get_accounting_context(user, project_id, query_info):
     """
-    Récupère les données comptables selon le type de question
+    Récupère les données comptables selon le ou les types de questions détectées
     """
-
     if not query_info:
         return ""
     
     service = AccountingQueryService(project_id=project_id)
-    query_type = query_info['type']
+    # On traite TOUS les types d'intentions détectés (multi-intents)
+    query_types = query_info.get('types') or [query_info['type']]
     params = query_info['params']
     include_details = query_info.get('include_details', True)
     
     context_parts = []
     
-    try:
-        if query_type == 'ca':
-            data = service.get_chiffre_affaires(**params, include_details=include_details)
-            context_parts.append(f"**Chiffre d'affaires** ({data['periode']}):")
-            context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
-            context_parts.append(f"- Comptes: {data['comptes']}")
-            if 'formule' in data:
-                context_parts.append(f"- Formule: {data['formule']}")
+    # ── Header de Période (Crucial pour l'IA) ──────────────────────────
+    annee = params.get('annee')
+    start_date = params.get('start_date')
+    end_date = params.get('end_date')
+    
+    if annee:
+        context_parts.append(f"### PÉRIODE DEMANDÉE : ANNÉE {annee} (01/01/{annee} AU 31/12/{annee}) ###")
+    elif start_date and end_date:
+        context_parts.append(f"### PÉRIODE DEMANDÉE : DU {start_date} AU {end_date} ###")
+    
+    processed_types = set()
 
-            # Afficher les détails si disponibles
-            if 'details' in data:
-                context_parts.append(f"\n**Détails des ventes** ({data['nb_lignes']} lignes):")
-                for detail in data['details'][:10]:  # Limiter à 10 lignes max
-                    context_parts.append(
-                        f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR"
-                    )
-                if data['nb_lignes'] > 10:
-                    context_parts.append(f"  ... et {data['nb_lignes'] - 10} autres lignes")
-        
-        elif query_type == 'charges':
-            data = service.get_charges(**params, include_details=include_details)
-            context_parts.append(f"**Charges** ({data['periode']}):")
-            context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
-            context_parts.append(f"- Comptes: {data['comptes']}")
-            if 'formule' in data:
-                context_parts.append(f"- Formule: {data['formule']}")
+    for q_type in query_info.get('types', []):
+        if q_type in processed_types:
+            continue
+        processed_types.add(q_type)
 
-            if 'details' in data:
-                context_parts.append(f"\n**Détails des charges** ({data['nb_lignes']} lignes):")
-                for detail in data['details'][:10]:
-                    context_parts.append(
-                        f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR"
-                    )
-                if data['nb_lignes'] > 10:
-                    context_parts.append(f"  ... et {data['nb_lignes'] - 10} autres lignes")
+        try:
+            if q_type == 'ca':
+                data = service.get_chiffre_affaires(**params, include_details=include_details)
+                context_parts.append(f"**Chiffre d'affaires** ({data['periode']}):")
+                context_parts.append(f"- Montant: {format_fr(data['montant'])} AR")
+                context_parts.append(f"- Comptes: {data['comptes']}")
+                if 'formule' in data:
+                    context_parts.append(f"- Formule: {data['formule']}")
 
-        elif query_type == 'ebe':
-            data = service.get_ebe(**params, include_details=include_details)
-            context_parts.append(f"**EBE (Excédent Brut d'Exploitation)** ({data['periode']}):")
-            context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
-            context_parts.append(f"- Produits d'exploitation: {data['produits_exploitation']:,.2f} AR")
-            context_parts.append(f"- Charges d'exploitation: {data['charges_exploitation']:,.2f} AR")
-
-            if 'details' in data:  
-                context_parts.append(f"\n**Détails EBE** ({data['nb_lignes']} lignes):")
-                context_parts.append(f"Produits d'exploitation:")
-                for detail in data['details']['produits'][:5]:
-                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
-                context_parts.append(f"Charges d'exploitation:")
-                for detail in data['details']['charges'][:5]:
-                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
-
-
+                if include_details and 'details' in data:
+                    context_parts.append(f"\n**Détails des ventes** ({data['nb_lignes']} lignes):")
+                    for detail in data['details'][:10]:
+                        context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
+                    if data['nb_lignes'] > 10:
+                        context_parts.append(f"  ... et {data['nb_lignes'] - 10} autres lignes")
             
-        elif query_type == 'roe':
-            data = service.get_roe(**params)
-            context_parts.append(f"**ROE (Rentabilité des capitaux propres)** ({data['periode']}):")
-            context_parts.append(f"- Taux: {data['valeur']:.2f}%")
-            context_parts.append(f"- Résultat net: {data['resultat_net']:,.2f} AR")
-            context_parts.append(f"- Capitaux propres: {data['capitaux_propres']:,.2f} AR")
+            elif q_type == 'charges':
+                data = service.get_charges(**params, include_details=include_details)
+                context_parts.append(f"**Charges** ({data['periode']}):")
+                context_parts.append(f"- Montant: {format_fr(data['montant'])} AR")
+                context_parts.append(f"- Comptes: {data['comptes']}")
+                if 'formule' in data:
+                    context_parts.append(f"- Formule: {data['formule']}")
 
-        elif query_type == 'marge_brute':
-            data = service.get_marge_brute(**params, include_details=include_details)
-            context_parts.append(f"**Marge Brute** ({data['periode']}):")
-            context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
-            context_parts.append(f"- Taux de marge: {data['taux']:.2f}%")
-            context_parts.append(f"- Ventes: {data['ventes']:,.2f} AR")
-            context_parts.append(f"- Achats: {data['achats']:,.2f} AR")
+                if include_details and 'details' in data:
+                    context_parts.append(f"\n**Détails des charges** ({data['nb_lignes']} lignes):")
+                    for detail in data['details'][:10]:
+                        context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
+                    if data['nb_lignes'] > 10:
+                        context_parts.append(f"  ... et {data['nb_lignes'] - 10} autres lignes")
 
-            if 'details' in data:  
-                context_parts.append(f"\n**Détails Marge Brute:**")
-                context_parts.append(f"Ventes:")
-                for detail in data['details']['ventes'][:5]:
-                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
-                context_parts.append(f"Achats:")
-                for detail in data['details']['achats'][:5]:
-                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
+            elif q_type == 'ebe':
+                data = service.get_ebe(**params, include_details=include_details)
+                context_parts.append(f"**EBE (Excédent Brut d'Exploitation)** ({data['periode']}):")
+                context_parts.append(f"- Montant: {format_fr(data['montant'])} AR")
+                context_parts.append(f"- Produits d'exploitation: {format_fr(data['produits_exploitation'])} AR")
+                context_parts.append(f"- Charges d'exploitation: {format_fr(data['charges_exploitation'])} AR")
 
+                if include_details and 'details' in data:  
+                    context_parts.append(f"\n**Détails EBE** ({data['nb_lignes']} lignes):")
+                    context_parts.append(f"Produits d'exploitation:")
+                    for detail in data['details']['produits'][:5]:
+                        context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {format_fr(detail['montant'])} AR")
+                    context_parts.append(f"Charges d'exploitation:")
+                    for detail in data['details']['charges'][:5]:
+                        context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {format_fr(detail['montant'])} AR")
+            
+            elif q_type == 'roe':
+                data = service.get_roe(**params)
+                context_parts.append(f"**ROE (Rentabilité des capitaux propres)** ({data['periode']}):")
+                context_parts.append(f"- Taux: {data['valeur']:.2f}%")
+                context_parts.append(f"- Résultat net: {format_fr(data['resultat_net'])} AR")
+                context_parts.append(f"- Capitaux propres: {format_fr(data['capitaux_propres'])} AR")
 
-        elif query_type == 'bfr':
-            data = service.get_bfr(date_ref=params.get('end_date'), annee=params.get('annee'), include_details=include_details)
-            context_parts.append(f"**BFR (Besoin en Fonds de Roulement)** (au {data['date']}):")
-            context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
-            context_parts.append(f"- Stocks: {data['stocks']:,.2f} AR")
-            context_parts.append(f"- Créances clients: {data['creances_clients']:,.2f} AR")
-            context_parts.append(f"- Dettes fournisseurs: {data['dettes_fournisseurs']:,.2f} AR")
+            elif q_type == 'marge_brute':
+                data = service.get_marge_brute(**params, include_details=include_details)
+                context_parts.append(f"**Marge Brute** ({data['periode']}):")
+                context_parts.append(f"- Montant: {format_fr(data['montant'])} AR")
+                context_parts.append(f"- Taux de marge: {data['taux']:.2f}%")
+                context_parts.append(f"- Ventes: {data['ventes']:,.2f} AR")
+                context_parts.append(f"- Achats: {data['achats']:,.2f} AR")
 
-            if 'details' in data:  
-                context_parts.append(f"\n**Détails BFR** ({data['nb_lignes']} comptes):")
-                if data['details']['stocks']:
-                    context_parts.append(f"Stocks:")
-                    for d in data['details']['stocks'][:3]:
-                        context_parts.append(f"  - {d['compte']}: {d['solde']:,.2f} AR")
-                if data['details']['creances_clients']:
-                    context_parts.append(f"Créances clients:")
-                    for d in data['details']['creances_clients'][:3]:
-                        context_parts.append(f"  - {d['compte']}: {d['solde']:,.2f} AR")
+                if include_details and 'details' in data:  
+                    context_parts.append(f"\n**Détails Marge Brute:**")
+                    context_parts.append(f"Ventes:")
+                    for detail in data['details']['ventes'][:5]:
+                        context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {format_fr(detail['montant'])} AR")
+                    context_parts.append(f"Achats:")
+                    for detail in data['details']['achats'][:5]:
+                        context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {format_fr(detail['montant'])} AR")
 
-        elif query_type == 'leverage' or query_type == 'current_ratio':
-            data = service.get_ratios_structure(date_ref=params.get('end_date'), annee=params.get('annee'))
-            context_parts.append(f"**Ratios de Structure** (au {data['date']}):")
-            if query_type == 'leverage':
-                context_parts.append(f"- Leverage (Levier financier): {data['leverage']:.2f}")
-                context_parts.append(f"- Dettes financières: {data['dettes_financieres']:,.2f} AR")
-                context_parts.append(f"- Capitaux propres: {data['capitaux_propres']:,.2f} AR")
-            else:
-                context_parts.append(f"- Current Ratio (Ratio de liquidité): {data['current_ratio']:.2f}")
-                context_parts.append(f"- Actif courant: {data['actif_courant']:,.2f} AR")
-                context_parts.append(f"- Passif courant: {data['passif_courant']:,.2f} AR")
+            elif q_type == 'bfr':
+                data = service.get_bfr(date_ref=params.get('end_date'), annee=params.get('annee'), include_details=include_details)
+                context_parts.append(f"**BFR (Besoin en Fonds de Roulement)** (au {data['date']}):")
+                context_parts.append(f"- Montant: {format_fr(data['montant'])} AR")
+                context_parts.append(f"- Stocks: {data['stocks']:,.2f} AR")
+                context_parts.append(f"- Créances clients: {data['creances_clients']:,.2f} AR")
+                context_parts.append(f"- Dettes fournisseurs: {data['dettes_fournisseurs']:,.2f} AR")
 
-        elif query_type == 'roa':
-            data = service.get_roa(**params)
-            context_parts.append(f"**ROA (Return on Assets)** ({data['periode']}):")
-            context_parts.append(f"- Taux: {data['valeur']:.2f}%")
-            context_parts.append(f"- Résultat net: {data['resultat_net']:,.2f} AR")
-            context_parts.append(f"- Total Actif: {data['total_actif']:,.2f} AR")
+                if include_details and 'details' in data:  
+                    context_parts.append(f"\n**Détails BFR** ({data['nb_lignes']} comptes):")
+                    if data['details']['stocks']:
+                        context_parts.append(f"Stocks:")
+                        for d in data['details']['stocks'][:3]:
+                            context_parts.append(f"  - {d['compte']}: {format_fr(d['solde'])} AR")
+                    if data['details']['creances_clients']:
+                        context_parts.append(f"Créances clients:")
+                        for d in data['details']['creances_clients'][:3]:
+                            context_parts.append(f"  - {d['compte']}: {format_fr(d['solde'])} AR")
 
-        elif query_type == 'marge_nette' or query_type == 'marge_operationnelle':
-            data = service.get_marges_profitabilite(**params)
-            context_parts.append(f"**Profitabilité** ({data['periode']}):")
-            if query_type == 'marge_nette':
-                context_parts.append(f"- Marge Nette: {data['marge_nette']:.2f}%")
-            else:
-                context_parts.append(f"- Marge Opérationnelle: {data['marge_operationnelle']:.2f}%")
-            context_parts.append(f"- Résultat net: {data['resultat_net']:,.2f} AR")
-            context_parts.append(f"- EBE: {data['ebe']:,.2f} AR")
+            elif q_type in ('leverage', 'current_ratio'):
+                data = service.get_ratios_structure(date_ref=params.get('end_date'), annee=params.get('annee'))
+                context_parts.append(f"**Ratios de Structure** (au {data['date']}):")
+                if q_type == 'leverage':
+                    context_parts.append(f"- Leverage (Levier financier): {data['leverage']:.2f}")
+                    context_parts.append(f"- Dettes financières: {data['dettes_financieres']:,.2f} AR")
+                    context_parts.append(f"- Capitaux propres: {data['capitaux_propres']:,.2f} AR")
+                else:
+                    context_parts.append(f"- Current Ratio (Ratio de liquidité): {data['current_ratio']:.2f}")
+                    context_parts.append(f"- Actif courant: {data['actif_courant']:,.2f} AR")
+                    context_parts.append(f"- Passif courant: {data['passif_courant']:,.2f} AR")
 
-        elif query_type == 'rotation_stocks':
-            data = service.get_rotation_stocks(annee=params.get('annee'))
-            context_parts.append(f"**Rotation des Stocks** (Année {data['annee']}):")
-            context_parts.append(f"- Coefficient: {data['coefficient']:.2f} fois")
-            context_parts.append(f"- Délai moyen de stockage: {data['jours_stock']:.2f} jours")
-            context_parts.append(f"- Achats: {data['achats']:,.2f} AR")
-            context_parts.append(f"- Stock final: {data['stock_final']:,.2f} AR")
+            elif q_type == 'roa':
+                data = service.get_roa(**params)
+                context_parts.append(f"**ROA (Return on Assets)** ({data['periode']}):")
+                context_parts.append(f"- Taux: {data['valeur']:.2f}%")
+                context_parts.append(f"- Résultat net: {data['resultat_net']:,.2f} AR")
+                context_parts.append(f"- Total Actif: {data['total_actif']:,.2f} AR")
+
+            elif q_type in ('marge_nette', 'marge_operationnelle'):
+                data = service.get_marges_profitabilite(**params)
+                context_parts.append(f"**Profitabilité** ({data['periode']}):")
+                if q_type == 'marge_nette':
+                    context_parts.append(f"- Marge Nette: {data['marge_nette']:.2f}%")
+                else:
+                    context_parts.append(f"- Marge Opérationnelle: {data['marge_operationnelle']:.2f}%")
+                context_parts.append(f"- Résultat net: {data['resultat_net']:,.2f} AR")
+                context_parts.append(f"- EBE: {data['ebe']:,.2f} AR")
+
+            elif q_type == 'rotation_stocks':
+                data = service.get_rotation_stocks(annee=params.get('annee'))
+                context_parts.append(f"**Rotation des Stocks** (Année {data['annee']}):")
+                context_parts.append(f"- Coefficient: {data['coefficient']:.2f} fois")
+                context_parts.append(f"- Délai moyen de stockage: {data['jours_stock']:.2f} jours")
+                context_parts.append(f"- Achats: {data['achats']:,.2f} AR")
+                context_parts.append(f"- Stock final: {data['stock_final']:,.2f} AR")
+            
+            elif q_type == 'resultat':
+                data = service.get_resultat_net(**params, include_details=include_details)
+                context_parts.append(f"**Résultat net** ({data['periode']}):")
+                context_parts.append(f"- Résultat: {format_fr(data['montant'])} AR")
+                context_parts.append(f"- Produits: {data['produits']:,.2f} AR")
+                context_parts.append(f"- Charges: {data['charges']:,.2f} AR")
+
+                if include_details and 'details' in data:  
+                    context_parts.append(f"\n**Détails Résultat** ({data['nb_lignes']} lignes):")
+                    context_parts.append(f"Produits:")
+                    for detail in data['details']['produits'][:5]:
+                        context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {format_fr(detail['montant'])} AR")
+                    context_parts.append(f"Charges:")
+                    for detail in data['details']['charges'][:5]:
+                        context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {format_fr(detail['montant'])} AR")
+            
+            elif q_type == 'tresorerie':
+                data = service.get_tresorerie(annee=params.get('annee'), include_details=include_details)  
+                context_parts.append(f"**Trésorerie** (au {data['date']}):")
+                context_parts.append(f"- Montant: {format_fr(data['montant'])} AR")
+                context_parts.append(f"- Comptes: {data['comptes']}")
+
+                if include_details and 'details' in data:
+                    context_parts.append(f"\n**Détails Trésorerie** ({data['nb_lignes']} comptes):")
+                    for detail in data['details'][:10]:  
+                        context_parts.append(f"  - {detail['compte']} au {detail['date']}: {detail['solde']:,.2f} AR")
+                    if data['nb_lignes'] > 10:
+                        context_parts.append(f"  ... et {data['nb_lignes'] - 10} autres lignes")
+            
+            elif q_type == 'bilan':
+                data = service.get_bilan_summary(annee=params.get('annee'), include_details=include_details)
+                context_parts.append(f"**Bilan** ({data['date']}):")
+                context_parts.append(f"- Actif total: {format_fr(data['actif'])} AR")
+                context_parts.append(f"- Passif total: {format_fr(data['passif'])} AR")
+                context_parts.append(f"- Capitaux propres (Total): {format_fr(data.get('capitaux_propres', 0.0))} AR")
+                context_parts.append(f"- Équilibre: {format_fr(data['equilibre'])} AR")
+
+                if include_details and 'details' in data:  
+                    context_parts.append(f"\n**Détails Bilan** ({data['nb_lignes']} comptes):")
+                    context_parts.append(f"Actif:")
+                    for d in data['details']['actif'][:5]:
+                        context_parts.append(f"  - {d['compte']} - {d['libelle']}: {format_fr(d['montant'])} AR")
+                    context_parts.append(f"Passif:")
+                    for d in data['details']['passif'][:5]:
+                        context_parts.append(f"  - {d['compte']} - {d['libelle']}: {format_fr(d['montant'])} AR")
+
+            elif q_type in ('analyse_globale', 'etats_financiers'):
+                data = service.get_dashboard_kpis(**params)
+                if "error" in data:
+                    context_parts.append(f"Erreur intent {q_type}: {data['error']}")
+                else:
+                    periode = data.get('periode', 'Période sélectionnée')
+                    context_parts.append(f"=== SYNTHÈSE FINANCIÈRE ({periode}) ===")
+                    context_parts.append(f"- Chiffre d'Affaires: {format_fr(data.get('ca', 0))} Ar")
+                    context_parts.append(f"- Résultat Net: {format_fr(data.get('resultat_net', 0))} Ar")
+                    context_parts.append(f"- Capitaux Propres: {format_fr(data.get('capitaux_propres', 0))} Ar")
+                    context_parts.append(f"- Trésorerie: {format_fr(data.get('tresorerie', 0))} Ar")
+            
+            elif q_type == 'comparaison':
+                if 'annee1' in params and 'annee2' in params:
+                    data = service.compare_periodes(params['annee1'], params['annee2'])
+                    context_parts.append(f"**Comparaison {params['annee1']} vs {params['annee2']}:**")
+                    context_parts.append(f"- Évolution CA: {data['evolution']['ca_pct']:.2f}%")
+                    context_parts.append(f"- Évolution Résultat: {data['evolution']['resultat_pct']:.2f}%")
         
-        elif query_type == 'resultat':
-            data = service.get_resultat_net(**params, include_details=include_details)
-            context_parts.append(f"**Résultat net** ({data['periode']}):")
-            context_parts.append(f"- Résultat: {data['montant']:,.2f} AR")
-            context_parts.append(f"- Produits: {data['produits']:,.2f} AR")
-            context_parts.append(f"- Charges: {data['charges']:,.2f} AR")
-
-            if 'details' in data:  
-                context_parts.append(f"\n**Détails Résultat** ({data['nb_lignes']} lignes):")
-                context_parts.append(f"Produits:")
-                for detail in data['details']['produits'][:5]:
-                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
-                context_parts.append(f"Charges:")
-                for detail in data['details']['charges'][:5]:
-                    context_parts.append(f"  - {detail['date']} | {detail['compte']} - {detail['libelle']}: {detail['montant']:,.2f} AR")
-        
-        
-        elif query_type == 'tresorerie':
-            data = service.get_tresorerie(annee=params.get('annee'), include_details=include_details)  
-            context_parts.append(f"**Trésorerie** (au {data['date']}):")
-            context_parts.append(f"- Montant: {data['montant']:,.2f} AR")
-            context_parts.append(f"- Comptes: {data['comptes']}")
-
-            if 'details' in data:
-                context_parts.append(f"\n**Détails Trésorerie** ({data['nb_lignes']} comptes):")
-                for detail in data['details'][:10]:  
-                    context_parts.append(f"  - {detail['compte']} au {detail['date']}: {detail['solde']:,.2f} AR")
-                if data['nb_lignes'] > 10:
-                    context_parts.append(f"  ... et {data['nb_lignes'] - 10} autres lignes")
-        
-        
-        elif query_type == 'bilan':
-            data = service.get_bilan_summary(annee=params.get('annee'), include_details=include_details)
-            context_parts.append(f"**Bilan** ({data['date']}):")
-            context_parts.append(f"- Actif total: {data['actif']:,.2f} AR")
-            context_parts.append(f"- Passif total: {data['passif']:,.2f} AR")
-            context_parts.append(f"- Équilibre: {data['equilibre']:,.2f} AR")
-
-            if 'details' in data:  
-                context_parts.append(f"\n**Détails Bilan** ({data['nb_lignes']} comptes):")
-                context_parts.append(f"Actif:")
-                for d in data['details']['actif'][:5]:
-                    context_parts.append(f"  - {d['compte']} - {d['libelle']}: {d['montant']:,.2f} AR")
-                context_parts.append(f"Passif:")
-                for d in data['details']['passif'][:5]:
-                    context_parts.append(f"  - {d['compte']} - {d['libelle']}: {d['montant']:,.2f} AR")
-
-        elif query_type in ('analyse_globale', 'etats_financiers'):
-            data = service.get_dashboard_kpis(**params)
-            if "error" in data:
-                context_parts.append(f"Erreur: {data['error']}")
-            else:
-                periode = data.get('periode', 'Période sélectionnée')
-                context_parts.append(f"=== SYNTHÈSE FINANCIÈRE COMPLÈTE ({periode}) ===")
-                context_parts.append("")
-                context_parts.append("**Compte de Résultat :**")
-                context_parts.append(f"- Chiffre d'Affaires (CA): {data.get('ca', 0):,.2f} Ar")
-                context_parts.append(f"- Total Produits: {data.get('total_produits', 0):,.2f} Ar")
-                context_parts.append(f"- Total Charges: {data.get('total_charges', 0):,.2f} Ar")
-                context_parts.append(f"- Résultat Net: {data.get('resultat_net', 0):,.2f} Ar")
-                context_parts.append(f"- EBE: {data.get('ebe', 0):,.2f} Ar")
-                context_parts.append(f"- CAF: {data.get('caf', 0):,.2f} Ar")
-                context_parts.append(f"- Marge Brute: {data.get('marge_brute', 0):,.2f} Ar")
-                context_parts.append("")
-                context_parts.append("**Indicateurs de Liquidité & Structure :**")
-                context_parts.append(f"- Trésorerie Nette: {data.get('tresorerie', 0):,.2f} Ar")
-                context_parts.append(f"- BFR: {data.get('bfr', 0):,.2f} Ar")
-                context_parts.append(f"- Actifs Courants: {data.get('actifs_courants', 0):,.2f} Ar")
-                context_parts.append(f"- Passifs Courants: {data.get('passifs_courants', 0):,.2f} Ar")
-                context_parts.append(f"- Total Actif: {data.get('total_actif', 0):,.2f} Ar")
-                context_parts.append(f"- Capitaux Propres: {data.get('capitaux_propres', 0):,.2f} Ar")
-                context_parts.append(f"- Dettes Financières: {data.get('dettes_financieres', 0):,.2f} Ar")
-                context_parts.append(f"- Créances Clients: {data.get('creances_clients', 0):,.2f} Ar")
-                context_parts.append(f"- Dettes Fournisseurs: {data.get('dettes_fournisseurs', 0):,.2f} Ar")
-                context_parts.append("")
-                context_parts.append("**Ratios de Rentabilité :**")
-                context_parts.append(f"- ROE: {data.get('roe', 0):.2f}%")
-                context_parts.append(f"- ROA: {data.get('roa', 0):.2f}%")
-                context_parts.append(f"- Marge Nette: {data.get('marge_nette', 0):.2f}%")
-                context_parts.append(f"- Marge Opérationnelle: {data.get('marge_operationnelle', 0):.2f}%")
-                context_parts.append(f"- Current Ratio: {data.get('current_ratio', 0):.2f}")
-                context_parts.append(f"- Quick Ratio: {data.get('quick_ratio', 0):.2f}")
-                context_parts.append(f"- Gearing: {data.get('gearing', 0):.2f}%")
-                context_parts.append(f"- Leverage Brut: {data.get('leverage', 0):.2f}")
-                context_parts.append(f"- Rotation Stocks: {data.get('rotation_stock', 0):.2f}x")
-        
-        elif query_type == 'comparaison':
-            if 'annee1' in params and 'annee2' in params:
-                data = service.compare_periodes(params['annee1'], params['annee2'])
-                context_parts.append(f"**Comparaison {params['annee1']} vs {params['annee2']}:**")
-                context_parts.append(f"\n**Année {params['annee1']} ({data['annee_1']['nb_mois_enregistres']} mois):**")
-                context_parts.append(f"- CA Total: {data['annee_1']['chiffre_affaires']:,.2f} AR")
-                context_parts.append(f"- Moyenne mensuelle CA: {data['annee_1']['moyenne_mensuelle_ca']:,.2f} AR")
-                context_parts.append(f"- Charges Totales: {data['annee_1']['charges']:,.2f} AR")
-                context_parts.append(f"- Moyenne mensuelle Charges: {data['annee_1']['moyenne_mensuelle_charges']:,.2f} AR")
-                context_parts.append(f"- Résultat: {data['annee_1']['resultat']:,.2f} AR")
-                
-                context_parts.append(f"\n**Année {params['annee2']} ({data['annee_2']['nb_mois_enregistres']} mois):**")
-                context_parts.append(f"- CA Total: {data['annee_2']['chiffre_affaires']:,.2f} AR")
-                context_parts.append(f"- Moyenne mensuelle CA: {data['annee_2']['moyenne_mensuelle_ca']:,.2f} AR")
-                context_parts.append(f"- Charges Totales: {data['annee_2']['charges']:,.2f} AR")
-                context_parts.append(f"- Moyenne mensuelle Charges: {data['annee_2']['moyenne_mensuelle_charges']:,.2f} AR")
-                context_parts.append(f"- Résultat: {data['annee_2']['resultat']:,.2f} AR")
-                context_parts.append(f"\n**Évolution:**")
-                context_parts.append(f"- CA: {data['evolution']['ca']:+,.2f} AR ({data['evolution']['ca_pct']:.2f}%)")
-                context_parts.append(f"- Charges: {data['evolution']['charges']:+,.2f} AR ({data['evolution']['charges_pct']:.2f}%)")
-                context_parts.append(f"- Résultat: {data['evolution']['resultat']:+,.2f} AR ({data['evolution']['resultat_pct']:.2f}%)")
+        except Exception as e:
+            context_parts.append(f"Erreur pour l'intention '{q_type}': {str(e)}")
+            
+        context_parts.append("\n" + "-"*30 + "\n")
     
-    except Exception as e:
-        context_parts.append(f"Erreur lors de la récupération des données: {str(e)}")
-    
-    return "\n".join(context_parts)
+    return "\n".join(context_parts).strip("- \n")
 
 
 def format_details(data_key, data_dict, include_details):
@@ -436,7 +418,7 @@ def format_details(data_key, data_dict, include_details):
     Formate les informations comptables et leurs détails si demandés
     """
     text = f"**{data_key}** ({data_dict.get('periode', '')}):\n"
-    text += f"- Montant: {data_dict.get('montant', 0):,.2f} AR\n"
+    text += f"- Montant: {format_fr(data_dict.get('montant', 0))} AR\n"
     text += f"- Comptes: {data_dict.get('comptes', '')}\n"
     
     if 'details' in data_dict and data_dict['details']:
@@ -460,7 +442,7 @@ def format_details(data_key, data_dict, include_details):
                 for item in items[:10]:
                     montant = item.get('montant') or item.get('solde') or 0
                     libelle = item.get('libelle') or item.get('compte') or ''
-                    text += f"  - {item.get('date')} | {item.get('compte')} - {libelle}: {montant:,.2f} AR\n"
+                    text += f"  - {item.get('date')} | {item.get('compte')} - {libelle}: {format_fr(montant)} AR\n"
                 if len(items) > 10:
                     text += f"  ... et {len(items) - 10} autres lignes\n"
 
@@ -479,284 +461,189 @@ def generate_response(request):
         return Response({"conversations": obj_serializers.data}, status=status.HTTP_200_OK)
 
     if request.method == 'POST':
-        user = request.user
-        user_input = request.data.get('user_input')
-        message_history_id = request.data.get('message_history')
-        project_id = request.data.get('project_id')
-        filtered_data = request.data.get('filtered_data')  # NOUVEAU: Données filtrées
+        try:
+            user = request.user
+            user_input = request.data.get('user_input')
+            message_history_id = request.data.get('message_history')
+            project_id = request.data.get('project_id')
+            filtered_data = request.data.get('filtered_data')
 
-        if not user_input or not user_input.strip():
-            return Response(
-                {"error": "Le message ne peut pas être vide"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            if not user_input or not user_input.strip():
+                return Response({"error": "Le message ne peut pas être vide"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not project_id:
-            return Response(
-                {"error": "project_id est requis"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-
-        print(f"\n[DEBUG] Message reçu: {user_input}")
-        print(f"[DEBUG] Filtered Data présente: {filtered_data is not None}")
-        if filtered_data:
-            print(f"[DEBUG] Content of Filtered Data: {json.dumps(filtered_data, indent=2)}")
-
-       
-        accounting_context = ""
-        intent_detected = False
-        result = None
-        
-        # 1. ANALYSE DES INTENTS CALCULÉS PRIORITAIRES
-        if project_id:
-            router = QueryRouter(project_id=project_id)
-            detection = IntentDetector.detect(user_input)
+            if not project_id:
+                return Response({"error": "project_id est requis"}, status=status.HTTP_400_BAD_REQUEST)
             
-            if detection:
-                # --- MEMOIRE DE CONTEXTE (Dates) ---
-                # Si aucune date n'est détectée dans la question actuelle, 
-                # on cherche si une période a été définie précédemment dans cette discussion.
-                params = detection.get('params', {})
-                if not params.get('start_date') or not params.get('end_date'):
+            print(f"\n[DEBUG] Message reçu: {user_input}")
+            print(f"[DEBUG] Filtered Data présente: {filtered_data is not None}")
+            if filtered_data:
+                print(f"[DEBUG] Content of Filtered Data: {json.dumps(filtered_data, indent=2)}")
+
+            accounting_context = ""
+            intent_detected = False
+            result = None
+            
+            # --- ÉTAPE 1 : DÉTECTION SÉMANTIQUE DES INTENTIONS ET DATES ---
+            # RÈGLE ABSOLUE : Les dates dépendent uniquement de l'utilisateur (ou global).
+            detection = IntentDetector.detect(user_input)
+            params = detection.get('params', {}) if detection else {}
+            current_types = detection.get('types', []) if detection else []
+
+            # Héritage du contexte de conversation si nécessaire
+            if project_id and message_history_id:
+                # On hérite si la question est un export seul ou si des paramètres sont manquants
+                is_pure_export = 'export' in current_types and len(current_types) == 1
+                needs_inheritance = is_pure_export or not params.get('start_date') or \
+                                  ('grand_livre' in current_types and not params.get('numero_compte'))
+                
+                if needs_inheritance:
                     last_messages = ChatMessage.objects.filter(
                         message_history_id=message_history_id
-                    ).order_by('-timestamp')[:5]
+                    ).order_by('-timestamp')[:10]
                     
                     for msg in last_messages:
-                        # On cherche une détection de date dans l'input utilisateur précédent
                         prev_detection = IntentDetector.detect(msg.user_input)
                         if prev_detection and prev_detection.get('params'):
                             p = prev_detection['params']
-                            if p.get('start_date') and p.get('end_date'):
-                                # Héritage des dates si elles manquent
-                                if not params.get('start_date'): params['start_date'] = p['start_date']
-                                if not params.get('end_date'): params['end_date'] = p['end_date']
-                                if not params.get('annee') and p.get('annee'): params['annee'] = p['annee']
-                                print(f"[DEBUG] Context Inherited: {params['start_date']} to {params['end_date']}")
-                                break
+                            if not params.get('start_date'):
+                                params['start_date'] = p.get('start_date')
+                                params['end_date'] = p.get('end_date')
+                                params['annee'] = p.get('annee')
+                            if not params.get('numero_compte') and p.get('numero_compte'):
+                                params['numero_compte'] = p['numero_compte']
+                            if (not current_types or current_types == ['export']) and prev_detection.get('types'):
+                                prev_types = prev_detection['types']
+                                if 'export' in current_types:
+                                    # Garder 'export' mais ajouter les types métier précédents
+                                    current_types = list(set(current_types + prev_types))
+                                else:
+                                    current_types = prev_types
+
+            # --- ÉTAPE 2 : RÉCUPÉRATION DES DONNÉES ---
+            if project_id:
+                router = QueryRouter(project_id=project_id)
                 
-                intent_detected = True
-                result = router._use_calculated_methods(detection['types'], params)
+                # Si on a détecté des intentions financières
+                if current_types:
+                    intent_detected = True
+                    result = router._use_calculated_methods(current_types, params)
                 
+                # Si aucune intention spécifique mais input textuel → Text-to-SQL ou RAG
+                elif user_input:
+                    # On tente le routage intelligent (Text-to-SQL)
+                    result = router.route(user_input)
+                    if result and result.get("source") != "error":
+                        intent_detected = True
+
+            # --- ÉTAPE 3 : CONSTRUCTION DU CONTEXTE COMPTABLE ---
+            if intent_detected and result:
                 if result.get("source") == "calculated":
                     all_intents = result.get("intents", [result.get("intent", "inconnu")])
                     intents_str = ", ".join(all_intents)
                     accounting_context = f"=== DONNÉES CALCULÉES ({intents_str}) ===\n"
                     context_data = result.get("data", {})
                     accounting_context += json.dumps(context_data, ensure_ascii=False, indent=2)
-                    
-                    # Instruction d'analyse pour l'IA
-                    accounting_context += "\n\nINSTRUCTION ANALYSE : Priorise STRICTEMENT les chiffres du bloc 'DONNÉES CALCULÉES' ci-dessus. Si l'utilisateur demande plusieurs indicateurs (ex: EBE, BFR, CAF), utilise les données correspondantes dans le JSON. Ne mélange pas ces données avec d'autres sources."
-                    
-                    # GESTION DES EXPORTS (REKAPY Modern Export)
-                    export_keywords = ["générer", "export", "rapport", "états financiers", "excel", "pdf", "télécharger"]
-                    if any(kw in user_input.lower() for kw in export_keywords):
-                        try:
-                            report_type = "Bilan" if any(k in user_input.lower() for k in ["bilan", "états"]) else "Rapport Financier"
-                            if "compar" in user_input.lower():
-                                report_type = "Rapport Comparatif"
-                            
-                            want_pdf = "pdf" in user_input.lower()
-                            want_excel = "excel" in user_input.lower()
-                            # Si aucun n'est spécifié, on propose les deux ou on assume les deux pour un "rapport"
-                            if not want_pdf and not want_excel:
-                                want_pdf = want_excel = True
-                            
-                            backend_url = getattr(settings, "BACKEND_URL", request.build_absolute_uri('/')[:-1])
-                            export_links = []
-
-                            if want_excel:
-                                buffer_excel = ExportService.generate_excel_report(result["data"], report_type=report_type)
-                                filename_excel = f"exports/{report_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                                file_path_excel = default_storage.save(filename_excel, ContentFile(buffer_excel.getvalue()))
-                                full_url_excel = f"{backend_url}{settings.MEDIA_URL}{file_path_excel}"
-                                export_links.append(f"📊 [Télécharger le Rapport Excel]({full_url_excel})")
-
-                            if want_pdf:
-                                buffer_pdf = ExportService.generate_pdf_report(result["data"], report_type=report_type)
-                                filename_pdf = f"exports/{report_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                                file_path_pdf = default_storage.save(filename_pdf, ContentFile(buffer_pdf.getvalue()))
-                                full_url_pdf = f"{backend_url}{settings.MEDIA_URL}{file_path_pdf}"
-                                export_links.append(f"📄 [Télécharger le Rapport PDF]({full_url_pdf})")
-                            
-                            if export_links:
-                                accounting_context += "\n\n### 📥 EXPORTS DISPONIBLES (REKAPY)\n" + "\n".join(export_links)
-
-                        except Exception as e:
-                            print(f"[ERROR] Export failed: {str(e)}")
-                            accounting_context += f"\n\n(Note: L'export a échoué: {str(e)})"
-
-        # 2. FALLBACK SUR LES DONNÉES FILTRÉES (Dashboard)
-        if not intent_detected:
-            if filtered_data and is_followup_empty_question(user_input):
-                has_more = False
-                for key in ['chiffre_affaires', 'charges', 'resultat_net', 'tresorerie', 'bilan']:
-                    if key in filtered_data:
-                        details = filtered_data[key].get('details')
-                        if (isinstance(details, list) and len(details) > 10) or \
-                           (isinstance(details, dict) and any(len(v) > 10 for v in details.values())):
-                            has_more = True
-                if not has_more:
-                    ai_response = "Oui, ce sont toutes les informations disponibles pour cette période."
-                    request.data["ai_response"] = ai_response
-                    serializer = ChatMessageSerializer(data=request.data)
-                    if serializer.is_valid():
-                        try:
-                            message_history = MessageHistory.objects.get(id=message_history_id)
-                            serializer.save(user=user, message_history=message_history)
-                            return Response({"conversation": serializer.data, "sources": []}, status=status.HTTP_201_CREATED)
-                        except MessageHistory.DoesNotExist:
-                            print(f"[ERROR] MessageHistory {message_history_id} not found in fallback save")
-                            return Response({"error": f"Historique {message_history_id} introuvable"}, status=status.HTTP_404_NOT_FOUND)
-
-            elif filtered_data:
-                # Éviter le résumé trop proactif sur un simple "Bonjour"
-                is_greeting = any(g == user_input.lower().strip() for g in greetings)
+                    accounting_context += "\n\nINSTRUCTION ANALYSE : Utilise EXCLUSIVEMENT les chiffres ci-dessus."
                 
-                if is_greeting:
-                    accounting_context = "=== CONTEXTE ACTUEL ===\n"
-                    filter_info = filtered_data.get('filter', {})
-                    accounting_context += f"Période active sur le dashboard: {filter_info.get('date_start')} au {filter_info.get('date_end')}\n"
-                    accounting_context += "(Réponds simplement à la salutation sans résumer toutes les données financières sauf si demandé.)\n"
-                else:
-                    accounting_context = "=== DONNÉES COMPTABLES FILTRÉES ===\n"
-                    filter_info = filtered_data.get('filter', {})
-                    accounting_context += f"Période analysée: {filter_info.get('date_start')} au {filter_info.get('date_end')}\n\n"
-                    for key, label in [('chiffre_affaires', "Chiffre d'affaires"), ('charges', "Charges"), 
-                                       ('resultat_net', "Résultat net"), ('tresorerie', "Trésorerie"), ('bilan', "Bilan")]:
-                        if key in filtered_data:
-                            accounting_context += format_details(label, filtered_data[key], True)
-                
-                # Permettre l'export même depuis le dashboard si demandé
-                if any(kw in user_input.lower() for kw in ["générer", "export", "rapport", "états financiers", "excel", "pdf"]):
-                    accounting_context += "\n\n(Note: Pour générer un rapport professionnel complet, veuillez préciser l'année ou le format, par exemple 'États financiers 2025 en PDF'.)"
-
-            # 3. DERNIER RECOURS : TEXT-TO-SQL
-            elif project_id:
-                result = router.route(user_input)
-                if result["source"] == "text_to_sql":
+                elif result.get("source") == "text_to_sql":
                     nb = result.get("nb_resultats", 0)
                     accounting_context = f"=== DONNÉES BASE DE DONNÉES ({nb} résultats) ===\n"
                     accounting_context += f"Requête exécutée: {result['sql']}\n\n"
                     accounting_context += json.dumps(result["data"][:100], ensure_ascii=False, indent=2)
-                elif result["source"] == "error":
-                    accounting_context = f"Erreur: {result['error']}"
 
-            if result:
-                print(f"[DEBUG] Router source: {result['source']}, intent: {result.get('intent')}")
-                # Récupérer le filtre suggéré si disponible (uniquement si détecté explicitement)
-                query_info = IntentDetector.detect(user_input)
-                if query_info and query_info.get('suggested_filter'):
-                    request.data["suggested_filter"] = query_info['suggested_filter']
-        
-        # ✅ RECHERCHE VECTORIELLE (Documents)
-        query_embedding = np.array(generate_embedding(user_input))
-        results = search_similar_pages(
-            query_embedding=query_embedding,
-            project_id=project_id
-        )
-        contents = [page["content"] for page in results]
-        context_text = "\n\n".join([res for res in contents])
-        
-        # ✅ CONSTRUCTION DU CONTEXTE COMPLET
-        full_context = ""
-        current_system_prompt = SYSTEM_PROMPT
-        
-        if accounting_context:
-            full_context += "=== DONNÉES FINANCIÈRES DU TABLEAU DE BORD ===\n"
-            full_context += accounting_context
-            full_context += "\n\n"
+                # Gestion du filtre suggéré pour le frontend (synchronisation inverse)
+                if detection and detection.get('suggested_filter'):
+                    request.data["suggested_filter"] = detection['suggested_filter']
+
+            # --- ÉTAPE 4 : GESTION DES EXPORTS ---
+            if intent_detected and result and result.get("source") == "calculated":
+                export_keywords = ["générer", "export", "rapport", "états financiers", "excel", "pdf", "télécharger"]
+                if any(kw in user_input.lower() for kw in export_keywords):
+                    try:
+                        report_type = "Bilan" if any(k in user_input.lower() for k in ["bilan", "états"]) else "Rapport Financier"
+                        if "compar" in user_input.lower(): report_type = "Rapport Comparatif"
+                        
+                        want_pdf = "pdf" in user_input.lower()
+                        want_excel = "excel" in user_input.lower()
+                        if not want_pdf and not want_excel: want_pdf = want_excel = True
+                        
+                        backend_url = getattr(settings, "BACKEND_URL", request.build_absolute_uri('/')[:-1])
+                        export_links = []
+                        
+                        if want_excel:
+                            buffer_excel = ExportService.generate_excel_report(result["data"], report_type=report_type)
+                            filename_excel = f"exports/{report_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                            file_path_excel = default_storage.save(filename_excel, ContentFile(buffer_excel.getvalue()))
+                            export_links.append(f"📊 [Télécharger le Rapport Excel]({backend_url}{settings.MEDIA_URL}{file_path_excel})")
+                            
+                        if want_pdf:
+                            buffer_pdf = ExportService.generate_pdf_report(result["data"], report_type=report_type)
+                            filename_pdf = f"exports/{report_type.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                            file_path_pdf = default_storage.save(filename_pdf, ContentFile(buffer_pdf.getvalue()))
+                            export_links.append(f"📄 [Télécharger le Rapport PDF]({backend_url}{settings.MEDIA_URL}{file_path_pdf})")
+                            
+                        if export_links:
+                            accounting_context += "\n\n### 📥 EXPORTS DISPONIBLES (REKAPY)\n" + "\n".join(export_links)
+                    except Exception as e:
+                        print(f"[ERROR] Export failed: {str(e)}")
+                        accounting_context += f"\n\n(Note: L'export a échoué: {str(e)})"
             
-            # Informer explicitement l'IA qu'elle a accès à ces données
-            if filtered_data:
-                dates = filtered_data.get('filter', {})
-                current_system_prompt += f"\n\nNOTE IMPORTANTE : Tu as actuellement accès aux données réelles du tableau de bord pour la période du {dates.get('date_start')} au {dates.get('date_end')}. Analyse ces données pour répondre à l'utilisateur."
+            # ✅ RECHERCHE ET GÉNÉRATION VIA LANGCHAIN
+            date_start = None
+            date_end = None
+            if 'params' in locals() and params:
+                date_start = params.get('start_date')
+                date_end = params.get('end_date')
+                if not date_start and params.get('annee'):
+                    date_start, date_end = f"{params['annee']}-01-01", f"{params['annee']}-12-31"
+
+            langchain_history = []
+            if message_history_id:
+                messages_precedents = ChatMessage.objects.filter(message_history_id=message_history_id).order_by('timestamp')[:10]
+                for msg in messages_precedents:
+                    langchain_history.append(HumanMessage(content=msg.user_input))
+                    langchain_history.append(AIMessage(content=msg.ai_response))
+
+            rag_service = LangchainRAGService(project_id=project_id, date_start=date_start, date_end=date_end)
+            print(f"[DEBUG] RAG: Final call with dates {date_start} to {date_end}")
+            ai_response, retrieved_docs = rag_service.get_response(user_input=user_input, history_messages=langchain_history, accounting_context=accounting_context)
+
+            # ✅ ÉTAPE 5 : INJECTION FORCÉE DES LIENS D'EXPORT DANS LA RÉPONSE FINALE
+            links = locals().get('export_links', [])
+            if links:
+                if "📥 EXPORTS DISPONIBLES" not in ai_response:
+                    ai_response += "\n\n### 📥 EXPORTS DISPONIBLES (REKAPY)\n" + "\n".join(links)
+
+            # ✅ FORMATAGE ET ENREGISTREMENT
+            unique_sources = []
+            seen_paths = set()
+            for doc in retrieved_docs:
+                path = doc.metadata.get("path")
+                if path and path not in seen_paths:
+                    unique_sources.append({"title": doc.metadata.get("source"), "path": f"[{doc.metadata.get('source')}]({settings.BACKEND_URL}{path})"})
+                    seen_paths.add(path)
             
-            # Instruction sur les valeurs à 0
-            current_system_prompt += "\nSi les données sont à 0.00 AR, cela signifie qu'aucune écriture comptable n'a été trouvée pour ce compte sur la période. Interprète cela comme une absence d'activité importée plutôt que comme une erreur."
-        
-        if context_text:
-            full_context += "=== DOCUMENTS DE RÉFÉRENCE ===\n"
-            full_context += context_text
-        
-        # ✅ DÉBOGAGE DU PROMPT ENVOYÉ
-        print(f"[DEBUG] Full Context Length: {len(full_context)} chars")
-        if full_context:
-            print(f"[DEBUG] Context Preview: {full_context[:200]}...")
-
-        # ✅ APPEL À L'API OPENAI
-        historique = []
-        if message_history_id:
-            messages_precedents = ChatMessage.objects.filter(
-                message_history_id=message_history_id
-            ).order_by('timestamp')[:10] 
+            if unique_sources:
+                ai_response += "\n\n**Source(s) consultée(s) :**\n"
+                for src in unique_sources: ai_response += f"- {src['path']}\n"
             
-            for msg in messages_precedents:
-                historique.append({"role": "user", "content": msg.user_input})
-                historique.append({"role": "assistant", "content": msg.ai_response})
-
-        # 2. Construire la liste complète des messages
-        messages_to_send = [
-            {"role": "system", "content": current_system_prompt},
-        ] + historique + [
-            {"role": "user", "content": f"Contexte:\n{full_context}\n\nQuestion: {user_input}\n\nRéponds de manière claire et concise."}
-        ]
-
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages_to_send,
-            temperature=0.2
-        )
-
-        # ✅ FORMATAGE DE LA RÉPONSE
-        unique_sources = [
-            {"title": res["document_path"], "path": res["document_path"]}
-            for res in results
-        ]
-
-        ai_response = response.choices[0].message.content
-        if unique_sources:
-            ai_response += "\n\n**Source(s) consultée(s) :**\n"
-            for src in unique_sources:
-                ai_response += f"- {src['path']}\n"
-        
-        request.data["ai_response"] = ai_response
-
-        # ✅ ENREGISTREMENT DU MESSAGE
-        serializer = ChatMessageSerializer(data=request.data)
-        if serializer.is_valid():
-            try:
-                # ✅ SÉCURITÉ : Vérifier que l'historique appartient à l'utilisateur ET au projet
-                message_history = MessageHistory.objects.get(
-                    id=message_history_id, 
-                    user=user,
-                    project_id=project_id
-                )
-                
-                # ✅ AUTO-TITRAGE : Si le titre est générique, on le remplace par le début du message
-                generic_titles = ["Nouvelle discussion", "New Chat History", "", "None"]
-                if not message_history.title or message_history.title in generic_titles:
-                    clean_input = user_input.strip()
-                    if clean_input:
-                        new_title = clean_input[:40] + ("..." if len(clean_input) > 40 else "")
-                        message_history.title = new_title
-                        message_history.save()
-                
+            request.data["ai_response"] = ai_response
+            serializer = ChatMessageSerializer(data=request.data)
+            if serializer.is_valid():
+                message_history = MessageHistory.objects.get(id=message_history_id, user=user, project_id=project_id)
+                if not message_history.title or message_history.title in ["Nouvelle discussion", "New Chat History", "", "None"]:
+                    new_title = user_input.strip()[:40] + ("..." if len(user_input.strip()) > 40 else "")
+                    message_history.title = new_title
+                    message_history.save()
                 serializer.save(user=user, message_history=message_history)
-            except MessageHistory.DoesNotExist:
-                print(f"[ERROR] MessageHistory {message_history_id} not found for user {user.id} and project {project_id}")
-                return Response({"error": f"Historique {message_history_id} introuvable ou accès refusé"}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"conversation": serializer.data, "sources": unique_sources, "suggested_filter": request.data.get("suggested_filter")}, status=status.HTTP_201_CREATED)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-            return Response(
-                {
-                    "conversation": serializer.data,
-                    "sources": unique_sources,
-                    "suggested_filter": request.data.get("suggested_filter")
-                },
-                status=status.HTTP_201_CREATED
-            )
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            import traceback
+            print(f"[CRITICAL ERROR] Chatbot failure: {str(e)}")
+            print(traceback.format_exc())
+            return Response({"error": "Désolé, une erreur interne est survenue.", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # GET MESSAGE HISTORIES -----------------------------
@@ -829,36 +716,47 @@ def message_history_details(request, id):
     try:
         # ✅ SÉCURITÉ : D'abord on vérifie l'existence et l'appartenance à l'utilisateur
         history = MessageHistory.objects.get(id=id, user=user)
-        
-        # ✅ RESILIENCE : Si l'historique est "orphelin" (legacy), on lui attribue le projet actuel
-        if history.project_id is None and project_id:
-            print(f"[DEBUG] Auto-assigning project {project_id} to legacy history {id}")
-            history.project_id = project_id
-            history.save()
-        
-        # ✅ SÉCURITÉ MULTI-TENANT : Si un projet est spécifié, on vérifie que c'est le bon (sauf si c'était un orphelin qu'on vient de réparer)
-        elif project_id and str(history.project_id) != str(project_id):
-             print(f"[DEBUG] History {id} belongs to project {history.project_id}, but request specified {project_id}")
-             return Response(
-                {"error": f"Accès refusé à cet historique pour le projet actuel"}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-            
     except MessageHistory.DoesNotExist:
-        print(f"[DEBUG] History {id} NOT FOUND for user {user.id}")
+        # Fallback: try to fetch by project_id if provided (allows shared project histories)
+        if project_id:
+            try:
+                history = MessageHistory.objects.get(id=id, project_id=project_id)
+            except MessageHistory.DoesNotExist:
+                print(f"[DEBUG] History {id} NOT FOUND for project {project_id}")
+                return Response(
+                    {"error": f"Historique {id} introuvable pour le projet {project_id}"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+        else:
+            print(f"[DEBUG] History {id} NOT FOUND for user {user.id}")
+            return Response(
+                {"error": f"Historique {id} introuvable"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+    # ✅ RESILIENCE : Si l'historique est "orphelin" (legacy), on lui attribue le projet actuel
+    if history.project_id is None and project_id:
+        print(f"[DEBUG] Auto-assigning project {project_id} to legacy history {id}")
+        history.project_id = project_id
+        history.save()
+
+    # ✅ SÉCURITÉ MULTI-TENANT : Si un projet est spécifié, on vérifie que c'est le bon
+    if project_id and str(history.project_id) != str(project_id):
+        print(f"[DEBUG] History {id} belongs to project {history.project_id}, but request specified {project_id}")
         return Response(
-            {"error": f"Historique {id} introuvable"}, 
-            status=status.HTTP_404_NOT_FOUND
+            {"error": f"Accès refusé à cet historique pour le projet actuel"},
+            status=status.HTTP_403_FORBIDDEN,
         )
     
     # HISTORY DETAILS
     if request.method == "GET":
-        history = MessageHistory.objects.prefetch_related('chat_messages').get(id=id, user=request.user)
+        # Reload with prefetched chat_messages
+        history = MessageHistory.objects.prefetch_related('chat_messages').get(id=id)
         obj_serializer = MessageHistorySerializer(history)
 
         # pour déboguer
         print("=" * 50)
-        print(f"GET /api/histories/{id}/ Response:")
+        print(f"GET /api/histories/{id}/ Response (fallback-aware):")
         print(f"Data: {obj_serializer.data}")
         print("=" * 50)
 
@@ -866,7 +764,7 @@ def message_history_details(request, id):
 
     # UPDATE A HISTORY 
     elif request.method == "PUT":
-        history = get_object_or_404(MessageHistory, id=id, user=request.user)
+        # reuse the history object already validated
         obj_serializer = MessageHistorySerializer(history, data=request.data, partial=True)
         if obj_serializer.is_valid():
             obj_serializer.save()
@@ -878,7 +776,6 @@ def message_history_details(request, id):
     
     # DELETE A HISTORY
     elif request.method == "DELETE":
-        history = get_object_or_404(MessageHistory, id=id, user=request.user)
         history.delete()
         return Response({"message": "Historique supprimé avec succès"}, status=status.HTTP_204_NO_CONTENT)
     

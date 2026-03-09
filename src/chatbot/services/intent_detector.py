@@ -3,12 +3,20 @@
 import re
 from datetime import datetime, date
 
-# Mapping mois français → numéro
+# Mapping mois français → numéro (incluant abréviations)
 MOIS_FR = {
-    'janvier': 1, 'février': 2, 'fevrier': 2, 'mars': 3,
-    'avril': 4, 'mai': 5, 'juin': 6, 'juillet': 7,
-    'août': 8, 'aout': 8, 'septembre': 9, 'octobre': 10,
-    'novembre': 11, 'décembre': 12, 'decembre': 12
+    'janvier': 1, 'janv': 1, 'jan': 1,
+    'février': 2, 'fevrier': 2, 'fév': 2, 'fev': 2, 'fervier': 2,
+    'mars': 3, 'mar': 3,
+    'avril': 4, 'avr': 4,
+    'mai': 5,
+    'juin': 6,
+    'juillet': 7, 'juil': 7,
+    'août': 8, 'aout': 8,
+    'septembre': 9, 'sept': 9, 'sep': 9,
+    'octobre': 10, 'oct': 10,
+    'novembre': 11, 'nov': 11,
+    'décembre': 12, 'decembre': 12, 'déc': 12, 'dec': 12
 }
 
 class IntentDetector:
@@ -20,21 +28,26 @@ class IntentDetector:
     PATTERNS = {
         'ca': r'chiffre.*affaires?|ca\b|ventes?|revenus?',
         'charges': r'charges?|dépenses?|coûts?|frais',
-        'ebe': r'ebe\b|excédent brut d\'exploitation',
-        'roe': r'roe\b|rentabilité des capitaux propres',
-        'marge_brute': r'marge brute|marge commerciale',
-        'bfr': r'bfr\b|besoin en fonds de roulement',
-        'roa': r'roa\b|rentabilité des actifs',
-        'leverage': r'leverage\b|levier Financier|endettement',
-        'marge_nette': r'marge nette',
-        'marge_operationnelle': r'marge opérationnelle',
-        'current_ratio': r'current ratio|ratio de liquidité',
-        'rotation_stocks': r'rotation des stocks|rotation stock',
-        'resultat': r'résultat|bénéfice|profit|perte',
-        'tresorerie': r'trésorerie|liquidité|banque|caisse',
-        'bilan': r'bilan|actif|passif|capitaux propres',
+        'ebe': r'ebe\b|exc[eé]dent\s*brut',
+        'roe': r'roe\b|rentabilité.*capit',
+        'marge_brute': r'marge\s*brute|marge\s*commerciale',
+        'bfr': r'bfr\b|besoin.*fonds.*roulement',
+        'roa': r'roa\b|rentabilité.*actif',
+        'leverage': r'leverage\b|levier\s*Financier|endettement',
+        'marge_nette': r'marge\s*nette',
+        'marge_operationnelle': r'marge\s*opérationnelle',
+        'current_ratio': r'current\s*ratio|ratio\s*liquidité',
+        'rotation_stocks': r'rotation.*stock',
+        'resultat': r'r[eéè]sul|b[eéè]n[eéè]fice|profit|perte',
+        'tresorerie': r'tr[eé]sorerie|liquidité|banque|caisse',
+        'bilan': r'bilan|actif|passif|capit',
         'etats_financiers': r'[éée]tats? financiers?',
+        'tva': r'tva\b|taxe.*valeur.*ajoutée',
+        'factures': r'factures?|clients?|fournisseurs?|impay[ée]s?',
+        'anomalies': r'anomalies?|erreurs?|doublons?|déséquilibre',
+        'grand_livre': r'solde|mouvements?|compte\s\d+',
         'comparaison': r'compar|différence|évolution|versus|vs',
+        'export': r'générer|export|rapport|télécharger|excel|pdf',
         'analyse_globale': r'analyser|interpréter|audit|santé|vue|résumé|situation|dashboard|tableau|rapport|exercice|période'
     }
 
@@ -42,10 +55,11 @@ class IntentDetector:
     def _extract_month_year(text: str):
         """
         Cherche des expressions 'mois AAAA' ou 'JJ mois AAAA' dans le texte.
-        Retourne une liste de (jour, mois_num, annee) triée par ordre d'apparition.
+        Supporte les abréviations.
         """
-        # Mois avec gestion des typos communes (f[ée]vrier, fervier, etc.)
-        mois_regex = r'(janvier|f[ée]vrier|fervier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre)'
+        # Construction de la regex dynamique à partir de MOIS_FR
+        clés_triées = sorted(MOIS_FR.keys(), key=len, reverse=True)
+        mois_regex = '(' + '|'.join(clés_triées) + ')'
         
         # Pattern 1: DD mois YYYY
         pattern_full = rf'(\d{{1,2}})\s+{mois_regex}\s+(20\d{{2}})'
@@ -67,8 +81,12 @@ class IntentDetector:
         for m_str, y in matches_my:
             m_num = MOIS_FR.get(m_str.lower()) or 2 if 'ferv' in m_str.lower() else MOIS_FR.get(m_str.lower())
             if m_num:
-                # Vérifier si on n'a pas déjà cette année/mois en date complète
-                exists = any(d.year == int(y) and d.month == m_num for d in result)
+                # Vérifier si on n'a pas déjà cette année/mois en date complète ou mois-année
+                exists = any(
+                    (d.year == int(y) and d.month == m_num) if isinstance(d, date)
+                    else (d[1] == int(y) and d[0] == m_num)
+                    for d in result
+                )
                 if not exists:
                     result.append((m_num, int(y)))
         
@@ -135,12 +153,10 @@ class IntentDetector:
                 found_end_dates.append(date(y, m_num, last_day))
 
         # C. Années seules (en évitant les années faisant partie d'une date JJ/MM/AAAA ou mois AAAA)
-        # On extrait d'abord toutes les occurrences potentielles d'années
         potential_years = re.findall(r'(?<![\/\-\.\d])(20\d{2})(?![\/\-\.\d])', user_input)
         annees = []
         for y_str in potential_years:
             y_val = int(y_str)
-            # On vérifie si cette année n'est pas déjà présente dans les dates littérales trouvées
             is_redundant = False
             for d in literal_dates:
                 if isinstance(d, date) and d.year == y_val:
@@ -151,11 +167,110 @@ class IntentDetector:
             if not is_redundant:
                 annees.append(y_val)
 
+        # D. Trimestres (T1, T2, T3, T4, 1er trimestre, premier trimestre, etc.)
+        quarter_pattern = r'\b(t|trimestre|trim)\.?\s*([1-4])\b|([1-4])(?:er|ème|eme)?\s+(?:trimestre|trim)\b|(premier|deuxième|troisième|quatrième|quatrieme)\s+trimestre\b'
+        quarter_matches = re.finditer(quarter_pattern, user_input_lower)
+        
+        # Mapping pour les trimestres littéraux
+        q_map = {'premier': 1, '1': 1, 'deuxième': 2, 'deuxieme': 2, '2': 2, 'troisième': 3, 'troisieme': 3, '3': 3, 'quatrième': 4, 'quatrieme': 4, '4': 4}
+
+        temp_quarters = []
+        for match in quarter_matches:
+            groups = match.groups()
+            q_val = None
+            if groups[1]: q_val = q_map.get(groups[1]) # Cas "T1" ou "Trimestre 1"
+            elif groups[2]: q_val = q_map.get(groups[2]) # Cas "1er trimestre"
+            elif groups[3]: q_val = q_map.get(groups[3]) # Cas "premier trimestre"
+            
+            if q_val:
+                temp_quarters.append(q_val)
+        
+        if temp_quarters and potential_years:
+            for idx, q in enumerate(temp_quarters):
+                if idx < len(potential_years):
+                    y = int(potential_years[idx])
+                else:
+                    y = int(potential_years[-1])
+                
+                q_start_month = (q - 1) * 3 + 1
+                q_end_month = q * 3
+                found_start_dates.append(date(y, q_start_month, 1))
+                last_day = calendar.monthrange(y, q_end_month)[1]
+                found_end_dates.append(date(y, q_end_month, last_day))
+                if y in annees: annees.remove(y)
+        
+        # Ajouter les années restantes (Annuel)
         for y in annees:
             found_start_dates.append(date(y, 1, 1))
             found_end_dates.append(date(y, 12, 31))
 
-        if not query_types and (found_start_dates or annees):
+        # E. MOTS-CLÉS RELATIFS
+        today = date.today()
+        if re.search(r'aujourd\'hui|ce jour|maintenant|actuel', user_input_lower):
+            found_end_dates.append(today)
+            if not found_start_dates:
+                found_start_dates.append(today)
+
+        if re.search(r'ce mois-ci|ce mois\b', user_input_lower):
+            found_start_dates.append(date(today.year, today.month, 1))
+            found_end_dates.append(today)
+
+        if re.search(r'moils? dernier|le mois passé', user_input_lower):
+            prev_month = today.month - 1 or 12
+            prev_year = today.year if today.month > 1 else today.year - 1
+            found_start_dates.append(date(prev_year, prev_month, 1))
+            last_day = calendar.monthrange(prev_year, prev_month)[1]
+            found_end_dates.append(date(prev_year, prev_month, last_day))
+
+        # "L'année dernière"
+        if re.search(r'ann[ée]e\s+derni[èe]re|ann[ée]e\s+pr[ée]c[ée]dente', user_input_lower):
+            prev_year = today.year - 1
+            found_start_dates.append(date(prev_year, 1, 1))
+            found_end_dates.append(date(prev_year, 12, 31))
+
+        # "6 derniers mois"
+        if re.search(r'6\s+derniers?\s+mois', user_input_lower):
+            # Reculer de 6 mois à partir d'aujourd'hui
+            start_month = today.month - 6
+            start_year = today.year
+            while start_month <= 0:
+                start_month += 12
+                start_year -= 1
+            found_start_dates.append(date(start_year, start_month, 1))
+            found_end_dates.append(today)
+        else:
+            # Autre nombre de mois
+            match_last_months = re.search(r'(\d+)\s+derniers?\s+mois', user_input_lower)
+            if match_last_months:
+                nb_months = int(match_last_months.group(1))
+                start_month = today.month - nb_months
+                start_year = today.year
+                while start_month <= 0:
+                    start_month += 12
+                    start_year -= 1
+                found_start_dates.append(date(start_year, start_month, 1))
+                found_end_dates.append(today)
+
+        # F. Détection de mots-clés de PLAGE (Start/End)
+        is_range_query = bool(re.search(r'\b(entre|de|du|depuis|à partir de|de la période)\b', user_input_lower))
+        is_depuis = bool(re.search(r'\b(depuis|à partir de)\b', user_input_lower))
+        
+        # G. Détection automatique de comparaison
+        has_explicit_comparison = bool(re.search(r'\b(comparer|comparaison|versus|vs|par rapport à)\b', user_input_lower))
+        
+        # Cas de comparaison complexe (T1 2025 vs T1 2026)
+        # Si on a EXACTEMENT deux start_dates et deux end_dates et qu'on demande une comparaison
+        if len(found_start_dates) == 2 and has_explicit_comparison:
+            query_types.append('comparaison')
+            if not query_type: query_type = 'comparaison'
+        elif len(set(potential_years)) >= 2 and not is_range_query:
+            query_types.append('comparaison')
+            if not query_type: query_type = 'comparaison'
+        elif has_explicit_comparison and 'comparaison' not in query_types:
+            query_types.append('comparaison')
+            if not query_type: query_type = 'comparaison'
+
+        if not query_types and (found_start_dates or potential_years):
             query_types = ['analyse_globale']
             query_type = 'analyse_globale'
 
@@ -165,15 +280,37 @@ class IntentDetector:
         # 4. Synthèse des paramètres
         params = {}
         
+        # Extraction des numéros de compte
+        comptes_detectes = re.findall(r'\b(\d{3,6})\b', user_input)
+        if comptes_detectes:
+            filtered_comptes = [c for c in comptes_detectes if not (c.startswith('20') and len(c) == 4)]
+            if filtered_comptes:
+                params['numero_compte'] = filtered_comptes[0]
+                if 'grand_livre' not in query_types:
+                    query_types.append('grand_livre')
+
         if found_start_dates and found_end_dates:
-            # Cas particulier comparaison : on garde les deux premières années si comparaison
-            if query_type == 'comparaison' and len(annees) >= 2:
-                params['annee1'] = annees[0]
-                params['annee2'] = annees[1]
+            if query_type == 'comparaison' and len(found_start_dates) >= 2:
+                # Si comparaison d'années entières
+                if all(d.month == 1 and d.day == 1 for d in found_start_dates) and \
+                   all(d.month == 12 and d.day == 31 for d in found_end_dates):
+                    params['annee1'] = sorted(list(set(d.year for d in found_start_dates)))[0]
+                    params['annee2'] = sorted(list(set(d.year for d in found_start_dates)))[1]
+                else:
+                    # Comparaison de périodes (T1 vs T1 par exemple)
+                    # On passera les dates brutes au router pour qu'il gère
+                    params['start_date1'] = found_start_dates[0]
+                    params['end_date1'] = found_end_dates[0]
+                    params['start_date2'] = found_start_dates[1]
+                    params['end_date2'] = found_end_dates[1]
             else:
-                # Sinon on prend l'enveloppe globale de toutes les dates mentionnées
+                # Sinon on prend l'enveloppe globale
                 params['start_date'] = min(found_start_dates)
                 params['end_date'] = max(found_end_dates)
+                
+                # Règle "depuis [date]" -> jusqu'à aujourd'hui
+                if is_depuis and not re.search(r'jusqu\'à|au|à|fin|jusquau', user_input_lower):
+                    params['end_date'] = today
                 
                 # Si l'enveloppe couvre exactement une année civile, on met aussi le flag 'annee'
                 if params['start_date'].day == 1 and params['start_date'].month == 1 and \

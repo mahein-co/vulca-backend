@@ -108,6 +108,12 @@ class Document(models.Model):
     title = models.CharField(max_length=255)
     file_path = models.FileField(upload_to='documents/')
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    
+    # MÉTA-DONNÉES POUR LE FILTRAGE SQL
+    date_start = models.DateField(null=True, blank=True, verbose_name="Début de période")
+    date_end = models.DateField(null=True, blank=True, verbose_name="Fin de période")
+    document_type = models.CharField(max_length=50, null=True, blank=True, verbose_name="Type de document")
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, 
         on_delete=models.CASCADE,
@@ -156,3 +162,40 @@ class DocumentPage(models.Model):
     def __str__(self):
         return f"{self.document.title} - Page {self.page_number}"
 
+class AccountingIndex(models.Model):
+    project = models.ForeignKey(
+        'compta.Project',
+        on_delete=models.CASCADE,
+        related_name='accounting_indices'
+    )
+    # Identifiant de la source (ex: Journal, FileSource, Bilan)
+    source_model = models.CharField(max_length=50, verbose_name="Modèle source")
+    source_id = models.IntegerField(verbose_name="ID source")
+    
+    # Contenu textuel généré pour l'indexation
+    content = models.TextField(verbose_name="Contenu textuel indexé")
+    
+    # Vecteur d'embedding
+    embedding = VectorField(dimensions=1536, null=True, blank=True)
+    
+    # Métadonnées pour le filtrage
+    date = models.DateField(null=True, blank=True, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'accounting_index'
+        verbose_name = "Index Comptable"
+        indexes = [
+            HnswIndex(
+                name="accounting_index_vectors_idx",
+                fields=["embedding"],
+                m=16,
+                ef_construction=64,
+                opclasses=["vector_cosine_ops"],
+            )
+        ]
+
+    def __str__(self):
+        return f"Index {self.source_model} #{self.source_id} - {self.project.name}"

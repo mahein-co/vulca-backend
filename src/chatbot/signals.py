@@ -7,8 +7,11 @@ from django.conf import settings
 from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
 
-from chatbot.models import ChatMessage, Document
-from chatbot.services.embeddings import  process_pdf, extract_text_from_pdf
+from chatbot.models import ChatMessage, Document, AccountingIndex
+from chatbot.services.embeddings import process_pdf, extract_text_from_pdf
+from chatbot.services.indexing_service import AccountingIndexer
+from compta.models import Journal, Bilan, CompteResultat
+from ocr.models import FileSource, FormSource
 
 from openai import OpenAI
 
@@ -76,3 +79,57 @@ def delete_old_file_on_change(sender, instance, **kwargs):
     if old_file and old_file != new_file:
         if os.path.isfile(old_file.path):
             os.remove(old_file.path)
+
+# AUTOMATION DE L'INDEXATION COMPTABLE ---------------------------
+
+@receiver(post_save, sender=Journal)
+def index_journal_after_save(sender, instance, **kwargs):
+    AccountingIndexer.index_journal_entry(instance)
+
+@receiver(post_save, sender=Bilan)
+def index_bilan_after_save(sender, instance, **kwargs):
+    AccountingIndexer.index_bilan_entry(instance)
+
+@receiver(post_save, sender=CompteResultat)
+def index_resultat_after_save(sender, instance, **kwargs):
+    AccountingIndexer.index_resultat_entry(instance)
+
+@receiver(post_save, sender=FileSource)
+def index_file_source_after_save(sender, instance, **kwargs):
+    AccountingIndexer.index_file_source(instance)
+
+@receiver(post_save, sender=FormSource)
+def index_form_source_after_save(sender, instance, **kwargs):
+    AccountingIndexer.index_form_source(instance)
+
+# SUPPRESSION AUTOMATIQUE DES INDEX ------------------------------
+
+def _delete_accounting_index(model_name, instance_id):
+    """Helper pour supprimer un index vectoriel orphelin"""
+    try:
+        AccountingIndex.objects.filter(
+            source_model=model_name,
+            source_id=instance_id
+        ).delete()
+    except Exception as e:
+        print(f"[Error] Deleting index for {model_name} #{instance_id}: {str(e)}")
+
+@receiver(post_delete, sender=Journal)
+def delete_journal_index(sender, instance, **kwargs):
+    _delete_accounting_index("Journal", instance.id)
+
+@receiver(post_delete, sender=Bilan)
+def delete_bilan_index(sender, instance, **kwargs):
+    _delete_accounting_index("Bilan", instance.id)
+
+@receiver(post_delete, sender=CompteResultat)
+def delete_resultat_index(sender, instance, **kwargs):
+    _delete_accounting_index("CompteResultat", instance.id)
+
+@receiver(post_delete, sender=FileSource)
+def delete_file_source_index(sender, instance, **kwargs):
+    _delete_accounting_index("FileSource", instance.id)
+
+@receiver(post_delete, sender=FormSource)
+def delete_form_source_index(sender, instance, **kwargs):
+    _delete_accounting_index("FormSource", instance.id)

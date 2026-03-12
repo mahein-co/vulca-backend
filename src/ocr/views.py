@@ -408,20 +408,32 @@ def extract_content_file_view(request):
         print(f"[ERROR] Type de fichier non supporté : {file.name}")
         return Response({"error": "Type de fichier non supporté."}, status=400)
 
+    # Mots-clés indiquant un refus/réponse bavarde de l'API Vision (pas un vrai texte OCR)
+    REFUSAL_KEYWORDS = [
+        "je suis désolé", "je ne peux pas", "i'm sorry", "i cannot",
+        "i'm unable", "i'm here to help", "je ne suis pas", "please provide", "veuillez fournir"
+    ]
+
+    def is_ocr_refusal(text: str) -> bool:
+        """Détecte si l'IA Vision a refusé de lire l'image."""
+        text_lower = (text or "").lower().strip()
+        return any(kw in text_lower for kw in REFUSAL_KEYWORDS)
+
     # OCR avec OpenAI Vision API
     try:
         content = extract_content_with_vision(file, file_type, client, settings.OPENAI_MODEL)
-        
-        # Si l'OCR retourne vide ou [VIDE], essayer en mode haute définition
-        if not content or content.strip() == "[VIDE]" or len(content.strip()) < 10:
-            print(f"[WARNING] OCR vide ou insuffisant pour {file.name}, nouvelle tentative...")
+
+        # Détecter les réponses vides ou de refus, et réessayer
+        if not content or content.strip() == "[VIDE]" or len(content.strip()) < 10 or is_ocr_refusal(content):
+            reason = "refus IA" if is_ocr_refusal(content) else "vide/insuffisant"
+            print(f"[WARNING] OCR {reason} pour {file.name}, nouvelle tentative... ('{(content or '')[:80]}'...)")
             file.seek(0)
             content = extract_content_with_vision(file, file_type, client, settings.OPENAI_MODEL)
-        
-        if not content or content.strip() == "[VIDE]" or len(content.strip()) < 10:
-            print(f"[ERROR] OCR échoué même après reta pour {file.name}")
-            # On génère quand même un contenu minimal pour permettre l'extraction héuristique
-            content = f"Document: {file.name}"
+
+        if not content or content.strip() == "[VIDE]" or len(content.strip()) < 10 or is_ocr_refusal(content):
+            print(f"[ERROR] OCR échoué même après retry pour {file.name}")
+            print(f"[DEBUG] Contenu OCR invalide : {(content or 'VIDE')[:150]}")
+            return Response({"error": f"Impossible d'extraire le texte du fichier '{file.name}'. Assurez-vous que l'image est lisible."}, status=400)
     except Exception as e:
         print(f"[ERROR] Exception OCR pour {file.name} : {str(e)}")
         return Response({"error": f"Erreur OCR : {str(e)}"}, status=500)
@@ -447,11 +459,20 @@ def extract_content_file_view(request):
         print(f"[ERROR] Echec analyse unifiee pour {file.name} : {str(e)}")
         return Response({"error": f"Erreur analyse : {str(e)}"}, status=500)
 
-    # Vérification reconnaissance (permissive - on accepte si le JSON est valide)
-    is_professional = extracted_json.get("is_professional", True)  # Par défaut, on accepte
-    if is_professional is False:
+    # Vérification reconnaissance (très permissive - on n'accepte de rejeter que si is_professional est EXACTEMENT False)
+    is_professional = extracted_json.get("is_professional", True)
+    if is_professional is False:  # strict boolean False only
         print(f"[WARNING] Document marque non-pro par IA : {file.name}")
-        return Response({"error": "Document non reconnu comme pièce comptable."}, status=400)
+        # On accepte quand même si le JSON contient des données financières
+        has_financial_data = any([
+            extracted_json.get("montant_ttc"),
+            extracted_json.get("montant_ht"),
+            extracted_json.get("numero_facture"),
+        ])
+        if has_financial_data:
+            print(f"[INFO] Document accepté malgré flag non-pro car données financières présentes : {file.name}")
+        else:
+            return Response({"error": "Document non reconnu comme pièce comptable."}, status=400)
 
     type_document = extracted_json.get("document_type", "OD")
 

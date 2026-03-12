@@ -13,7 +13,7 @@ RÈGLES CRITIQUES :
 
 STRUCTURE DU JSON ATTENDUE :
 {
-  "is_professional": boolean, // true si c'est un document d'entreprise (facture, devis, reçu, etc.)
+  "is_professional": boolean, // true SAUF si le document est manifestement personnel (photo de vacances, dessin, etc.)
   "document_type": "ACHAT" | "VENTE" | "BANQUE" | "CAISSE" | "OD" | "PAIE",
   "numero_facture": string, // Le numéro le plus probable (Facture, Devis, Proforma)
   "date": "YYYY-MM-DD",
@@ -26,10 +26,16 @@ STRUCTURE DU JSON ATTENDUE :
   "description": string // Résumé clair du contenu
 }
 
+RÈGLES POUR is_professional :
+- Mettre TRUE pour : factures fournisseur/client, devis, proformas, relevé bancaire, reçus, bons d'achat, fiches de paie, JIRAMA (eau/électricité), TELMA, ORANGE, factures de services publics, notes de frais, tout document avec un montant.
+- Mettre FALSE SEULEMENT si le document est clairement non-comptable : photo personnelle, dessin, texte sans montant, document vide.
+- EN CAS DE DOUTE : mettre TRUE.
+
 CONSEILS D'EXTRACTION :
 - CHIFFRES : Ignore les espaces. Remplace la virgule par un point (ex: 650 000,00 -> 650000.00).
 - DEVIS/PROFORMA : Considère-les comme pro (is_professional: true) et classifie en "OD".
 - MANUSCRIT : Lis attentivement les montants écrits à la main (ex: KIT CAR).
+- FACTURES JIRAMA/TELMA/ORANGE/services publics : is_professional=true, document_type="ACHAT".
 """
 
 CLASSE_PROMPT_TEMPLATE = """

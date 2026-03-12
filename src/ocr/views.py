@@ -981,7 +981,19 @@ def excel_save_data_view(request):
                         
                         # Extraction et validation de la date avec gestion d'erreurs robuste
                         date_val = row.get('date')
-                        date_obj = date.today()  # Valeur par défaut
+                        
+                        # Déterminer une date par défaut intelligente
+                        default_date = date.today()
+                        if company_metadata:
+                             # Essayer d'extraire une année des métadonnées
+                             for val in company_metadata.values():
+                                 if val and isinstance(val, str):
+                                     match = re.search(r'\b(20\d{2})\b', val)
+                                     if match:
+                                         default_date = date(int(match.group(1)), 12, 31)
+                                         break
+                        
+                        date_obj = default_date  # Valeur par défaut corrigée
                         
                         if date_val and pd.notna(date_val):
                             try:
@@ -1051,7 +1063,19 @@ def excel_save_data_view(request):
                         
                         # Extraction et validation de la date avec gestion d'erreurs robuste
                         date_val = row.get('date')
-                        date_obj = date.today()  # Valeur par défaut
+                        
+                        # Déterminer une date par défaut intelligente
+                        default_date = date.today()
+                        if company_metadata:
+                             # Essayer d'extraire une année des métadonnées
+                             for val in company_metadata.values():
+                                 if val and isinstance(val, str):
+                                     match = re.search(r'\b(20\d{2})\b', val)
+                                     if match:
+                                         default_date = date(int(match.group(1)), 12, 31)
+                                         break
+
+                        date_obj = default_date  # Valeur par défaut corrigée
                         
                         if date_val and pd.notna(date_val):
                             try:

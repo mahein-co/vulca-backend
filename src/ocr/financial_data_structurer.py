@@ -756,7 +756,7 @@ class FinancialDataStructurer:
         
         # Vérifier si c'est un Journal
         if document_type == 'JOURNAL':
-            structured_data = self.structure_journal_data(df_sorted, columns_mapping)
+            structured_data = self.structure_journal_data(df_sorted, columns_mapping, company_metadata)
         else:
             structured_data = self.structure_to_json(df_sorted, columns_mapping, document_type, company_metadata)
         
@@ -774,7 +774,8 @@ class FinancialDataStructurer:
     def structure_journal_data(
         self,
         df: pd.DataFrame,
-        columns_mapping: Dict[str, str]
+        columns_mapping: Dict[str, str],
+        company_metadata: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
         Structure les données d'un Journal comptable.
@@ -864,7 +865,6 @@ class FinancialDataStructurer:
             # Fallback libellé
             libelle_raw = str(row.get(libelle_col, '')) if libelle_col else ''
             if not numero_compte or numero_compte == 'nan':
-                import re
                 match = re.match(r'^(\d{2,8})', libelle_raw.strip())
                 if match:
                     numero_compte = match.group(1)
@@ -916,7 +916,10 @@ class FinancialDataStructurer:
                         date_obj = pd.to_datetime(date_raw, errors='coerce', dayfirst=True)
                         
                     if pd.notna(date_obj):
-                        res_date = date_obj.date()
+                        if hasattr(date_obj, 'date'):
+                             res_date = date_obj.date()
+                        else:
+                             res_date = date_obj
                         last_valid_date = res_date
                     else:
                         res_date = None
@@ -924,7 +927,20 @@ class FinancialDataStructurer:
                     res_date = None
             
             if res_date is None:
-                res_date = last_valid_date if last_valid_date else date(2025, 12, 31)
+                # Si pas de date sur la ligne, on utilise la dernière date valide
+                if last_valid_date:
+                    res_date = last_valid_date
+                else:
+                    # Sinon, on cherche une année dans les métadonnées ou le nom du fichier
+                    fallback_year = datetime.now().year
+                    if company_metadata:
+                        for val in company_metadata.values():
+                            if val and isinstance(val, str):
+                                year_match = re.search(r'\b(20\d{2})\b', val)
+                                if year_match:
+                                    fallback_year = int(year_match.group(1))
+                                    break
+                    res_date = date(fallback_year, 12, 31)
 
             lignes_raw.append({
                 "numero_compte": numero_compte,

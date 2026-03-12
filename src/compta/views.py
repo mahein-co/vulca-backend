@@ -2240,6 +2240,236 @@ def evolution_roa_view(request):
     })
 
 
+# ============================================================
+# EVOLUTION BFR
+# ============================================================
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
+def evolution_bfr_view(request):
+    """
+    Évolution du BFR sur plusieurs mois
+    BFR = Stocks + Créances clients - Dettes fournisseurs
+    GET /api/evolution-bfr/?date_start=2024-01-01&date_end=2024-12-31
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum, Max
+    from decimal import Decimal
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    project_id = getattr(request, "project_id", None)
+
+    if not date_start or not date_end:
+        max_date = Bilan.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)
+        else:
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+
+    def get_bfr_for_period(start, end):
+        filters = {"project_id": project_id, "date__range": [start, end]}
+        stocks = (
+            Bilan.objects.filter(type_bilan="ACTIF", numero_compte__startswith="3", **filters)
+            .aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        )
+        creances = (
+            Bilan.objects.filter(type_bilan="ACTIF", numero_compte__startswith="41", **filters)
+            .aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        )
+        dettes_fourn = (
+            Bilan.objects.filter(type_bilan="PASSIF", numero_compte__startswith="40", **filters)
+            .aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        )
+        return stocks + creances - dettes_fourn
+
+    evolution_data = []
+    current_date = start_date_obj.replace(day=1)
+
+    while current_date <= end_date_obj:
+        if current_date.month == 12:
+            next_month = current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            next_month = current_date.replace(month=current_date.month + 1)
+        last_day = next_month - timedelta(days=1)
+
+        bfr_val = get_bfr_for_period(current_date, last_day)
+        evolution_data.append({
+            "mois": current_date.strftime("%b %Y"),
+            "bfr": float(bfr_val),
+            "date": current_date.strftime("%Y-%m-%d")
+        })
+        current_date = next_month
+
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
+
+# ============================================================
+# EVOLUTION EBE
+# ============================================================
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
+def evolution_ebe_view(request):
+    """
+    Évolution de l'EBE sur plusieurs mois
+    EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
+    GET /api/evolution-ebe/?date_start=2024-01-01&date_end=2024-12-31
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum, Max
+    from decimal import Decimal
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    project_id = getattr(request, "project_id", None)
+
+    if not date_start or not date_end:
+        max_date = CompteResultat.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)
+        else:
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+
+    def get_ebe_for_period(start, end):
+        filters = {"project_id": project_id, "date__range": [start, end]}
+        c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c71 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="71", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c72 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="72", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c74 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="74", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c60 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="60", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c61 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="61", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c62 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="62", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c63 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="63", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c64 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="64", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        return (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+
+    evolution_data = []
+    current_date = start_date_obj.replace(day=1)
+
+    while current_date <= end_date_obj:
+        if current_date.month == 12:
+            next_month = current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            next_month = current_date.replace(month=current_date.month + 1)
+        last_day = next_month - timedelta(days=1)
+
+        ebe_val = get_ebe_for_period(current_date, last_day)
+        evolution_data.append({
+            "mois": current_date.strftime("%b %Y"),
+            "ebe": float(ebe_val),
+            "date": current_date.strftime("%Y-%m-%d")
+        })
+        current_date = next_month
+
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
+
+# ============================================================
+# EVOLUTION LEVERAGE BRUT
+# ============================================================
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
+def evolution_leverage_brut_view(request):
+    """
+    Évolution du Leverage Brut sur plusieurs mois
+    Leverage Brut = Dettes Financières / EBE
+    GET /api/evolution-leverage-brut/?date_start=2024-01-01&date_end=2024-12-31
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum, Max
+    from decimal import Decimal
+
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    project_id = getattr(request, "project_id", None)
+
+    if not date_start or not date_end:
+        max_date = CompteResultat.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)
+        else:
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+
+    def get_leverage_for_period(start, end):
+        bilan_filters = {"project_id": project_id, "date__range": [start, end]}
+        cr_filters = {"project_id": project_id, "date__range": [start, end]}
+
+        # Dettes financières (Bilan PASSIF comptes 16)
+        dettes_fin = (
+            Bilan.objects.filter(type_bilan="PASSIF", numero_compte__startswith="16", **bilan_filters)
+            .aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        )
+
+        # EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
+        c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c71 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="71", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c72 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="72", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c74 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="74", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c60 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="60", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c61 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="61", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c62 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="62", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c63 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="63", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        c64 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="64", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
+        ebe = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+
+        if ebe != 0 and abs(ebe) >= 1000:
+            leverage = float(dettes_fin / ebe)
+            if leverage > 1000: leverage = 1000
+            elif leverage < -1000: leverage = -1000
+        else:
+            leverage = None
+
+        return leverage
+
+    evolution_data = []
+    current_date = start_date_obj.replace(day=1)
+
+    while current_date <= end_date_obj:
+        if current_date.month == 12:
+            next_month = current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            next_month = current_date.replace(month=current_date.month + 1)
+        last_day = next_month - timedelta(days=1)
+
+        leverage_val = get_leverage_for_period(current_date, last_day)
+        evolution_data.append({
+            "mois": current_date.strftime("%b %Y"),
+            "leverage": leverage_val,
+            "date": current_date.strftime("%Y-%m-%d")
+        })
+        current_date = next_month
+
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])

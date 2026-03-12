@@ -9,6 +9,7 @@ import time
 import pandas as pd
 from PIL import Image
 from PyPDF2 import PdfReader
+from ocr.utils import safe_openai_call
 
 
 def encode_image_to_base64(image: Image.Image) -> str:
@@ -20,6 +21,7 @@ def encode_image_to_base64(image: Image.Image) -> str:
     if image.mode != "RGB":
         image = image.convert("RGB")
     image.save(buffered, format="JPEG", quality=95)
+    print(f"[DEBUG] Image encodee en base64 (Taille buffer: {buffered.tell()} octets)")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
@@ -47,7 +49,13 @@ def process_image_with_vision(file_bytes: bytes, client, model: str) -> str:
     """
     try:
         # Charger l'image
-        image = Image.open(io.BytesIO(file_bytes))
+        try:
+            image = Image.open(io.BytesIO(file_bytes))
+            print(f"[DEBUG] Pillow a ouvert l'image : {image.format}, {image.mode}, {image.size}")
+        except Exception as img_err:
+            print(f"[ERROR] Pillow echec ouverture image : {img_err}")
+            raise img_err
+            
         print(f"[INFO] IMAGE MODE: {image.mode}, SIZE: {image.size}")
         
         # Redimensionner si nécessaire
@@ -56,8 +64,9 @@ def process_image_with_vision(file_bytes: bytes, client, model: str) -> str:
         # Encoder en base64
         base64_image = encode_image_to_base64(image)
         
-        # Appel à l'API Vision
-        response = client.chat.completions.create(
+        # Appel à l'API Vision avec retry
+        response = safe_openai_call(
+            client=client,
             model=model,
             messages=[
                 {
@@ -65,7 +74,7 @@ def process_image_with_vision(file_bytes: bytes, client, model: str) -> str:
                     "content": [
                         {
                             "type": "text",
-                            "text": "What text do you see in this image? Please provide all visible text, numbers, dates, and amounts exactly as they appear."
+                            "text": "Tu es un OCR de haute précision spécialisé dans les pièces comptables. Extrais TOUT le texte visible dans cette image, y compris le texte manuscrit, les chiffres, les dates et les montants.\n\nIMPORTANT: Réponds UNIQUEMENT par le texte extrait. Ne commence pas par 'Voici le texte...', ne pose pas de questions, n'ajoute AUCUN commentaire personnel.\n\nMême si l'image est de mauvaise qualité ou flou, fais de ton mieux pour lire tous les mots et chiffres visibles. Ne dis pas que c'est illisible — essaie toujours."
                         },
                         {
                             "type": "image_url",
@@ -144,8 +153,9 @@ def process_pdf_with_vision(file_bytes: bytes, client, model: str) -> str:
             # Encoder en base64
             base64_image = encode_image_to_base64(img)
             
-            # Appel Vision API
-            response = client.chat.completions.create(
+            # Appel Vision API avec retry
+            response = safe_openai_call(
+                client=client,
                 model=model,
                 messages=[
                     {
@@ -153,7 +163,7 @@ def process_pdf_with_vision(file_bytes: bytes, client, model: str) -> str:
                         "content": [
                             {
                                 "type": "text",
-                                "text": "What text do you see in this document page? Please provide all visible text, numbers, dates, and amounts exactly as they appear."
+                                "text": "Tu es un OCR de haute précision spécialisé dans les pièces comptables. Extrais TOUT le texte visible dans cette page du document, y compris le texte manuscrit.\n\nIMPORTANT: Réponds UNIQUEMENT par le texte extrait. Même si la page est de mauvaise qualité ou faiblement contrastée, fais de ton mieux pour lire tous les éléments visibles. Ne dis pas que c'est illisible — essaie toujours."
                             },
                             {
                                 "type": "image_url",
@@ -171,10 +181,7 @@ def process_pdf_with_vision(file_bytes: bytes, client, model: str) -> str:
             page_text = response.choices[0].message.content.strip()
             text += page_text + "\n"
             
-            # STOP intelligent (évite OCR inutile si déjà assez de texte)
-            if len(text.strip()) > 1200:
-                print("   [INFO] Arret anticipe (texte suffisant)")
-                break
+            # OCR complet du document (suppression de l'arrêt anticipé pour garantir la reconnaissance)
         
         return text
         

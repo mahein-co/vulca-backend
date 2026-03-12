@@ -1,6 +1,10 @@
 import re, pandas as pd
 from datetime import datetime
 import io
+import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # FONCTIONS UTILITAIRES CONSERVÉES
@@ -92,6 +96,43 @@ def convertir_dates_longues(data):
 
     return data
 
+def safe_openai_call(client, model, messages, temperature=0, max_tokens=None, max_retries=5):
+    """
+    Exécute un appel OpenAI avec retry progressif (exponential backoff).
+    Gère les RateLimitError et autres erreurs temporaires.
+    """
+    base_delay = 1.0  # secondes
+    
+    for i in range(max_retries):
+        try:
+            params = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+            }
+            if max_tokens:
+                params["max_tokens"] = max_tokens
+                
+            completion = client.chat.completions.create(**params)
+            return completion
+        except Exception as e:
+            error_str = str(e).lower()
+            # Si c'est une erreur de quota ou de rate limit, on attend plus longtemps
+            is_rate_limit = "rate_limit" in error_str or "quota" in error_str or "too many requests" in error_str
+            
+            if i == max_retries - 1:
+                print(f"[ERROR] OpenAI API echec final apres {max_retries} tentatives: {e}")
+                raise e
+            
+            delay = base_delay * (2 ** i)
+            if is_rate_limit:
+                delay *= 2  # Double le délai pour les rate limits
+                
+            print(f"[WARNING] OpenAI API erreur (tentative {i+1}/{max_retries}): {e}. Retrying in {delay}s...")
+            time.sleep(delay)
+    
+    return None
+
 # GENERATE DESCRIPTION FILE SOURCE =====================
 def generate_description(data, json, client, model):
 
@@ -108,7 +149,8 @@ def generate_description(data, json, client, model):
     sans lister les cles, mais en interpretant intelligemment le contenu.
     """
 
-    completion = client.chat.completions.create(
+    completion = safe_openai_call(
+        client=client,
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.5,
@@ -143,7 +185,8 @@ def generate_excel_description(data, json, client, model):
     N'inclus pas de titres de sections, rédige directement les paragraphes.
     """
 
-    completion = client.chat.completions.create(
+    completion = safe_openai_call(
+        client=client,
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.5,

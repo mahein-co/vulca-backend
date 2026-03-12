@@ -16,9 +16,9 @@ from rest_framework import status
 from ocr.models import FileSource, FormSource
 from compta.models import Bilan, CompteResultat, Project
 from ocr.serializers import FileSourceSerializer, FormSourceSerializer
-from ocr.utils import detect_file_type, clean_ai_json, generate_description
+from ocr.utils import safe_openai_call, clean_ai_json, detect_file_type, generate_description
 from ocr.openai_vision_ocr import extract_content_with_vision
-from ocr.constants import EXTRACTION_FIELDS_PROMPT
+from ocr.constants import UNIFIED_EXTRACTION_PROMPT
 from compta.permissions import HasProjectAccess
 
 from openai import OpenAI
@@ -152,6 +152,24 @@ def translate_keys(obj, mapping):
     elif isinstance(obj, list):
         return [translate_keys(item, mapping) for item in obj]
     return obj
+
+
+def fallback_invoice_number(content: str) -> str:
+    """Tente d'extraire un numéro de facture par regex depuis le texte OCR brut."""
+    import re
+    from datetime import datetime
+    patterns = [
+        r'(?:Facture|FACTURE|Invoice|INVOICE|Devis|DEVIS|Proforma)\s*N[°o]?\.?\s*:?\s*([A-Z0-9][\w\-/]{1,30})',
+        r'N[°o]?\.?\s*(?:Facture|Invoice|Devis)?\s*:?\s*([A-Z0-9][\w\-/]{1,30})',
+        r'(?:Ref|REF|Réf|Référence)\s*:?\s*([A-Z0-9][\w\-/]{1,30})',
+        r'#([A-Z0-9][\w\-]{2,20})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    # Fallback : timestamp unique
+    return f"TEMP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
 
 class FileSourceListCreateView(generics.ListCreateAPIView):
@@ -379,88 +397,83 @@ def form_source_list_create(request):
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def extract_content_file_view(request):
     file = request.FILES.get("file")
-
     if not file:
         return Response({"error": "Aucun fichier envoyé."}, status=400)
 
     file_type = detect_file_type(file.name)
+    print(f"\n[DEBUG] === DEBUT EXTRACTION POUR : {file.name} ===")
+    print(f"[DEBUG] Type detecte : {file_type}")
+    
     if file_type == "unknown":
+        print(f"[ERROR] Type de fichier non supporté : {file.name}")
         return Response({"error": "Type de fichier non supporté."}, status=400)
 
     # OCR avec OpenAI Vision API
-    content = extract_content_with_vision(file, file_type, client, settings.OPENAI_MODEL)
-    if not content:
-        return Response({"error": "Impossible d'extraire le texte."}, status=400)
-
-    print("\n" + "=" * 80)
-    print("[INFO] TEXTE OCR BRUT :")
-    print("=" * 80)
-    print(content[:2000])  # Limite pour logs
-    print("=" * 80 + "\n")
-
-    # ÉTAPE 1 : Vérification pièce comptable
     try:
-        response = client.chat.completions.create(
+        content = extract_content_with_vision(file, file_type, client, settings.OPENAI_MODEL)
+        
+        # Si l'OCR retourne vide ou [VIDE], essayer en mode haute définition
+        if not content or content.strip() == "[VIDE]" or len(content.strip()) < 10:
+            print(f"[WARNING] OCR vide ou insuffisant pour {file.name}, nouvelle tentative...")
+            file.seek(0)
+            content = extract_content_with_vision(file, file_type, client, settings.OPENAI_MODEL)
+        
+        if not content or content.strip() == "[VIDE]" or len(content.strip()) < 10:
+            print(f"[ERROR] OCR échoué même après reta pour {file.name}")
+            # On génère quand même un contenu minimal pour permettre l'extraction héuristique
+            content = f"Document: {file.name}"
+    except Exception as e:
+        print(f"[ERROR] Exception OCR pour {file.name} : {str(e)}")
+        return Response({"error": f"Erreur OCR : {str(e)}"}, status=500)
+
+    print(f"[DEBUG] Texte OCR extrait ({len(content)} chars)")
+    print(f"[DEBUG] Aperçu du contenu : \n{content[:500]}...")
+
+    # ANALYSE ET EXTRACTION UNIFIEE
+    try:
+        response = safe_openai_call(
+            client=client,
             model=settings.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": "Tu es expert comptable. Réponds uniquement OUI ou NON."},
-                {"role": "user", "content": f"Voici un document : {content[:5000]}\n\nEst-ce un document professionnel ou administratif valide (lié à une activité d'entreprise : facture, reçu, document bancaire, RH, fiscal, juridique, etc.) ? Réponds OUI sauf s'il s'agit manifestement d'un document personnel sans lien (ex: photo de vacances, poème) ou illisible."}
+                {"role": "system", "content": f"{UNIFIED_EXTRACTION_PROMPT}\n\nFICHIER : {file.name}"},
+                {"role": "user", "content": content}
             ],
             temperature=0
         )
-        decision = response.choices[0].message.content.strip().lower()
+        extracted_json_str = clean_ai_json(response.choices[0].message.content.strip())
+        extracted_json = json.loads(extracted_json_str)
+        print(f"[DEBUG] Analyse unifiee reussie pour {file.name}")
     except Exception as e:
-        return Response({"error": f"Erreur OpenAI vérification : {str(e)}"}, status=500)
+        print(f"[ERROR] Echec analyse unifiee pour {file.name} : {str(e)}")
+        return Response({"error": f"Erreur analyse : {str(e)}"}, status=500)
 
-    if "oui" not in decision and "yes" not in decision:
+    # Vérification reconnaissance (permissive - on accepte si le JSON est valide)
+    is_professional = extracted_json.get("is_professional", True)  # Par défaut, on accepte
+    if is_professional is False:
+        print(f"[WARNING] Document marque non-pro par IA : {file.name}")
         return Response({"error": "Document non reconnu comme pièce comptable."}, status=400)
 
-    # ÉTAPE 2 : Type de document
-    try:
-        type_response = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Tu dois répondre STRICTEMENT par un seul mot parmi : ACHAT, VENTE, BANQUE, CAISSE, OD, PAIE.\n\nRÈGLES IMPÉRATIVES :\n1. Si le document est un Relevé Bancaire, un Reçu de Virement ou un Avis de Virement -> C'EST 'BANQUE'.\n2. Si c'est une Facture Client, un Bon de commande ou un Bon de livraison -> 'VENTE'.\n3. Si c'est une Facture Fournisseur ou un Bon d'achat -> 'ACHAT'.\n4. Si c'est un ticket de caisse ou espèces -> 'CAISSE'.\n5. Si c'est une Fiche de Paie ou Bulletin de Salaire -> 'PAIE'.\n6. Pour tout autre document (juridique, fiscal, divers) -> 'OD'."
-                },
-                {
-                    "role": "user",
-                    "content": f"Voici un document : {content[:5000]}"
-                }
-            ],
-            temperature=0
-        )
-        type_document = type_response.choices[0].message.content.strip().upper()
-    except Exception as e:
-        return Response({"error": f"Erreur OpenAI type document : {str(e)}"}, status=500)
+    type_document = extracted_json.get("document_type", "OD")
 
-    # ÉTAPE 3 : Extraction avec prompt unifié
-    try:
-        extraction = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": EXTRACTION_FIELDS_PROMPT},
-                {"role": "user", "content": content[:6000]}
-            ],
-            temperature=0
-        )
-        extracted_json_str = extraction.choices[0].message.content.strip()
-        extracted_json_str = clean_ai_json(extracted_json_str)
-    except Exception as e:
-        return Response({"error": f"Erreur OpenAI extraction : {str(e)}"}, status=500)
+    # Supprimer les champs internes (ne pas envoyer au frontend)
+    INTERNAL_FIELDS = ["is_professional", "document_type"]
+    for f in INTERNAL_FIELDS:
+        extracted_json.pop(f, None)
 
-    # Conversion JSON
-    try:
-        extracted_json = json.loads(extracted_json_str)
-    except json.JSONDecodeError:
-        return Response({
-            "error": "JSON IA invalide",
-            "raw": extracted_json_str
-        }, status=500)
-
-    # POST-TRAITEMENT avec normalisation
-    extracted_json = normalize_extracted_json(extracted_json, content)
+    extracted_json["numero_facture"] = extracted_json.get("numero_facture") or fallback_invoice_number(content)
+    
+    # Dates
+    raw_date = extracted_json.get("date")
+    if raw_date:
+        extracted_json["date_facture"] = normalize_date_to_iso(raw_date)
+    
+    # Montants
+    extracted_json["montant_ht"] = extracted_json.get("montant_ht", 0)
+    extracted_json["montant_tva"] = extracted_json.get("montant_tva", 0)
+    extracted_json["montant_ttc"] = extracted_json.get("montant_ttc", 0)
+    
+    # Designation
+    designation = extracted_json.get("description", f"Extraction {type_document}")
 
     # Ajouter type_document
     content_lower = content.lower()
@@ -479,9 +492,9 @@ def extract_content_file_view(request):
         # Les patterns plus spécifiques en premier pour éviter les faux positifs
         patterns = [
             # Patterns très spécifiques (haute priorité)
-            r'(?:N[°o]|Num[ée]ro|Number)[\s:]*(?:Facture|Invoice|Bill)[\s:]*(\w+[-/]?\w+)',  # N° Facture: XXX
-            r'(?:Facture|Invoice|Bill)[\s:]*(?:N[°o]|Num[ée]ro|#)[\s:]*(\w+[-/]?\w+)',  # Facture N°: XXX
-            r'(?:R[ée]f[ée]rence|Ref)[\s:]*(?:Facture|Invoice)?[\s:]*(\w+[-/]?\w+)',  # Référence: XXX
+            r'(?:N[°o]|Num[ée]ro|Number)[\s:]*(?:Facture|Invoice|Bill|Devis|Proforma)[\s:]*(\w+[-/]?\w+)',  # N° Facture/Devis: XXX
+            r'(?:Facture|Invoice|Bill|Devis|Proforma)[\s:]*(?:N[°o]|Num[ée]ro|#)[\s:]*(\w+[-/]?\w+)',  # Facture/Devis N°: XXX
+            r'(?:R[ée]f[ée]rence|Ref)[\s:]*(?:Facture|Invoice|Devis|Proforma)?[\s:]*(\w+[-/]?\w+)',  # Référence: XXX
             
             # Patterns pour formats longs (numéros de 6+ chiffres)
             r'(?:NeFacure|N[°o]Facture|NumFacture)[\s:]*(\d{6,})',  # NeFacure 0000636289

@@ -9,6 +9,7 @@ from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.documents import Document as LangchainDocument
 from pgvector.django import CosineDistance
 from chatbot.models import DocumentPage, AccountingIndex
+from chatbot.prompts import SYSTEM_PROMPT
 import numpy as np
 
 class DjangoVectorStore:
@@ -108,17 +109,17 @@ class DjangoVectorStore:
 
 class LangchainRAGService:
     def __init__(self, project_id, date_start=None, date_end=None):
-        self.llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), temperature=0.2)
+        self.llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), temperature=0.3)
         self.vectorstore = DjangoVectorStore(project_id, date_start, date_end)
         self.retriever = self.vectorstore.as_retriever()
 
     def get_response(self, user_input, history_messages, accounting_context=""):
         # 1. Reformulation de la question (History Aware)
         contextualize_q_system_prompt = (
-            "Étant donné un historique de discussion et la dernière question de l'utilisateur "
-            "qui pourrait faire référence au contexte de l'historique, reformule la question "
-            "pour qu'elle soit compréhensible de manière autonome sans l'historique. "
-            "Ne réponds PAS à la question, reformule-la uniquement ou renvoie-la telle quelle."
+            "Étant donné un historique de discussion et la dernière question de l'utilisateur, "
+            "reformule la question pour qu'elle soit compréhensible de manière autonome, "
+            "en résolvant les références contextuelles (ex: 'ce chiffre', 'la même période', 'ce compte', etc.). "
+            "Ne réponds PAS à la question, reformule-la uniquement ou renvoie-la telle quelle si elle est déjà claire."
         )
         contextualize_q_prompt = ChatPromptTemplate.from_messages([
             ("system", contextualize_q_system_prompt),
@@ -129,34 +130,16 @@ class LangchainRAGService:
         # Chaîne de contextualisation
         contextualize_chain = contextualize_q_prompt | self.llm | StrOutputParser()
 
-        # 2. Prompt pour la réponse finale
-        system_prompt = (
-            "Tu es un assistant comptable expert reconnu pour son professionnalisme et sa courtoisie. "
-            "Ton ton doit être formel, respectueux et structuré.\n\n"
-            
-            "RÈGLES CRUCIALES :\n"
-            "1. ISOLEMENT DU PROJET : Tu ne dois répondre qu'en utilisant les données fournies dans le contexte ci-dessous. "
-            "Ces données sont strictement liées au projet actuel de l'utilisateur.\n"
-            "2. STRUCTURE : Tes réponses doivent être parfaitement structurées (utilises des listes, des titres ou des tableaux si nécessaire). "
-            "Ne renvoie JAMAIS de texte brut non mis en forme ou de données brutes sans analyse.\n"
-            "3. DONNÉES MANQUANTES : Si les données nécessaires ne sont pas présentes dans le contexte, réponds avec respect : "
-            "'Je regrette, mais les données relatives à [votre demande] ne semblent pas être disponibles dans le dossier actuel pour cette période.' "
-            "Suggère ensuite poliment à l'utilisateur de vérifier ses imports.\n"
-            "4. RESPECT : Utilise le vouvoiement et reste toujours poli, même face à des questions simples ou des erreurs.\n"
-            "5. GESTION DES EXPORTS : \n"
-            "   - Si des liens de téléchargement sont fournis dans le bloc 'DONNÉES COMPTABLES CALCULÉES' (sous '📥 EXPORTS DISPONIBLES'), tu DOIS les présenter clairement à l'utilisateur à la fin de ta réponse.\n"
-            "   - Si l'utilisateur demande un export mais que les liens ne sont pas encore là (ou si ce n'est pas le cas pour cette demande), propose-lui poliment de le générer s'il le souhaite (PDF ou Excel).\n"
-            "   - Ne dis JAMAIS que tu ne peux pas générer de documents si les liens sont présents dans le contexte.\n"
-            "6. ANALYSE PROFONDE : Pour toute demande d'analyse (globale ou entre deux dates), ne te contente pas de citer les chiffres. "
-            "Interprète-les : explique l'évolution, identifie les points de vigilance (charges trop élevées, CA en baisse), "
-            "et fournis une véritable expertise comptable basée sur les chiffres fournis.\n\n"
-            
-            "CONTEXTE DES DOCUMENTS :\n"
+        # 2. Prompt final basé sur le SYSTEM_PROMPT unifié depuis prompts.py
+        system_prompt_text = SYSTEM_PROMPT
+
+        system_prompt_text += (
+            "\n\nCONTEXTE DES DOCUMENTS :\n"
             "{context}\n\n"
         )
         
         if accounting_context:
-            system_prompt += (
+            system_prompt_text += (
                 "DONNÉES COMPTABLES CALCULÉES (SOURCE DE VÉRITÉ ABSOLUE) :\n"
                 "{accounting_context}\n\n"
                 "IMPORTANT : En cas de comparaison entre années ou périodes, utilise EXCLUSIVEMENT "
@@ -164,7 +147,7 @@ class LangchainRAGService:
             )
 
         qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
+            ("system", system_prompt_text),
             MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
         ])

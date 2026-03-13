@@ -479,6 +479,27 @@ def generate_response(request):
             if filtered_data:
                 print(f"[DEBUG] Content of Filtered Data: {json.dumps(filtered_data, indent=2)}")
 
+            # ─── COURT-CIRCUIT SALUTATIONS ────────────────────────────────────────
+            is_greeting = any(g == user_input.lower().strip() for g in greetings)
+            if is_greeting:
+                greeting_replies = [
+                    "Bonjour ! Je suis votre assistant comptable VULCA. Comment puis-je vous aider aujourd'hui ?",
+                    "Bonjour ! Ravi de vous retrouver. Quelle analyse financière souhaitez-vous effectuer ?",
+                    "Bonsoir ! Je suis à votre disposition pour toute question comptable ou financière.",
+                ]
+                import hashlib
+                idx = int(hashlib.md5(user_input.encode()).hexdigest(), 16) % len(greeting_replies)
+                ai_response = greeting_replies[idx]
+                request.data["ai_response"] = ai_response
+                serializer = ChatMessageSerializer(data=request.data)
+                if serializer.is_valid():
+                    message_history = MessageHistory.objects.get(id=message_history_id, user=user, project_id=project_id)
+                    if not message_history.title or message_history.title in ["Nouvelle discussion", "New Chat History", "", "None"]:
+                        message_history.title = user_input.strip()[:40]
+                        message_history.save()
+                    serializer.save(user=user, message_history=message_history)
+                    return Response({"conversation": serializer.data, "sources": [], "suggested_filter": None}, status=status.HTTP_201_CREATED)
+
             accounting_context = ""
             intent_detected = False
             result = None
@@ -554,6 +575,19 @@ def generate_response(request):
                 # Gestion du filtre suggéré pour le frontend (synchronisation inverse)
                 if detection and detection.get('suggested_filter'):
                     request.data["suggested_filter"] = detection['suggested_filter']
+
+            # --- INJECTION DES FILTERED_DATA DU DASHBOARD (si aucun contexte calculé) ---
+            if not accounting_context and filtered_data:
+                filter_info = filtered_data.get('filter', {})
+                date_start_str = filter_info.get('date_start', 'N/A')
+                date_end_str = filter_info.get('date_end', 'N/A')
+                accounting_context = f"=== DONNÉES FINANCIÈRES DU TABLEAU DE BORD ===\n"
+                accounting_context += f"Période analysée : {date_start_str} au {date_end_str}\n\n"
+                for key, label in [('chiffre_affaires', "Chiffre d'affaires"), ('charges', "Charges"),
+                                   ('resultat_net', "Résultat net"), ('tresorerie', "Trésorerie"), ('bilan', "Bilan")]:
+                    if key in filtered_data:
+                        accounting_context += format_details(label, filtered_data[key], True)
+                print(f"[DEBUG] filtered_data injecté dans generate_response (fallback Dashboard).")
 
             # --- ÉTAPE 4 : GESTION DES EXPORTS ---
             if intent_detected and result and result.get("source") == "calculated":

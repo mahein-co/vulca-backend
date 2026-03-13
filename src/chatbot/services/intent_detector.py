@@ -38,17 +38,17 @@ class IntentDetector:
         'marge_operationnelle': r'marge\s*opérationnelle',
         'current_ratio': r'current\s*ratio|ratio\s*liquidité',
         'rotation_stocks': r'rotation.*stock',
-        'resultat': r'r[eéè]sul|b[eéè]n[eéè]fice|profit|perte',
-        'tresorerie': r'tr[eé]sorerie|liquidité|banque|caisse',
-        'bilan': r'bilan|actif|passif|capit',
+        'resultat': r'r[eéè]sul|b[eéè]n[eéè]fice|profit|perte|d[eé]ficit',
+        'tresorerie': r'tr[eé]sorerie|liquidit[eé]|banque|caisse|flux de tr[eé]sorerie',
+        'bilan': r'bilan|actif|passif|capit|patrimoine',
         'etats_financiers': r'[éée]tats? financiers?',
-        'tva': r'tva\b|taxe.*valeur.*ajoutée',
-        'factures': r'factures?|clients?|fournisseurs?|impay[ée]s?',
-        'anomalies': r'anomalies?|erreurs?|doublons?|déséquilibre',
+        'tva': r'tva\b|taxe.*valeur.*ajout[eé]e',
+        'factures': r'factures?|clients?|fournisseurs?|impay[ée]s?|cr[eé]ances?',
+        'anomalies': r'anomalies?|erreurs?|doublons?|d[eé]s[eé]quilibre|incoh[eé]rence',
         'grand_livre': r'solde|mouvements?|compte\s\d+',
-        'comparaison': r'compar|différence|évolution|versus|vs',
-        'export': r'générer|export|rapport|télécharger|excel|pdf',
-        'analyse_globale': r'analyser|interpréter|audit|santé|vue|résumé|situation|dashboard|tableau|rapport|exercice|période'
+        'comparaison': r'compar|diff[eé]rence|[eé]volution|versus|vs|par rapport',
+        'export': r'g[eé]n[eé]rer|export|rapport|t[eé]l[eé]charger|excel|pdf',
+        'analyse_globale': r'analyser|interpr[eé]ter|audit|sant[eé]|vue|r[eé]sum[eé]|situation|dashboard|tableau|rapport|exercice|p[eé]riode'
     }
 
     @staticmethod
@@ -215,18 +215,23 @@ class IntentDetector:
             found_start_dates.append(date(today.year, today.month, 1))
             found_end_dates.append(today)
 
-        if re.search(r'moils? dernier|le mois passé', user_input_lower):
+        if re.search(r'mois? dernier|le mois pass[eé]', user_input_lower):
             prev_month = today.month - 1 or 12
             prev_year = today.year if today.month > 1 else today.year - 1
             found_start_dates.append(date(prev_year, prev_month, 1))
             last_day = calendar.monthrange(prev_year, prev_month)[1]
             found_end_dates.append(date(prev_year, prev_month, last_day))
 
-        # "L'année dernière"
+        # "L'année dernière" / "l'année précédente"
         if re.search(r'ann[ée]e\s+derni[èe]re|ann[ée]e\s+pr[ée]c[ée]dente', user_input_lower):
             prev_year = today.year - 1
             found_start_dates.append(date(prev_year, 1, 1))
             found_end_dates.append(date(prev_year, 12, 31))
+
+        # "Cette année" → année courante
+        if re.search(r'cette\s+ann[ée]e|l\'ann[ée]e\s+en\s+cours|ann[ée]e\s+courante', user_input_lower):
+            found_start_dates.append(date(today.year, 1, 1))
+            found_end_dates.append(today)
 
         # "6 derniers mois"
         if re.search(r'6\s+derniers?\s+mois', user_input_lower):

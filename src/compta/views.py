@@ -2932,11 +2932,12 @@ def leverage_brut_view(request):
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_ca_resultat_view(request):
     """
-    Évolution combinée CA et Résultat Net sur plusieurs mois (Optimisé en 1 appel)
-    GET /api/evolution-ca-resultat/?date_start=2024-01-01&date_end=2024-12-31
+    Évolution combinée CA et Résultat Net sur plusieurs mois ou années (Optimisé)
+    GET /api/evolution-ca-resultat/?date_start=2024-01-01&date_end=2024-12-31&group_by=year
     """
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
+    group_by = request.GET.get("group_by", "month") # Default: month
     
     # PROJECT FILTER
     project_id = getattr(request, "project_id", None)
@@ -2955,42 +2956,85 @@ def evolution_ca_resultat_view(request):
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
     
     evolution_data = []
-    current_date = start_date_obj.replace(day=1)
     
-    while current_date <= end_date_obj:
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
+    if group_by == "year":
+        current_year = start_date_obj.year
+        end_year = end_date_obj.year
         
-        last_day = next_month - timedelta(days=1)
-        
-        # Optimisation : Une seule requête aggregée pour CA et CHARGES sur la période
-        stats = CompteResultat.objects.filter(
-            project_id=project_id,
-            date__range=[current_date, last_day]
-        ).aggregate(
-            ca=Sum(Case(When(nature="PRODUIT", numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
-            total_produits=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
-            total_charges=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
-        )
-        
-        ca_val = stats['ca'] or Decimal("0.00")
-        total_prod = stats['total_produits'] or Decimal("0.00")
-        total_charg = stats['total_charges'] or Decimal("0.00")
-        resultat_net = total_prod - total_charg
-        
-        evolution_data.append({
-            "name": current_date.strftime("%b %Y"), # Label formaté pour le graph
-            "ca": float(ca_val),
-            "charges": float(total_charg),
-            "resultatNet": float(resultat_net),
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        
-        current_date = next_month
+        while current_year <= end_year:
+            year_start = date(current_year, 1, 1)
+            year_end = date(current_year, 12, 31)
+            
+            # Ajustement si le filtre ne couvre pas toute l'année
+            if current_year == start_date_obj.year:
+                year_start = start_date_obj
+            if current_year == end_date_obj.year:
+                year_end = end_date_obj
+                
+            stats = CompteResultat.objects.filter(
+                project_id=project_id,
+                date__range=[year_start, year_end]
+            ).aggregate(
+                ca=Sum(Case(When(nature="PRODUIT", numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
+                total_produits=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
+                total_charges=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
+            )
+            
+            ca_val = stats['ca'] or Decimal("0.00")
+            total_prod = stats['total_produits'] or Decimal("0.00")
+            total_charg = stats['total_charges'] or Decimal("0.00")
+            resultat_net = total_prod - total_charg
+            
+            evolution_data.append({
+                "name": str(current_year),
+                "ca": float(ca_val),
+                "charges": float(total_charg),
+                "resultatNet": float(resultat_net),
+                "date": f"{current_year}-01-01"
+            })
+            current_year += 1
+    else:
+        # Default: month-by-month
+        current_date = start_date_obj.replace(day=1)
+        while current_date <= end_date_obj:
+            if current_date.month == 12:
+                next_month = current_date.replace(year=current_date.year + 1, month=1)
+            else:
+                next_month = current_date.replace(month=current_date.month + 1)
+            
+            last_day = next_month - timedelta(days=1)
+            
+            stats = CompteResultat.objects.filter(
+                project_id=project_id,
+                date__range=[current_date, last_day]
+            ).aggregate(
+                ca=Sum(Case(When(nature="PRODUIT", numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
+                total_produits=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
+                total_charges=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
+            )
+            
+            ca_val = stats['ca'] or Decimal("0.00")
+            total_prod = stats['total_produits'] or Decimal("0.00")
+            total_charg = stats['total_charges'] or Decimal("0.00")
+            resultat_net = total_prod - total_charg
+            
+            # Dictionnaire de mois pour le formatage manuel (évite les soucis de locale)
+            mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+            label = f"{mois_fr[current_date.month - 1]} {current_date.year}"
+            
+            evolution_data.append({
+                "name": label,
+                "ca": float(ca_val),
+                "charges": float(total_charg),
+                "resultatNet": float(resultat_net),
+                "date": current_date.strftime("%Y-%m-%d")
+            })
+            
+            current_date = next_month
     
     return Response(evolution_data)
+
+
 
 
 
@@ -3714,35 +3758,58 @@ def get_min_journal_date_view(request):
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def top_comptes_mouvementes_view(request):
     """
-    Retourne les 5 comptes les plus mouvementés (débit + crédit).
+    Retourne les 10 comptes les plus mouvementés en se basant sur le Bilan et le Compte de Résultat.
     """
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
-
-    # PROJECT FILTER
     project_id = getattr(request, "project_id", None)
-    qs = GrandLivre.objects.filter(project_id=project_id)
-    if date_start and date_end:
-        qs = qs.filter(date__range=[date_start, date_end])
 
-    # Somme des mouvements (débit + crédit)
-    data = (
-        qs.values("numero_compte", "libelle")
-        .annotate(
-            total_mouvement=Sum("debit") + Sum("credit")
-        )
-        .order_by("-total_mouvement")[:5]
+    # 1. Récupérer les comptes du Bilan dans la période
+    bilan_qs = Bilan.objects.filter(project_id=project_id)
+    if date_start and date_end:
+        bilan_qs = bilan_qs.filter(date__range=[date_start, date_end])
+    
+    bilan_data = bilan_qs.values("numero_compte", "libelle").annotate(
+        total_mvt=Sum(models.functions.Abs("montant_ar"))
     )
 
+    # 2. Récupérer les comptes du Compte de Résultat dans la période
+    cr_qs = CompteResultat.objects.filter(project_id=project_id)
+    if date_start and date_end:
+        cr_qs = cr_qs.filter(date__range=[date_start, date_end])
+    
+    cr_data = cr_qs.values("numero_compte", "libelle").annotate(
+        total_mvt=Sum(models.functions.Abs("montant_ar"))
+    )
+
+    # 3. Fusionner et agréger les deux sources
+    combined_data = {}
+    
+    for item in bilan_data:
+        compte = item["numero_compte"]
+        if compte not in combined_data:
+            combined_data[compte] = {"libelle": item["libelle"], "total": Decimal("0.00")}
+        combined_data[compte]["total"] += item["total_mvt"] or Decimal("0.00")
+
+    for item in cr_data:
+        compte = item["numero_compte"]
+        if compte not in combined_data:
+            combined_data[compte] = {"libelle": item["libelle"], "total": Decimal("0.00")}
+        combined_data[compte]["total"] += item["total_mvt"] or Decimal("0.00")
+
+    # 4. Trier et prendre le Top 10
+    sorted_data = sorted(combined_data.items(), key=lambda x: x[1]["total"], reverse=True)[:10]
+
     results = []
-    for item in data:
+    for compte, info in sorted_data:
         results.append({
-            "compte": item["numero_compte"],
-            "libelle": item["libelle"] or f"Compte {item['numero_compte']}",
-            "mt_mvt": float(item["total_mouvement"] or 0)
+            "compte": compte,
+            "libelle": info["libelle"] or f"Compte {compte}",
+            "mt_mvt": float(info["total"])
         })
 
     return Response(results)
+
 
 
 @api_view(["GET"])
@@ -4668,19 +4735,20 @@ def tva_view(request):
         if start_date and end_date:
             filters["date__range"] = [start_date, end_date]
         
-        # TVA collectée (compte 4457) - somme des crédits
+        # TVA collectée (compte 4457) - modèle Bilan
         tva_collectee = (
-            Journal.objects
+            Bilan.objects
             .filter(numero_compte__startswith="4457", **filters)
-            .aggregate(total=Sum("credit_ar"))["total"] or Decimal("0.00")
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
         
-        # TVA déductible (compte 4456) - somme des débits
+        # TVA déductible (compte 4456) - modèle Bilan
         tva_deductible = (
-            Journal.objects
+            Bilan.objects
             .filter(numero_compte__startswith="4456", **filters)
-            .aggregate(total=Sum("debit_ar"))["total"] or Decimal("0.00")
+            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
+
         
         # TVA nette = TVA collectée - TVA déductible
         tva_nette = tva_collectee - tva_deductible

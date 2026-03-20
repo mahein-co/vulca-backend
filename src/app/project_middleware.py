@@ -12,15 +12,28 @@ class ProjectMiddleware:
     
     # Routes exclues de la vérification project_id
     EXCLUDED_PATHS = [
+        # Authentication & Registration
         '/users/login/',
+        '/api/users/login/',
         '/users/register/',
+        '/api/users/register/',
         '/users/verify-otp/',
-        '/users/forgot-password/',
-        '/users/reset-password/',
-        '/users/token/refresh/',  # ✅ Exclure le rafraîchissement
+        '/api/users/verify-otp/',
+        '/users/resend-otp/',
+        '/api/users/resend-otp/',
+        '/users/token/refresh/',
+        '/api/users/token/refresh/',
+        '/users/admin-count/',
+        '/api/users/admin-count/',
+
+        # Password Reset
+        '/password-reset/',
+        '/api/password-reset/',
+
+        # Other public/admin paths
         '/admin/',
-        '/api/projects/',  # Liste des projets accessible sans project_id
-        '/api/project-access/',  # Demandes d'accès
+        '/api/projects/',  # List of projects
+        '/api/project-access/',  # Access requests
         '/static/',
         '/media/',
     ]

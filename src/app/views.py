@@ -88,7 +88,7 @@ def delete_user(request, pk):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def get_admin_count(request):
     """
     Returns the current number of admin users

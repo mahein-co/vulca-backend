@@ -150,7 +150,8 @@ class ExcelParser:
                     structured_data = self.structurer.process_dataframe(
                         df, 
                         columns_mapping,
-                        pre_detected_type=sheet_type
+                        pre_detected_type=sheet_type,
+                        sheet_name=sheet_name
                     )
                     print(f"    Structuration russie")
                 except Exception as e:

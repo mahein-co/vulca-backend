@@ -583,7 +583,7 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
         df_extracted = clean_dataframe(
             df_extracted, 
             context='financial',
-            remove_totals=False,  # RE-ACTIVER LES TOTAUX SUITE A DEMANDE UTILISATEUR
+            remove_totals=True,  # Demande utilisateur : supprimer les totaux ("Total : actifs courants")
             sheet_name=sheet_name
         )
         
@@ -620,7 +620,8 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
                 df_extracted, 
                 columns_mapping, 
                 company_metadata,
-                pre_detected_type=detected_type
+                pre_detected_type=detected_type,
+                sheet_name=sheet_name
             )
             print(f"   [SUCCESS] Structuration reussie")
             

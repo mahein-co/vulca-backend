@@ -17,6 +17,7 @@ from datetime import datetime, date
 
 # Import du validateur de compte
 from ocr.account_validator import AccountValidator
+from ocr.pcg_loader import PCG_MAPPING
 
 class FinancialDataStructurer:
     """
@@ -331,12 +332,13 @@ class FinancialDataStructurer:
         
         return df[new_order_unique]
     
-    def classify_account(self, numero_compte: str) -> Dict[str, Any]:
+    def classify_account(self, numero_compte: str, sheet_name: str = "") -> Dict[str, Any]:
         """
         Classifie un compte selon le Plan Comptable Général.
         
         Args:
             numero_compte: Numéro de compte
+            sheet_name: Nom de la feuille Excel (contexte)
             
         Returns:
             dict: {
@@ -377,13 +379,58 @@ class FinancialDataStructurer:
             }
         
         classe = int(first_digit)
-        classe_libelle = self.ACCOUNT_CLASSES.get(first_digit, 'Inconnu')
+        
+        # Utiliser PCG_MAPPING pour plus de précision (Actif courant, etc.)
+        categorie_specifique = None
+        for i in [4, 3, 2, 1]:
+            prefix = clean_account[:i]
+            if prefix in PCG_MAPPING:
+                cat = PCG_MAPPING[prefix].get('categorie')
+                if not cat:
+                    nature = PCG_MAPPING[prefix].get('nature')
+                    if nature == 'CHARGE':
+                        cat = 'Charges'
+                    elif nature == 'PRODUIT':
+                        cat = 'Produits'
+                if cat:
+                    if cat == 'ACTIF_COURANTS':
+                        categorie_specifique = 'Actif courants'
+                    elif cat == 'ACTIF_NON_COURANTS':
+                        categorie_specifique = 'Actif non courants'
+                    elif cat == 'PASSIFS_COURANTS':
+                        categorie_specifique = 'Passifs courants'
+                    elif cat == 'PASSIFS_NON_COURANTS':
+                        categorie_specifique = 'Passifs non courants'
+                    elif cat == 'CAPITAUX_PROPRES':
+                        categorie_specifique = 'Capitaux propres'
+                    else:
+                        categorie_specifique = cat.replace('_', ' ').capitalize()
+                    break
+                    
+        classe_libelle = categorie_specifique if categorie_specifique else self.ACCOUNT_CLASSES.get(first_digit, 'Inconnu')
+        
+        # CONTEXTUAL OVERRIDE: Si on est dans une feuille "ACTIF" ou "PASSIF"
+        # On force la catégorie pour les comptes ambigus (ex: Classe 4)
+        sheet_name_upper = sheet_name.upper()
+        if "ACTIF" in sheet_name_upper:
+            if classe == 4 or classe == 5:
+                classe_libelle = "Actif courants"
+            elif classe == 2:
+                classe_libelle = "Actif non courants"
+        elif "PASSIF" in sheet_name_upper:
+            if classe == 4 or classe == 5:
+                classe_libelle = "Passifs courants"
+            elif classe == 1:
+                if "NON COURANT" in str(PCG_MAPPING.get(clean_account[:2], {}).get('categorie', '')).upper():
+                     classe_libelle = "Passifs non courants"
+                else:
+                     classe_libelle = "Capitaux propres"
         
         return {
-            'classe': classe,
+            'classe': int(classe),
             'classe_libelle': classe_libelle,
-            'is_bilan': classe in [1, 2, 3, 4, 5],
-            'is_compte_resultat': classe in [6, 7]
+            'is_bilan': int(classe) in [1, 2, 3, 4, 5],
+            'is_compte_resultat': int(classe) in [6, 7]
         }
     
     def structure_to_json(
@@ -391,7 +438,8 @@ class FinancialDataStructurer:
         df: pd.DataFrame, 
         columns_mapping: Dict[str, str],
         document_type: str,
-        company_metadata: Optional[Dict[str, str]] = None
+        company_metadata: Optional[Dict[str, str]] = None,
+        sheet_name: str = ""
     ) -> Dict[str, Any]:
         """
         Structure les données en format JSON standardisé.
@@ -596,12 +644,22 @@ class FinancialDataStructurer:
             is_subtotal = False
             if poste:
                 poste_upper = poste.upper()
-                if re.match(r'^\d+\s*-\s+', poste) or any(kw in poste_upper for kw in ['TOTAL', 'RESULTAT', 'VARIATION', 'VALEUR AJOUTEE', 'EXCEDENT']):
-                    is_subtotal = True
-                    # Si c'est un sous-total, on vide le numéro de compte s'il est suspect
-                    if numero_compte and len(numero_compte) <= 3:
-                        numero_compte = ""
-                        is_valid_account = False
+                _SUBTOTAL_KW = [
+                    'TOTAL', 'RESULTAT', 'VARIATION', 'VALEUR AJOUTEE', 'EXCEDENT',
+                    "CHIFFRE D'AFFAIRES", 'CHIFFRE D AFFAIRES',
+                    'PRODUCTION DE L', 'CONSOMMATION DE L',
+                    'VALEUR AJOUT', 'EXCEDENT BRUT'
+                ]
+                # IMPORTANT: Limiter la détection de sous-totaux numérotés à 1-2 chiffres
+                # pour ne pas confondre avec un compte (ex: 601 - Achats)
+                if re.match(r'^\s*\d{1,2}\s*[-\u2013]\s*', poste) or any(kw in poste_upper for kw in _SUBTOTAL_KW):
+                    # Vérifier que ce n'est pas juste un numéro de compte (si poste a du texte après le tiret)
+                    if not re.match(r'^\d+$', poste.replace('-', '').replace(' ', '')):
+                        is_subtotal = True
+                        # Si c'est un sous-total, on vide le numéro de compte s'il est suspect
+                        if numero_compte and len(numero_compte) <= 3:
+                            numero_compte = ""
+                            is_valid_account = False
 
             # Si on n'a ni compte valide ni poste, ignorer la ligne
             if not is_valid_account and not poste:
@@ -634,7 +692,8 @@ class FinancialDataStructurer:
                         is_valid_account = True
 
                 # Mettre à jour la classification avec le compte final (corrigé ou deviné)
-                classification = self.classify_account(numero_compte)
+                # On passe le sheet_name pour bénéficier de l'override contextuel (ex: Actif/Passif)
+                classification = self.classify_account(numero_compte, sheet_name=sheet_name)
 
                 # Si la classification par numéro de compte échoue mais qu'on a une classe suggérée par le libellé
                 if not classification['classe'] and validation['suggested_class']:
@@ -710,7 +769,8 @@ class FinancialDataStructurer:
         df: pd.DataFrame, 
         columns_mapping: Dict[str, str],
         company_metadata: Optional[Dict[str, str]] = None,
-        pre_detected_type: Optional[str] = None
+        pre_detected_type: Optional[str] = None,
+        sheet_name: str = ""
     ) -> Dict[str, Any]:
         """
         Traitement complet d'un DataFrame : détection, nettoyage, tri, structuration.
@@ -758,7 +818,7 @@ class FinancialDataStructurer:
         if document_type == 'JOURNAL':
             structured_data = self.structure_journal_data(df_sorted, columns_mapping, company_metadata)
         else:
-            structured_data = self.structure_to_json(df_sorted, columns_mapping, document_type, company_metadata)
+            structured_data = self.structure_to_json(df_sorted, columns_mapping, document_type, company_metadata, sheet_name=sheet_name)
         
         print(f"    Type: {structured_data.get('type_document')}")
         if 'lignes' in structured_data:

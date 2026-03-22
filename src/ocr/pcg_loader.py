@@ -159,6 +159,13 @@ def get_account_suggestions(description: str, top_n: int = 5):
 
 
 PCG_MAPPING = {
+    # DEFAULTS PAR CLASSE (Fallback si 2, 3 ou 4 chiffres non trouvés)
+    '1': {'type_bilan': 'PASSIF', 'categorie': 'CAPITAUX_PROPRES'},
+    '2': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_NON_COURANTS'},
+    '3': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
+    '4': {'type_bilan': 'PASSIF', 'categorie': 'PASSIFS_COURANTS'}, # 41 (Clients) géré spécifiquement
+    '5': {'type_bilan': 'ACTIF', 'categorie': 'ACTIF_COURANTS'},
+
     # CLASSE 1 : CAPITAUX PROPRES & PASSIFS NON COURANTS
     '10': {'type_bilan': 'PASSIF', 'categorie': 'CAPITAUX_PROPRES'},
     '11': {'type_bilan': 'PASSIF', 'categorie': 'CAPITAUX_PROPRES'},

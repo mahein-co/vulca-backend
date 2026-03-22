@@ -422,17 +422,54 @@ class DataCleaner:
         # Chercher les lignes contenant des mots-clés de totaux
         total_keywords = [
             'total', 'sous-total', 'subtotal', 'somme', 'sum',
-            'résultat', 'result', 'solde', 'balance', 'cumul', 'total :'
+            'solde', 'balance', 'cumul', 'total :',
+            'tresorerie', 'trésorerie', 'créances et assimilés', 'creances et assimiles', 'créances et assimiles',
+            "chiffre d'affaires", "chiffre d affaires", "chiffres d'affaires",
+            'valeur ajoutee', 'valeur ajoutée', 'excedent brut', 'excédent brut',
+            'production de l\'exercice', 'consommation de l\'exercice',
         ]
+        
+        import re as _re
+        # Pattern pour les lignes numérotées de type "1 - label" ou "4 - label" (sous-totaux CDR)
+        # IMPORTANT: Restreindre à 1-2 chiffres SEULEMENT pour éviter de filtrer "601 - Achats"
+        _numbered_total_pattern = _re.compile(r'^\s*\d{1,2}\s*[-\u2013]\s*\w+', _re.IGNORECASE)
         
         for idx, row in df.iterrows():
             # Convertir la ligne en string pour chercher les mots-clés
             row_str = ' '.join(str(val).lower() for val in row.values)
             
-            if any(keyword in row_str for keyword in total_keywords):
+            # Détection intelligente des totaux pour éviter les faux positifs (ex: "somme" dans "consommés")
+            is_total_match = False
+            for kw in total_keywords:
+                if len(kw) <= 2: # Ignorer les mots trop courts
+                    continue
+                
+                # Pour les mots uniques sans caractères spéciaux, on exige une frontière de mot (\b)
+                if ' ' not in kw and "'" not in kw and ":" not in kw and "-" not in kw:
+                    if _re.search(fr'\b{_re.escape(kw.lower())}\b', row_str, _re.IGNORECASE):
+                        is_total_match = True
+                        break
+                else:
+                    # Pour les phrases ou mots avec ponctuation, on accepte le substring simple
+                    if kw.lower() in row_str:
+                        is_total_match = True
+                        break
+            
+            if is_total_match:
                 df.at[idx, 'is_total'] = True
+                continue
+            
+            # Détecter les lignes numérotées du type "1 - production de l'exercice"
+            # Seulement les colonnes description/libelle (pas les colonnes numéro de compte)
+            for val in row.values:
+                val_str = str(val).strip()
+                # Uniquement si la valeur est textuelle (pas juste un nombre)
+                if _numbered_total_pattern.match(val_str) and not val_str.replace(' ', '').isdigit():
+                    df.at[idx, 'is_total'] = True
+                    break
         
         return df
+
     
     def enrich_with_pcg_accounts(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -626,8 +663,14 @@ class DataCleaner:
         if context == 'financial':
             print(f"    Enrichissement avec le PCG...")
             df = self.enrich_with_pcg_accounts(df)
+            
+        # Étape 10: Supprimer les doublons dans les lignes
+        initial_len = len(df)
+        df = df.drop_duplicates()
+        if len(df) < initial_len:
+            print(f"   [INFO] {initial_len - len(df)} ligne(s) en double supprimee(s)")
         
-        # Étape 9: Détecter les totaux (optionnel)
+        # Étape 11: Détecter les totaux (optionnel)
         if context == 'financial':
             df = self.detect_and_mark_totals(df)
             

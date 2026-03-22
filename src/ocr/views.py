@@ -1011,6 +1011,27 @@ def excel_save_data_view(request):
                             # Par défaut (ex: erreur de classe)
                             type_bilan = 'PASSIF'
                             categorie = 'PASSIFS_COURANTS'
+                            
+                        # OVERRIDE CONTEXTUEL - Suivre le placement dans la feuille Excel
+                        # Si la feuille s'appelle ACTIF, on force tous les comptes en Actif
+                        # Si la feuille s'appelle PASSIF, on force tous les comptes en Passif
+                        sheet_upper = str(sheet_name).upper()
+                        if 'ACTIF' in sheet_upper and 'PASSIF' not in sheet_upper:
+                            # La feuille est côté ACTIF → forcer Actif
+                            type_bilan = 'ACTIF'
+                            if first_digit == '2':
+                                categorie = 'ACTIF_NON_COURANTS'
+                            else:
+                                categorie = 'ACTIF_COURANTS'
+                        elif 'PASSIF' in sheet_upper:
+                            # La feuille est côté PASSIF → forcer Passif
+                            type_bilan = 'PASSIF'
+                            if prefix_2 in ['15', '16', '17']:
+                                categorie = 'PASSIFS_NON_COURANTS'
+                            elif first_digit == '1':
+                                categorie = 'CAPITAUX_PROPRES'
+                            else:
+                                categorie = 'PASSIFS_COURANTS'
                         
                         
                         # Extraction et validation de la date avec gestion d'erreurs robuste

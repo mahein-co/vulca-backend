@@ -79,7 +79,40 @@ class BilanSerializer(serializers.ModelSerializer):
     def validate_categorie(self, value):
         # Supprime espaces invisibles
         return value.strip()
-    
+
+    def to_representation(self, instance):
+        """Auto-correct categorie when it is inconsistent with type_bilan.
+        This fixes old imported data where type_bilan=ACTIF but categorie=PASSIFS_COURANTS.
+        """
+        data = super().to_representation(instance)
+        type_bilan = (data.get('type_bilan') or '').upper()
+        categorie = (data.get('categorie') or '').upper()
+
+        # Catégories valides pour chaque type
+        actif_categories = {'ACTIF_COURANTS', 'ACTIF_NON_COURANTS'}
+        passif_categories = {'PASSIFS_COURANTS', 'PASSIFS_NON_COURANTS', 'CAPITAUX_PROPRES'}
+
+        if type_bilan == 'ACTIF' and categorie in passif_categories:
+            # Determine proper Actif category from account number prefix
+            numero_compte = str(data.get('numero_compte') or '')
+            if numero_compte.startswith('2'):
+                data['categorie'] = 'ACTIF_NON_COURANTS'
+            else:
+                data['categorie'] = 'ACTIF_COURANTS'
+
+        elif type_bilan == 'PASSIF' and categorie in actif_categories:
+            # Determine proper Passif category from account number prefix
+            numero_compte = str(data.get('numero_compte') or '')
+            prefix2 = numero_compte[:2] if len(numero_compte) >= 2 else numero_compte
+            if prefix2 in ('15', '16', '17'):
+                data['categorie'] = 'PASSIFS_NON_COURANTS'
+            elif numero_compte.startswith('1'):
+                data['categorie'] = 'CAPITAUX_PROPRES'
+            else:
+                data['categorie'] = 'PASSIFS_COURANTS'
+
+        return data
+
 class GrandLivreSerializer(serializers.ModelSerializer):
     journal_source = serializers.CharField(source='journal.type_journal', read_only=True)
     solde_cumule = serializers.DecimalField(source='solde', max_digits=15, decimal_places=2, read_only=True)

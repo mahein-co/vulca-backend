@@ -106,8 +106,8 @@ def create_user_by_admin(request):
     data = request.data
     
     # Validate required fields
-    if not all([data.get("username"), data.get("name"), data.get("email"), data.get("role")]):
-        return Response({"error": "Nom d'utilisateur, nom, email et rôle sont requis"}, status=status.HTTP_400_BAD_REQUEST)
+    if not all([data.get("username"), data.get("name"), data.get("email"), data.get("password"), data.get("role")]):
+        return Response({"error": "Nom d'utilisateur, nom, email, mot de passe et rôle sont requis"}, status=status.HTTP_400_BAD_REQUEST)
     
     # Check admin quota if role is admin
     if data.get("role") == "admin":
@@ -118,6 +118,10 @@ def create_user_by_admin(request):
     # Get username from request
     username = data.get("username")
     email = data.get("email")
+    password = data.get("password")
+
+    if len(password) < 8:
+        return Response({"error": "Le mot de passe doit contenir au moins 8 caractères"}, status=status.HTTP_400_BAD_REQUEST)
     
     # Check if username already exists
     if CustomUser.objects.filter(username=username).exists():
@@ -136,7 +140,7 @@ def create_user_by_admin(request):
             role=data.get("role"),
             is_active=True,
             is_verified=True,
-            password=CustomUser.objects.make_random_password()  # Generate random password
+            password=password  # Use provided password instead of random password
         )
         
         serializer = UserSerializer(user, many=False)

@@ -3764,13 +3764,15 @@ def top_comptes_mouvementes_view(request):
     date_end = request.GET.get("date_end")
     project_id = getattr(request, "project_id", None)
 
+    from django.db.models.functions import Abs
+
     # 1. Récupérer les comptes du Bilan dans la période
     bilan_qs = Bilan.objects.filter(project_id=project_id)
     if date_start and date_end:
         bilan_qs = bilan_qs.filter(date__range=[date_start, date_end])
     
     bilan_data = bilan_qs.values("numero_compte", "libelle").annotate(
-        total_mvt=Sum(models.functions.Abs("montant_ar"))
+        total_mvt=Sum(Abs("montant_ar"))
     )
 
     # 2. Récupérer les comptes du Compte de Résultat dans la période
@@ -3779,7 +3781,7 @@ def top_comptes_mouvementes_view(request):
         cr_qs = cr_qs.filter(date__range=[date_start, date_end])
     
     cr_data = cr_qs.values("numero_compte", "libelle").annotate(
-        total_mvt=Sum(models.functions.Abs("montant_ar"))
+        total_mvt=Sum(Abs("montant_ar"))
     )
 
     # 3. Fusionner et agréger les deux sources

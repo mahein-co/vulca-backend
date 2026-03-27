@@ -35,3 +35,29 @@ class FormSourceSerializer(serializers.ModelSerializer):
         if self.instance is None and 'project' not in attrs:
             raise serializers.ValidationError({"project": "Le champ project est requis."})
         return super().validate(attrs)
+
+
+# --- SÉRIALISEURS TECHNIQUES POUR SWAGGER/OPENAPI ---
+
+class OcrExtractResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    message = serializers.CharField()
+    type_document = serializers.CharField()
+    ocr_brut = serializers.CharField()
+    extracted_json = serializers.JSONField()
+
+class ExcelAnalyzeResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    message = serializers.CharField()
+    file_name = serializers.CharField()
+    total_rows = serializers.IntegerField()
+    extraction_method = serializers.CharField()
+    sheets = serializers.JSONField()
+
+class ExcelValidateRequestSerializer(serializers.Serializer):
+    unmapped_rows = serializers.ListField(child=serializers.DictField())
+
+class PieceListResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    count = serializers.IntegerField()
+    pieces = serializers.ListField(child=serializers.DictField())

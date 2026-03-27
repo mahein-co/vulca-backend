@@ -120,3 +120,44 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
             data[k] = v
         print(f"DEBUG SERIALIZER: data keys after merging: {list(data.keys())}", file=sys.stderr)
         return data
+
+class AdminCountSerializer(serializers.Serializer):
+    admin_count = serializers.IntegerField()
+
+class UserListResponseSerializer(serializers.Serializer):
+    users = UserSerializer(many=True)
+
+class UserProfileResponseSerializer(serializers.Serializer):
+    user = UserSerializer()
+
+class MessageResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    error = serializers.BooleanField(required=False)
+
+class RegisterResponseDataSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    error = serializers.BooleanField()
+    id = serializers.IntegerField(required=False)
+    email = serializers.EmailField(required=False)
+
+class RegisterResponseSerializer(serializers.Serializer):
+    data = RegisterResponseDataSerializer()
+
+class LoginResponseSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+    email = serializers.EmailField()
+    full_name = serializers.CharField()
+    profile_picture = serializers.ImageField(allow_null=True, required=False)
+    is_admin = serializers.BooleanField()
+    role = serializers.CharField()
+    access = serializers.CharField()
+    refresh = serializers.CharField()
+    DEBUG_VIEW_VERSION = serializers.CharField(required=False)
+
+class TokenRefreshResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    access = serializers.CharField()
+
+class EmptySerializer(serializers.Serializer):
+    pass

@@ -7,19 +7,17 @@ from datetime import date
 from django.db import OperationalError
 from vulca_backend import settings
 
-from rest_framework import generics
+from rest_framework import generics, serializers, status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status
-
-from ocr.models import FileSource, FormSource
-from compta.models import Bilan, CompteResultat, Project
-from ocr.serializers import FileSourceSerializer, FormSourceSerializer
-from ocr.utils import safe_openai_call, clean_ai_json, detect_file_type, generate_description
-from ocr.openai_vision_ocr import extract_content_with_vision
 from ocr.constants import UNIFIED_EXTRACTION_PROMPT
 from compta.permissions import HasProjectAccess
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
+from ocr.serializers import (
+    FileSourceSerializer, FormSourceSerializer, OcrExtractResponseSerializer,
+    ExcelAnalyzeResponseSerializer, ExcelValidateRequestSerializer, PieceListResponseSerializer
+)
 
 from openai import OpenAI
 client = OpenAI(api_key=settings.OPENAI_API_KEY) 
@@ -183,6 +181,11 @@ class FileSourceListCreateView(generics.ListCreateAPIView):
         return FileSource.objects.filter(project_id=project_id).order_by('-uploaded_at')
 
 
+@extend_schema(
+    request=FileSourceSerializer,
+    responses={201: FileSourceSerializer},
+    description="Télécharge un fichier OCR et crée une source de fichier."
+)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def file_source_list_create(request):
@@ -330,6 +333,17 @@ def file_source_list_create(request):
         "file_source": FileSourceSerializer(saved_file).data
     }, status=201)
 
+@extend_schema(
+    methods=["GET"],
+    responses={200: FormSourceSerializer(many=True)},
+    description="Liste les sources de formulaires du projet."
+)
+@extend_schema(
+    methods=["POST"],
+    request=FormSourceSerializer,
+    responses={201: FormSourceSerializer},
+    description="Crée une nouvelle source de formulaire."
+)
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def form_source_list_create(request):
@@ -393,6 +407,11 @@ def form_source_list_create(request):
         "form_source": FormSourceSerializer(saved).data,
     }, status=status.HTTP_201_CREATED)
 
+@extend_schema(
+    request={"multipart/form-data": {"type": "object", "properties": {"file": {"type": "string", "format": "binary"}}}},
+    responses={201: OcrExtractResponseSerializer},
+    description="Extrait le texte et les données structurées d'un fichier via OCR Vision."
+)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def extract_content_file_view(request):
@@ -563,6 +582,14 @@ def extract_content_file_view(request):
     }, status=201)
 
 # ...existing code...
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", OpenApiTypes.DATE, OpenApiParameter.QUERY, description="Filtre par date de début"),
+        OpenApiParameter("date_end", OpenApiTypes.DATE, OpenApiParameter.QUERY, description="Filtre par date de fin"),
+    ],
+    responses={200: PieceListResponseSerializer},
+    description="Liste combinée de toutes les pièces (fichiers et formulaires) du projet."
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def all_pieces_list_view(request):
@@ -655,6 +682,11 @@ def all_pieces_list_view(request):
 # ENDPOINTS POUR L'IMPORTATION EXCEL AVANCÉE
 # ============================================================================
 
+@extend_schema(
+    request={"multipart/form-data": {"type": "object", "properties": {"file": {"type": "string", "format": "binary"}, "use_ocr": {"type": "boolean"}}}},
+    responses={200: ExcelAnalyzeResponseSerializer},
+    description="Analyse un fichier Excel et détecte son type et ses colonnes."
+)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def excel_upload_and_analyze_view(request):
@@ -724,6 +756,11 @@ def excel_upload_and_analyze_view(request):
         }, status=500)
 
 
+@extend_schema(
+    request=ExcelValidateRequestSerializer,
+    responses={200: serializers.Serializer}, # Simple format
+    description="Suggère des comptes PCG pour les lignes non mappées d'un Excel."
+)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def excel_validate_mapping_view(request):
@@ -753,6 +790,20 @@ def excel_validate_mapping_view(request):
         return Response({"error": f"Erreur lors de la validation du mapping: {str(e)}"}, status=500)
 
 
+@extend_schema(
+    request={
+        "multipart/form-data": {
+            "type": "object", 
+            "properties": {
+                "file": {"type": "string", "format": "binary"},
+                "sheets": {"type": "string", "description": "JSON string des données à sauvegarder"},
+                "company_metadata": {"type": "string", "description": "JSON string des métadonnées"}
+            }
+        }
+    },
+    responses={200: serializers.Serializer},
+    description="Sauvegarde finale des données d'un fichier Excel."
+)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def excel_save_data_view(request):

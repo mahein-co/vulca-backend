@@ -6,8 +6,18 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from compta.permissions import HasProjectAccess
 from chatbot.services.accounting_queries import AccountingQueryService
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
+from chatbot.serializers import FilteredDataResponseSerializer
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", OpenApiTypes.DATE, OpenApiParameter.QUERY, required=True, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", OpenApiTypes.DATE, OpenApiParameter.QUERY, required=True, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: FilteredDataResponseSerializer},
+    description="Récupère une synthèse de toutes les données financières pour une période donnée."
+)
 @api_view(['GET'])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def get_filtered_accounting_data(request):

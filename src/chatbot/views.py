@@ -14,15 +14,20 @@ from django.core.files.base import ContentFile
 from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, serializers
 from rest_framework.views import APIView
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes
 
 # PGVECTOR -----------------------------------------
 from pgvector.django import CosineDistance
 
 # MODELS -------------------------------------------
 from chatbot.models import ChatMessage, MessageHistory, DocumentPage, Document
-from chatbot.serializers import ChatMessageSerializer, MessageHistorySerializer, DocumentSerializer
+from chatbot.serializers import (
+    ChatMessageSerializer, MessageHistorySerializer, DocumentSerializer,
+    ChatRequestSerializer, ChatResponseSerializer, ChatSourceSerializer,
+    EmptySerializer
+)
 from chatbot.pagination import DocumentPagination
 from chatbot.prompts import SYSTEM_PROMPT
 
@@ -452,6 +457,11 @@ def format_details(data_key, data_dict, include_details):
 
 
 
+@extend_schema(
+    request=ChatRequestSerializer,
+    responses={201: ChatResponseSerializer},
+    description="Génère une réponse de l'IA basée sur l'input utilisateur et le contexte financier."
+)
 @api_view(['POST', 'GET'])
 @permission_classes([IsAuthenticated])
 def generate_response(request):
@@ -681,6 +691,23 @@ def generate_response(request):
 
 
 # GET MESSAGE HISTORIES -----------------------------
+@extend_schema(
+    methods=['GET'],
+    parameters=[
+        OpenApiParameter("project_id", OpenApiTypes.INT, OpenApiParameter.QUERY, required=True, description="ID du projet"),
+    ],
+    responses={200: MessageHistorySerializer(many=True)},
+    description="Récupère les historiques de discussion pour un projet donné."
+)
+@extend_schema(
+    methods=['POST'],
+    parameters=[
+        OpenApiParameter("project_id", OpenApiTypes.INT, OpenApiParameter.QUERY, required=True, description="ID du projet"),
+    ],
+    request=MessageHistorySerializer,
+    responses={201: MessageHistorySerializer},
+    description="Crée un nouvel historique de discussion pour un projet donné."
+)
 @api_view(["POST", "GET"])
 @permission_classes([IsAuthenticated])
 def get_message_histories(request):
@@ -741,6 +768,22 @@ def get_message_histories(request):
         
     
 # MESSAGE HISTORY DETAILS -----------------------------
+@extend_schema(
+    methods=["GET"],
+    responses={200: MessageHistorySerializer},
+    description="Récupère les détails d'un historique avec ses messages."
+)
+@extend_schema(
+    methods=["PUT"],
+    request=MessageHistorySerializer,
+    responses={200: MessageHistorySerializer},
+    description="Met à jour un historique."
+)
+@extend_schema(
+    methods=["DELETE"],
+    responses={204: None},
+    description="Supprime un historique."
+)
 @api_view(["GET", "PUT", "DELETE"])
 @permission_classes([IsAuthenticated])
 def message_history_details(request, id):
@@ -814,6 +857,11 @@ def message_history_details(request, id):
         return Response({"message": "Historique supprimé avec succès"}, status=status.HTTP_204_NO_CONTENT)
     
 # SAVE NEW HISTORY AND NEW CHAT -----------------------------
+@extend_schema(
+    request=ChatRequestSerializer,
+    responses={201: ChatResponseSerializer},
+    description="Crée un nouvel historique et y ajoute un premier message avec réponse de l'IA."
+)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def save_new_history_and_new_chat(request):
@@ -948,6 +996,11 @@ def save_new_history_and_new_chat(request):
         return Response({"error": "Impossible de créer le chat"}, status=status.HTTP_400_BAD_REQUEST)
 
 
+@extend_schema(
+    request=serializers.Serializer, # Inline simple serializer potential
+    responses={200: MessageHistorySerializer},
+    description="Renomme le titre d'un historique."
+)
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
 def rename_history(request, id):

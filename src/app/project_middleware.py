@@ -34,6 +34,9 @@ class ProjectMiddleware:
         '/admin/',
         '/api/projects/',  # List of projects
         '/api/project-access/',  # Access requests
+        '/api/schema/',          # Swagger Schema
+        '/api/docs/',            # Swagger UI
+        '/api/redoc/',           # Redoc UI
         '/static/',
         '/media/',
     ]

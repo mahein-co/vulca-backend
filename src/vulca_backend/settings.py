@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     "ocr.apps.OcrConfig",  # APPLICATION OCR
     'chatbot.apps.ChatbotConfig',
     'rest_framework.authtoken',
+    'drf_spectacular',
 ]
 
 
@@ -131,6 +132,28 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
+    ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+# Configuration Swagger / OpenAPI
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'VULCA API',
+    'DESCRIPTION': 'Documentation interactive de l\'API backend VULCA.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'APPEND_COMPONENTS': {
+        "securitySchemes": {
+            "ProjectID": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Project-ID",
+                "description": "ID du projet actuel pour filtrer les données"
+            }
+        }
+    },
+    'SECURITY': [
+        {'ProjectID': []},
     ],
 }
 

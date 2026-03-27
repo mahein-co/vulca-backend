@@ -13,7 +13,16 @@ from compta.kpi_utils import get_latest_bilan_sum, get_cr_sum, get_resultat_net,
 
 from compta.permissions import HasProjectAccess
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema, OpenApiParameter
+from compta.serializers import DashboardIndicatorsResponseSerializer
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: DashboardIndicatorsResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def dashboard_indicators_view(request):

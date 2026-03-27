@@ -31,5 +31,21 @@ class JWTAuthenticationFromCookie(JWTAuthentication):
         return super().authenticate(request)
 
 
+# Configuration pour drf-spectacular (Swagger)
+from drf_spectacular.extensions import OpenApiAuthenticationExtension
+
+class JWTAuthenticationFromCookieScheme(OpenApiAuthenticationExtension):
+    target_class = 'app.authentication.JWTAuthenticationFromCookie'
+    name = 'JWTAuthenticationFromCookie'
+
+    def get_security_definition(self, auto_schema):
+        return {
+            'type': 'apiKey',
+            'in': 'cookie',
+            'name': 'access',
+            'description': 'Authentification via le cookie "access" contenant le token JWT.'
+        }
+
+
 
 

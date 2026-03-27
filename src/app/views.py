@@ -15,11 +15,17 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework import status 
+from rest_framework import status, serializers 
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 
-from app.serializers import RegisterUserSerializer, UserSerializer, MyTokenObtainPairSerializer
+from app.serializers import (
+    RegisterUserSerializer, UserSerializer, MyTokenObtainPairSerializer,
+    AdminCountSerializer, UserListResponseSerializer, UserProfileResponseSerializer,
+    MessageResponseSerializer, RegisterResponseSerializer, LoginResponseSerializer,
+    TokenRefreshResponseSerializer, EmptySerializer
+)
 from app.models import CustomUser, OtpToken
 from app.utils import get_verification_token
 
@@ -29,6 +35,7 @@ User = get_user_model()
 
 # 2. U S E R S
 # 2.1. users
+@extend_schema(responses={200: UserListResponseSerializer})
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_users(request):
@@ -41,6 +48,7 @@ def get_users(request):
         return Response(context, status=status.HTTP_200_OK)
 
 
+@extend_schema(request=UserSerializer, responses={200: UserSerializer})
 @api_view(["PUT"])
 @permission_classes([IsAuthenticated])
 def update_user(request, pk):
@@ -72,6 +80,7 @@ def update_user(request, pk):
     return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+@extend_schema(responses={200: MessageResponseSerializer})
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_user(request, pk):
@@ -87,6 +96,7 @@ def delete_user(request, pk):
     return Response({"message": "Utilisateur supprimé avec succès"}, status=status.HTTP_200_OK)
 
 
+@extend_schema(responses={200: AdminCountSerializer})
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def get_admin_count(request):
@@ -97,6 +107,7 @@ def get_admin_count(request):
     return Response({"admin_count": admin_count}, status=status.HTTP_200_OK)
 
 
+@extend_schema(request=UserSerializer, responses={201: UserSerializer})
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_user_by_admin(request):
@@ -151,6 +162,7 @@ def create_user_by_admin(request):
 
 
 # 2.2. get user profile
+@extend_schema(responses={200: UserProfileResponseSerializer})
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_user_profile(request):
@@ -163,10 +175,12 @@ def get_user_profile(request):
 class UserProfileView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(responses={200: UserSerializer})
     def get(self, request):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
 
+    @extend_schema(request=UserSerializer, responses={200: UserSerializer})
     def put(self, request):
         user = request.user
         data = request.data
@@ -181,6 +195,7 @@ class UserProfileView(APIView):
 class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
 
+    @extend_schema(responses={200: LoginResponseSerializer})
     def post(self, request, *args, **kwargs):
         # Appel à la logique de SimpleJWT
         serializer = self.get_serializer(data=request.data)
@@ -276,6 +291,7 @@ class MyTokenObtainPairView(TokenObtainPairView):
 
 
 # 3.2. register 
+@extend_schema(request=RegisterUserSerializer, responses={201: RegisterResponseSerializer})
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def register_user(request):
@@ -365,6 +381,7 @@ Merci,
 
 # REFRESH TOKEN
 class CookieTokenRefreshView(TokenRefreshView):
+    @extend_schema(responses={200: TokenRefreshResponseSerializer})
     def post(self, request, *args, **kwargs):
         # Allow reading from Body if cookie missing
         refresh = request.COOKIES.get("refresh")
@@ -453,6 +470,7 @@ class ResendOtpAPIView(APIView):
     """
     Renvoyer un OTP par e-mail
     """
+    @extend_schema(request=EmptySerializer, responses={200: MessageResponseSerializer})
     def post(self, request):
         email = request.data.get("email")
 
@@ -486,6 +504,7 @@ class ResendOtpAPIView(APIView):
         except User.DoesNotExist:
             return Response({"error": "Aucun compte associé à cet e-mail."}, status=404)
 
+@extend_schema(request=EmptySerializer, responses={200: RegisterResponseSerializer})
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def verify_otp(request):
@@ -539,6 +558,7 @@ def verify_otp(request):
 
 
 # RESET PASSWORD
+@extend_schema(request=EmptySerializer, responses={200: MessageResponseSerializer})
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def request_password_reset(request):
@@ -602,6 +622,7 @@ def request_password_reset(request):
 
 
 
+@extend_schema(request=EmptySerializer, responses={200: MessageResponseSerializer})
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def verify_reset_otp(request):
@@ -635,6 +656,7 @@ def verify_reset_otp(request):
     }, status=200)
 
 
+@extend_schema(request=EmptySerializer, responses={200: MessageResponseSerializer})
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def reset_password(request):
@@ -671,6 +693,7 @@ def reset_password(request):
     }, status=200)
 
 
+@extend_schema(request=EmptySerializer, responses={200: MessageResponseSerializer})
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def change_password(request):

@@ -197,6 +197,12 @@ class CafSerializer(serializers.Serializer):
     caf = serializers.DecimalField(max_digits=15, decimal_places=2)
     variation = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, allow_null=True)
 
+class TresorerieSerializer(serializers.Serializer):
+    disponibilites = serializers.DecimalField(max_digits=15, decimal_places=2)
+    concours_bancaires = serializers.DecimalField(max_digits=15, decimal_places=2)
+    tresorerie_nette = serializers.DecimalField(max_digits=15, decimal_places=2)
+    variation = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, allow_null=True)
+
 class LeverageSerializer(serializers.Serializer):
     total_endettement = serializers.DecimalField(max_digits=15, decimal_places=2)
     ebe = serializers.DecimalField(max_digits=15, decimal_places=2)
@@ -302,3 +308,92 @@ class DelaisFournisseursSerializer(serializers.Serializer):
     achats = serializers.DecimalField(max_digits=15, decimal_places=2)
     delais_jours = serializers.DecimalField(max_digits=10, decimal_places=1, required=False, allow_null=True)
     variation = serializers.DecimalField(max_digits=10, decimal_places=1, required=False, allow_null=True)
+
+class MonthlyEvolutionDataSerializer(serializers.Serializer):
+    mois = serializers.CharField()
+    montant = serializers.FloatField(required=False)
+    marge_brute = serializers.FloatField(required=False)
+    marge_nette = serializers.FloatField(required=False)
+    marge_op = serializers.FloatField(required=False)
+    roe = serializers.FloatField(required=False)
+    roa = serializers.FloatField(required=False)
+    bfr = serializers.FloatField(required=False)
+    ebe = serializers.FloatField(required=False)
+    leverage = serializers.FloatField(required=False)
+    ca = serializers.FloatField(required=False)
+    charges = serializers.FloatField(required=False)
+    resultatNet = serializers.FloatField(required=False)
+    name = serializers.CharField(required=False)
+    date = serializers.CharField()
+
+class EvolutionResponseSerializer(serializers.Serializer):
+    evolution = MonthlyEvolutionDataSerializer(many=True)
+    periode_debut = serializers.CharField()
+    periode_fin = serializers.CharField()
+
+class TopCompteSerializer(serializers.Serializer):
+    compte = serializers.CharField()
+    libelle = serializers.CharField()
+    mt_mvt = serializers.FloatField()
+
+class BilanKpiGroupSerializer(serializers.Serializer):
+    actif_courant = serializers.FloatField()
+    actif_non_courant = serializers.FloatField()
+    passif_courant = serializers.FloatField()
+    passif_non_courant = serializers.FloatField()
+    capitaux_propres = serializers.FloatField()
+    ratio_endettement = serializers.FloatField()
+    produits = serializers.FloatField(required=False)
+    charges = serializers.FloatField(required=False)
+
+class BilanKpiResponseSerializer(serializers.Serializer):
+    current = BilanKpiGroupSerializer()
+    previous = BilanKpiGroupSerializer()
+    variations = BilanKpiGroupSerializer()
+
+class JournalRepartitionSerializer(serializers.Serializer):
+    label = serializers.CharField()
+    montant = serializers.FloatField()
+    pourcentage = serializers.FloatField(required=False)
+    montant_debit = serializers.FloatField(required=False)
+    montant_credit = serializers.FloatField(required=False)
+
+class JournalDateRangeSerializer(serializers.Serializer):
+    min_date = serializers.DateField(allow_null=True)
+    max_date = serializers.DateField(allow_null=True)
+
+class DashboardIndicatorsResponseSerializer(serializers.Serializer):
+    ca = serializers.DecimalField(max_digits=15, decimal_places=2)
+    ebe = serializers.DecimalField(max_digits=15, decimal_places=2)
+    resultat_net = serializers.DecimalField(max_digits=15, decimal_places=2)
+    caf = serializers.DecimalField(max_digits=15, decimal_places=2)
+    bfr = serializers.DecimalField(max_digits=15, decimal_places=2)
+    leverage = serializers.DecimalField(max_digits=15, decimal_places=2)
+    tresorerie = serializers.DecimalField(max_digits=15, decimal_places=2)
+    total_balance = serializers.DecimalField(max_digits=15, decimal_places=2)
+    ratios = serializers.DictField()
+    roe_data = serializers.DictField()
+    roa_data = serializers.DictField()
+    gearing_data = serializers.DictField()
+    rotation_stock_data = serializers.DictField()
+    marge_operationnelle_data = serializers.DictField()
+    variations = serializers.DictField()
+
+class RoeRoaSerializer(serializers.Serializer):
+    resultat_net = serializers.FloatField()
+    fonds_propres = serializers.FloatField(required=False)
+    total_actif = serializers.FloatField(required=False)
+    roe = serializers.FloatField(allow_null=True, required=False)
+    roa = serializers.FloatField(allow_null=True, required=False)
+    variation = serializers.FloatField(allow_null=True, required=False)
+
+class TVASerializer(serializers.Serializer):
+    tva_collectee = serializers.DecimalField(max_digits=15, decimal_places=2)
+    tva_deductible = serializers.DecimalField(max_digits=15, decimal_places=2)
+    tva_nette = serializers.DecimalField(max_digits=15, decimal_places=2)
+
+class EmptySerializer(serializers.Serializer):
+    pass
+
+class MessageResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()

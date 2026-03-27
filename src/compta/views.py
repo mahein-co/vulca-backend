@@ -6,25 +6,29 @@ from datetime import datetime, date
 from django.core.exceptions import ValidationError
 from django.db.models import Sum, Max, Min, DecimalField, Case, When, Q
 
-from rest_framework import generics, status
+from rest_framework import generics, status, serializers
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from vulca_backend import settings
 from ocr.utils import clean_ai_json, generate_description
 from ocr.models import FileSource, FormSource
 # from chatbot.models import ChatMessage, MessageHistory, RAGContent
-
 from compta.models import Journal, GrandLivre, Bilan, CompteResultat, Balance, Project, ProjectAccess
 from compta.serializers import (
     JournalSerializer, BilanSerializer, BalanceSerializer, CompteResultatSerializer,
     ChiffreAffaireSerializer, EbeSerializer, ResultatNetSerializer, BfrSerializer,
-    CafSerializer, LeverageSerializer, AnnuiteCafSerializer, MargeNetteSerializer,
+    CafSerializer, LeverageSerializer, TresorerieSerializer, AnnuiteCafSerializer, MargeNetteSerializer,
     DetteLmtCafSerializer, ChargeEbeSerializer, ChargeCaSerializer, MargeEndettementSerializer,
     CurrentRatioSerializer, QuickRatioSerializer, GearingSerializer, RotationStockSerializer,
     MargeOperationnelleSerializer, MargeBruteSerializer, DelaisClientsSerializer, DelaisFournisseursSerializer,
-    ProjectSerializer, ProjectAccessSerializer, ProjectListSerializer
+    ProjectSerializer, ProjectAccessSerializer, ProjectListSerializer,
+    MonthlyEvolutionDataSerializer, EvolutionResponseSerializer, TopCompteSerializer,
+    BilanKpiGroupSerializer, BilanKpiResponseSerializer, JournalRepartitionSerializer,
+    JournalDateRangeSerializer, DashboardIndicatorsResponseSerializer, RoeRoaSerializer, TVASerializer,
+    EmptySerializer, MessageResponseSerializer
 )
 from compta.kpi_utils import (
     get_latest_bilan_sum, get_cr_sum, get_resultat_net, 
@@ -39,6 +43,16 @@ from vulca_backend import settings
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("type", type=str, description="Type de journal (ex: ACH, VEN, BQ)"),
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+        OpenApiParameter("search", type=str, description="Terme de recherche"),
+        OpenApiParameter("page", type=int, description="Numéro de page"),
+    ],
+    responses={200: JournalSerializer(many=True)}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def list_journals_view(request):
@@ -99,6 +113,13 @@ def list_journals_view(request):
     return response
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: JournalRepartitionSerializer(many=True)}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def journal_repartition_view(request):
@@ -957,6 +978,8 @@ class CompteResultatDetailView(generics.RetrieveUpdateDestroyAPIView):
         return CompteResultat.objects.filter(project_id=project_id)
 
 
+@extend_schema(responses={200: serializers.Serializer})
+@extend_schema(request=EmptySerializer, responses={200: MessageResponseSerializer})
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def ai_dashboard_analysis_view(request):
@@ -1010,6 +1033,8 @@ def ai_dashboard_analysis_view(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@extend_schema(responses={200: serializers.Serializer})
+@extend_schema(request=EmptySerializer, responses={200: MessageResponseSerializer})
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def compte_resultat_ai_analysis_view(request):
@@ -1054,6 +1079,7 @@ def compte_resultat_ai_analysis_view(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@extend_schema(request=BilanSerializer, responses={201: BilanSerializer})
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def create_bilan_manual_view(request):
@@ -1095,6 +1121,7 @@ def create_bilan_manual_view(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@extend_schema(request=CompteResultatSerializer, responses={201: CompteResultatSerializer})
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def create_compte_resultat_manual_view(request):
@@ -1137,6 +1164,8 @@ def create_compte_resultat_manual_view(request):
 
 
 # GENERATE JOURNAL VIEW
+@extend_schema(responses={200: serializers.Serializer})
+@extend_schema(request=EmptySerializer, responses={200: MessageResponseSerializer})
 @api_view(["POST"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def generate_journal_view(request):
@@ -1171,6 +1200,20 @@ def generate_journal_view(request):
         return Response({"error": str(e)}, status=500)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: ChiffreAffaireSerializer}
+)
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: ChiffreAffaireSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def chiffre_affaire_view(request):
@@ -1243,6 +1286,20 @@ def chiffre_affaire_view(request):
         "total_debit": Decimal("0.00")
     })
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EbeSerializer}
+)
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EbeSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def ebe_view(request):
@@ -1316,6 +1373,13 @@ def ebe_view(request):
         "charges_personnel": Decimal("0.00")
     })
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: MargeBruteSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def marge_brute_view(request):
@@ -1399,6 +1463,13 @@ def marge_brute_view(request):
         "variation": variation
     })
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: MargeNetteSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def marge_nette_view(request):
@@ -1470,6 +1541,13 @@ def marge_nette_view(request):
         "variation": variation
     })
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: BfrSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def bfr_view(request):
@@ -1599,6 +1677,13 @@ def bfr_view(request):
         "variation": variation
     })
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: TresorerieSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def tresorerie_view(request):
@@ -1692,6 +1777,13 @@ def tresorerie_view(request):
     })
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_tresorerie_view(request):
@@ -1770,6 +1862,13 @@ def evolution_tresorerie_view(request):
     })
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_marges_view(request):
@@ -1894,6 +1993,13 @@ def evolution_marges_view(request):
     })
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_caf_view(request):
@@ -1981,6 +2087,13 @@ def evolution_caf_view(request):
     })
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_marge_operationnelle_view(request):
@@ -2071,6 +2184,13 @@ def evolution_marge_operationnelle_view(request):
     })
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_roe_view(request):
@@ -2157,6 +2277,13 @@ def evolution_roe_view(request):
     })
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_roa_view(request):
@@ -2243,6 +2370,13 @@ def evolution_roa_view(request):
 # ============================================================
 # EVOLUTION BFR
 # ============================================================
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_bfr_view(request):
@@ -2316,6 +2450,13 @@ def evolution_bfr_view(request):
 # ============================================================
 # EVOLUTION EBE
 # ============================================================
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_ebe_view(request):
@@ -2386,6 +2527,13 @@ def evolution_ebe_view(request):
 # ============================================================
 # EVOLUTION LEVERAGE BRUT
 # ============================================================
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_leverage_brut_view(request):
@@ -2471,6 +2619,13 @@ def evolution_leverage_brut_view(request):
     })
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def resultat_net_view(request):  #partie corriger
@@ -2589,94 +2744,13 @@ def resultat_net_view(request):  #partie corriger
     return Response(serializer.data)
 
 
-
-@api_view(["GET"])
-@permission_classes([IsAuthenticated, HasProjectAccess])
-def bfr_view(request):
-    """
-    Calcul du BFR avec variation par rapport à la période précédente
-    GET /api/bfr/?date_start=2025-01-01&date_end=2025-12-31
-    """
-    from datetime import datetime
-    from dateutil.relativedelta import relativedelta
-
-    date_start = request.GET.get("date_start")
-    date_end = request.GET.get("date_end")
-
-    def calculate_bfr(start_date, end_date):
-        """Fonction helper pour calculer le BFR pour une période donnée"""
-        filters = {}
-        if start_date and end_date:
-            filters["date__range"] = [start_date, end_date]
-
-        # Actif circulant
-        actif_circulant = (
-            Bilan.objects
-            .filter(type_bilan="ACTIF", categorie="ACTIF_COURANTS", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        # Passif circulant
-        passif_circulant = (
-            Bilan.objects
-            .filter(type_bilan="PASSIF", categorie="PASSIFS_COURANTS", **filters)
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-
-        return actif_circulant - passif_circulant
-
-    # Calcul période courante
-    current_bfr = calculate_bfr(date_start, date_end)
-    
-    # Calcul période précédente et variation
-    variation = None
-    if date_start and date_end:
-        try:
-            start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
-            end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
-            
-            delta_days = (end_date_obj - start_date_obj).days
-            
-            if delta_days >= 360:  # Annuel
-                previous_start = (start_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
-                previous_end = (end_date_obj - relativedelta(years=1)).strftime('%Y-%m-%d')
-            elif 28 <= delta_days <= 32:  # Mensuel
-                previous_start = (start_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
-                previous_end = (end_date_obj - relativedelta(months=1)).strftime('%Y-%m-%d')
-            elif 88 <= delta_days <= 92:  # Trimestriel
-                previous_start = (start_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
-                previous_end = (end_date_obj - relativedelta(months=3)).strftime('%Y-%m-%d')
-            else:
-                previous_end = (start_date_obj - relativedelta(days=1)).strftime('%Y-%m-%d')
-                previous_start = (start_date_obj - relativedelta(days=delta_days + 1)).strftime('%Y-%m-%d')
-            
-            previous_bfr = calculate_bfr(previous_start, previous_end)
-            
-            # Calculer variation en pourcentage
-            # Éviter les pourcentages aberrants si la valeur précédente est trop faible
-            if previous_bfr != 0 and abs(previous_bfr) > 50000:  # Seuil minimum 50000 Ar
-                variation = ((current_bfr - previous_bfr) / abs(previous_bfr)) * 100
-                # Plafonner la variation à ±1000%
-                if variation > 1000:
-                    variation = 1000
-                elif variation < -1000:
-                    variation = -1000
-            else:
-                variation = None
-        except:
-            pass
-
-    return Response({
-        "bfr": current_bfr,
-        "variation": variation,
-        "stocks": Decimal("0.00"),
-        "creances_clients": Decimal("0.00"),
-        "autres_creances": Decimal("0.00"),
-        "dettes_fournisseurs": Decimal("0.00"),
-        "autres_dettes": Decimal("0.00")
-    })
-
-
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: CafSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def caf_view(request):
@@ -2858,6 +2932,13 @@ def caf_view(request):
 
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def leverage_brut_view(request):
@@ -2928,6 +3009,13 @@ def leverage_brut_view(request):
         "variation": variation
     })
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def evolution_ca_resultat_view(request):
@@ -3039,6 +3127,13 @@ def evolution_ca_resultat_view(request):
 
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def annuite_caf_view(request):
@@ -3171,6 +3266,13 @@ def annuite_caf_view(request):
         return Response({"error": "Database unavailable", "details": str(e)}, status=503)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: DashboardIndicatorsResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def dashboard_indicators_view(request):
@@ -3373,6 +3475,7 @@ def dashboard_indicators_view(request):
 
 
 
+@extend_schema(responses={200: JournalDateRangeSerializer})
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def journal_date_range_view(request):
@@ -3388,6 +3491,13 @@ def journal_date_range_view(request):
         "max_date": agg['max_date']
     })
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: BalanceSerializer(many=True)}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def balance_generale_view(request):
@@ -3447,6 +3557,13 @@ def balance_generale_view(request):
         return Response({"error": str(e)}, status=500)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: DetteLmtCafSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def dette_lmt_caf_view(request):
@@ -3520,6 +3637,13 @@ def dette_lmt_caf_view(request):
     serializer = DetteLmtCafSerializer(payload)
     return Response(serializer.data)
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: MargeNetteSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def resultat_net_ca_view(request):
@@ -3583,6 +3707,13 @@ def resultat_net_ca_view(request):
     serializer = MargeNetteSerializer(payload)
     return Response(serializer.data)
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: ChargeEbeSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def charge_ebe_view(request):
@@ -3636,6 +3767,13 @@ def charge_ebe_view(request):
     serializer = ChargeEbeSerializer(payload)
     return Response(serializer.data)
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: ChargeCaSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def charge_ca_view(request):
@@ -3682,6 +3820,13 @@ def charge_ca_view(request):
     serializer = ChargeCaSerializer(payload)
     return Response(serializer.data)
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: MargeEndettementSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def marge_endettement_view(request):
@@ -3733,6 +3878,7 @@ def marge_endettement_view(request):
     serializer = MargeEndettementSerializer(payload)
     return Response(serializer.data)
 
+@extend_schema(responses={200: JournalDateRangeSerializer})
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def get_min_journal_date_view(request):
@@ -3754,6 +3900,7 @@ def get_min_journal_date_view(request):
 
 
 
+@extend_schema(responses={200: TopCompteSerializer(many=True)})
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def top_comptes_mouvementes_view(request):
@@ -3814,6 +3961,13 @@ def top_comptes_mouvementes_view(request):
 
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: RoeRoaSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def roe_view(request):
@@ -3892,6 +4046,13 @@ def roe_view(request):
         "variation": variation
     })
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: RoeRoaSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def roa_view(request):
@@ -3972,6 +4133,13 @@ def roa_view(request):
         "variation": variation
     })
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: CurrentRatioSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def current_ratio_view(request):
@@ -4051,6 +4219,13 @@ def current_ratio_view(request):
     serializer = CurrentRatioSerializer(payload)
     return Response(serializer.data)
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: QuickRatioSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def quick_ratio_view(request):
@@ -4144,6 +4319,13 @@ def quick_ratio_view(request):
     return Response(serializer.data)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: GearingSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def gearing_view(request):
@@ -4223,6 +4405,13 @@ def gearing_view(request):
     return Response(serializer.data)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: RotationStockSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def rotation_stock_view(request):
@@ -4315,6 +4504,13 @@ def rotation_stock_view(request):
     return Response(serializer.data)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: MargeOperationnelleSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def marge_operationnelle_view(request):
@@ -4416,6 +4612,13 @@ def marge_operationnelle_view(request):
     serializer = MargeOperationnelleSerializer(payload)
     return Response(serializer.data)
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: JournalRepartitionSerializer(many=True)}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def repartition_produits_charges_view(request):
@@ -4506,6 +4709,13 @@ def repartition_produits_charges_view(request):
 
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: BilanKpiResponseSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def bilan_kpis_with_variations_view(request):
@@ -4663,6 +4873,7 @@ def bilan_kpis_with_variations_view(request):
 
 
 
+@extend_schema(responses={200: serializers.ListField(child=serializers.IntegerField())})
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def get_available_years_view(request):
@@ -4714,6 +4925,13 @@ def get_available_years_view(request):
     return Response(available_years)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: TVASerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def tva_view(request):
@@ -4831,6 +5049,13 @@ def tva_view(request):
     })
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: MonthlyEvolutionDataSerializer(many=True)}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def amortissements_exercice_view(request):
@@ -4883,6 +5108,13 @@ def amortissements_exercice_view(request):
     return Response(data)
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: DelaisClientsSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def delais_clients_view(request):
@@ -4979,6 +5211,13 @@ def delais_clients_view(request):
     })
 
 
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+    ],
+    responses={200: DelaisFournisseursSerializer}
+)
 @api_view(["GET"])
 @permission_classes([IsAuthenticated, HasProjectAccess])
 def delais_fournisseurs_view(request):
@@ -5216,6 +5455,10 @@ class ManageAccessRequestsView(generics.ListAPIView):
         status_filter = self.request.query_params.get('status', 'pending')
         return ProjectAccess.objects.filter(status=status_filter)
 
+    @extend_schema(
+        request=serializers.Serializer, # Technical placeholder or specific one
+        responses={200: ProjectAccessSerializer}
+    )
     def post(self, request):
         """Approuver ou rejeter une demande"""
         access_id = request.data.get('access_id')

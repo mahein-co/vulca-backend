@@ -80,7 +80,8 @@ def search_similar_pages(query_embedding, project_id, top_k=5, threshold=0.9):
         .order_by("distance")[:top_k]
     )
 
-    backend_url = getattr(settings, "BACKEND_URL", "https://api.lexaiq.com")
+    # Utiliser le domaine de production par défaut si non spécifié
+    backend_url = getattr(settings, "BACKEND_URL", "https://api.rekapy.com")
         
     unique_sources = {}
     for page in results:

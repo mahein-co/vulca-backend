@@ -176,9 +176,9 @@ CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 CORS_ALLOW_ALL_ORIGINS = False
 
 # Regex patterns for allowed origins (for subdomains)
-# This allows https://www.lexaiq.com, https://api.lexaiq.com, and https://lexaiq.com
+# This allows https://www.rekapy.com, https://api.rekapy.com, and https://rekapy.com
 CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://(\w+\.)?lexaiq\.com$",  # Allows all subdomains of lexaiq.com
+    r"^https://(\w+\.)?rekapy\.com$",  # Allows all subdomains of rekapy.com
 ]
 
 CORS_ALLOW_HEADERS = [
@@ -194,40 +194,36 @@ CORS_ALLOW_HEADERS = [
     'x-project-id',
 ]
 
-# Explicit allowed origins - Configuration basée sur l'environnement
-if ENVIRONMENT == 'development':
-    CORS_ALLOWED_ORIGINS = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ]
-    CSRF_TRUSTED_ORIGINS = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ]
-else:
+# Explicit allowed origins
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "https://www.rekapy.com",
+    "https://rekapy.com",
+    "https://api.rekapy.com",
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "https://www.rekapy.com",
+    "https://rekapy.com",
+    "https://api.rekapy.com",
+]
+
+if ENVIRONMENT != 'development':
     DEBUG = os.getenv('DEBUG', 'False') == 'True'
     ALLOWED_HOSTS = [
-        "api.lexaiq.com", 
-        "lexaiq.com", 
-        "www.lexaiq.com", 
+        "api.rekapy.com", 
+        "rekapy.com", 
+        "www.rekapy.com", 
         ".render.com", 
         "localhost", 
         "127.0.0.1"
-    ]
-    # Production - Domaines lexaiq.com (frontend: www.lexaiq.com, backend: api.lexaiq.com)
-    CORS_ALLOWED_ORIGINS = [
-        "https://www.lexaiq.com",
-        "https://lexaiq.com",
-        "https://api.lexaiq.com",
-    ]
-    CSRF_TRUSTED_ORIGINS = [
-        "https://www.lexaiq.com",
-        "https://lexaiq.com",
-        "https://api.lexaiq.com",
     ]
     
     # ✅ CRITICAL: Expose headers to allow frontend to read response headers
@@ -238,7 +234,7 @@ else:
     ]
 
 # Security settings for cookies (important for production)
-# Puisque frontend (www.lexaiq.com) et backend (api.lexaiq.com) partagent le même domaine racine,
+# Puisque frontend (www.rekapy.com) et backend (api.rekapy.com) partagent le même domaine racine,
 # on peut utiliser SameSite="Lax" au lieu de "None", ce qui est plus sécurisé
 CSRF_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_HTTPONLY = False
@@ -248,8 +244,8 @@ SESSION_COOKIE_SAMESITE = "Lax"
 if not DEBUG:
     # Définir le domaine racine pour partager les cookies entre sous-domaines
     # SIMPLIFICATION: On laisse le domaine par défaut (Host-Only) pour éviter les problèmes de Public Suffix
-    # SESSION_COOKIE_DOMAIN = ".lexaiq.com"
-    # CSRF_COOKIE_DOMAIN = ".lexaiq.com"
+    # SESSION_COOKIE_DOMAIN = ".rekapy.com"
+    # CSRF_COOKIE_DOMAIN = ".rekapy.com"
     # Utiliser SameSite="None" + Secure=True pour une compatibilité maximale cross-subdomain
     SESSION_COOKIE_SAMESITE = "None"
     CSRF_COOKIE_SAMESITE = "None"
@@ -295,8 +291,8 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 
 
-# Environment
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+# Environment (Déjà défini au début du fichier)
+# ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
 # === Email Configuration (Brevo SMTP - Shared) ===
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"

@@ -243,19 +243,19 @@ class MyTokenObtainPairView(TokenObtainPairView):
         host = request.get_host()
         print(f"DEBUG: Request Host is: {host}", file=sys.stderr)
         
-        is_production = "lexaiq.com" in host or not settings.DEBUG
+        is_production = "rekapy.com" in host or not settings.DEBUG
         
         if is_production:
             # Production configuration (Robust)
-            # We remove 'domain' to make it a Host-Only cookie for api.lexaiq.com
-            # With SameSite=None, this allows it to be sent from lexaiq.com
+            # We remove 'domain' to make it a Host-Only cookie for api.rekapy.com
+            # With SameSite=None, this allows it to be sent from rekapy.com
             cookie_params = {
                 "httponly": True,
                 "secure": True,      # Always Secure in prod
                 "samesite": "None",  # None is most robust for cross-subdomain/site
                 "path": "/",
                 "max_age": 86400,  # 1 day for access token
-                # "domain": ".lexaiq.com"  <-- SIMPLIFICATION: Remove explicit domain
+                # "domain": ".rekapy.com"  <-- SIMPLIFICATION: Remove explicit domain
             }
             refresh_cookie_params = {
                 "httponly": True,
@@ -316,7 +316,7 @@ def register_user(request):
         otp_token.refresh_from_db()
 
         # Détermination du lien frontend
-        # frontend_url = getattr(settings, "FRONTEND_URL", "https://www.lexaiq.com")
+        # frontend_url = getattr(settings, "FRONTEND_URL", "https://www.rekapy.com")
         frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3000")
         verification_url = f"{frontend_url}/auth/verify-email/{user.username}"
 
@@ -412,7 +412,7 @@ class CookieTokenRefreshView(TokenRefreshView):
         
         # Determine if we are in production based on hostname or settings
         host = request.get_host()
-        is_production = "lexaiq.com" in host or not settings.DEBUG
+        is_production = "rekapy.com" in host or not settings.DEBUG
         
         if is_production:
             cookie_params = {
@@ -420,7 +420,7 @@ class CookieTokenRefreshView(TokenRefreshView):
                 "secure": True,
                 "samesite": "None",
                 "path": "/",
-                # "domain": ".lexaiq.com" # Simplification: Host-Only
+                # "domain": ".rekapy.com" # Simplification: Host-Only
             }
         else:
             cookie_params = {
@@ -481,7 +481,7 @@ class ResendOtpAPIView(APIView):
                 otp_expires_at=timezone.now() + timezone.timedelta(minutes=5)
             )
 
-            frontend_url = getattr(settings, "FRONTEND_URL", "https://www.lexaiq.com")
+            frontend_url = getattr(settings, "FRONTEND_URL", "https://www.rekapy.com")
             verification_url = f"{frontend_url}/auth/verify-email/{user.username}"
 
             sender = settings.EMAIL_HOST_USER

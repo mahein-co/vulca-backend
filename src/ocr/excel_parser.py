@@ -107,6 +107,16 @@ class ExcelParser:
                 df = self._clean_column_names(df)
                 print(f"    Noms de colonnes nettoys")
                 
+                # DEBUG: Print raw rows around 'Autres charges' BEFORE any cleaning
+                print(f"\n   [DEBUG-RAW] === RAW DATAFRAME BEFORE CLEANING for sheet '{sheet_name}' ===")
+                for debug_idx, debug_row in df.iterrows():
+                    row_str_vals = [str(v) for v in debug_row.values]
+                    row_combined = ' | '.join(row_str_vals[:6])  # First 6 columns
+                    if any(kw in row_combined.lower() for kw in ['autres charges', 'dotation', '647', '648']):
+                        print(f"   [DEBUG-RAW] Row {debug_idx}: {row_combined}")
+                print(f"   [DEBUG-RAW] Columns: {list(df.columns)}")
+                print(f"   [DEBUG-RAW] === END RAW DATA ===\n")
+                
                 # Nettoyer les données
                 df = self._clean_dataframe(df, sheet_name=sheet_name)
                 print(f"    Nettoyage russi - Shape aprs nettoyage: {df.shape}")

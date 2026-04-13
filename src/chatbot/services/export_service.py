@@ -72,7 +72,7 @@ def _normalize_export_data(data):
 
 class ExportService:
     """
-    Service pour générer des rapports professionnels (Excel & PDF) pour REKAPY.
+    Service pour générer des rapports professionnels (Excel & PDF) pour Rekapy.
     """
 
     @staticmethod
@@ -124,7 +124,7 @@ class ExportService:
         })
 
         # Titre et Header
-        sheet.write(0, 0, f"REKAPY - {report_type}", title_format)
+        sheet.write(0, 0, f"Rekapy - {report_type}", title_format)
         sheet.write(1, 0, f"Généré le: {datetime.now().strftime('%d/%m/%Y à %H:%M')}", workbook.add_format({'italic': True, 'font_size': 10}))
         
         row = 3
@@ -262,7 +262,7 @@ class ExportService:
         buffer = io.BytesIO()
         
         def _pdf_footer(canvas, doc):
-            """Pied de page structuré type REKAPY : -- Page N --"""
+            """Pied de page structuré type Rekapy : -- Page N --"""
             canvas.saveState()
             page_num = canvas.getPageNumber()
             canvas.setFont("Helvetica", 9)
@@ -316,7 +316,7 @@ class ExportService:
         )
 
         # Header
-        elements.append(Paragraph(f"REKAPY - {report_type}", title_style))
+        elements.append(Paragraph(f"Rekapy - {report_type}", title_style))
         elements.append(Paragraph(f"Généré le: {datetime.now().strftime('%d/%m/%Y à %H:%M')}", subtitle_style))
 
         bilan_data, res_data, comp_data = _normalize_export_data(data)

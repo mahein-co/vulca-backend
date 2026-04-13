@@ -250,9 +250,14 @@ class DataCleaner:
             
             # Si la colonne contient des années (2021.00, 2022.00, etc.)
             if re.match(r'^\d{4}\.?\d*$', col_str):
-                year = int(float(col_str))
-                new_columns[col] = str(year)
-                self.cleaning_stats['columns_renamed'] += 1
+                try:
+                    year = int(float(col_str))
+                    if 1900 <= year <= 2100:
+                        new_columns[col] = str(year)
+                        self.cleaning_stats['columns_renamed'] += 1
+                        continue # Passer à la colonne suivante, ne pas renommer en COMPTE
+                except (ValueError, TypeError):
+                    pass
             
             # Si c'est une colonne "Unnamed" qu'on a gardée
             elif 'Unnamed' in col_str:
@@ -345,7 +350,7 @@ class DataCleaner:
             col_data = df[col]
             if hasattr(col_data, 'dtype') and col_data.dtype == 'object':
                 val_as_str = col_data.astype(str).str.strip().str.replace(',', '.')
-                val_is_zero_str = val_as_str.isin(['0', '0.0', '0.00', 'nan', 'null', 'None', ''])
+                val_is_zero_str = val_as_str.isin(['0', '0.0', '0.00', 'nan', 'null', 'None', '', '-', ' - ', '0,00'])
                 val_is_significant &= (~val_is_zero_str)
 
             mask |= val_is_significant
@@ -424,9 +429,10 @@ class DataCleaner:
             'total', 'sous-total', 'subtotal', 'somme', 'sum',
             'solde', 'balance', 'cumul', 'total :',
             'tresorerie', 'trésorerie', 'créances et assimilés', 'creances et assimiles', 'créances et assimiles',
-            "chiffre d'affaires", "chiffre d affaires", "chiffres d'affaires",
+            # "chiffre d'affaires" retiré pour être importé comme compte 70
             'valeur ajoutee', 'valeur ajoutée', 'excedent brut', 'excédent brut',
             'production de l\'exercice', 'consommation de l\'exercice',
+            'resultat de l\'exercice', 'résultat de l\'exercice', 'rn', 'benefice', 'bénéfice', 'perte'
         ]
         
         import re as _re

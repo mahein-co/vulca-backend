@@ -5,9 +5,10 @@ import dj_database_url
 from datetime import timedelta
 import smtplib 
 
-load_dotenv()
-
 BASE_DIR = Path(__file__).resolve().parent.parent
+# Load .env from project root (one level up from src/)
+env_path = BASE_DIR.parent / '.env'
+load_dotenv(env_path)
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
@@ -138,8 +139,8 @@ REST_FRAMEWORK = {
 
 # Configuration Swagger / OpenAPI
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'VULCA API',
-    'DESCRIPTION': 'Documentation interactive de l\'API backend VULCA.',
+    'TITLE': 'Rekapy API',
+    'DESCRIPTION': 'Documentation interactive de l\'API backend Rekapy.',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'APPEND_COMPONENTS': {
@@ -297,39 +298,15 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Environment
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
-# Email Configuration
-if ENVIRONMENT == "production":
-    EMAIL_BACKEND = "sendgrid_backend.SendgridBackend"
-    SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-else:
-    # Gmail SMTP for development
-    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-    EMAIL_HOST = "smtp.gmail.com"
-    EMAIL_PORT = 587
-    EMAIL_USE_TLS = True
-    EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER_GMAIL")
-    EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD_GMAIL")
+# === Email Configuration (Brevo SMTP - Shared) ===
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = "smtp-relay.brevo.com"
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = os.getenv("BREVO_SMTP_LOGIN")        # Brevo account email
+EMAIL_HOST_PASSWORD = os.getenv("BREVO_API_KEY")       # SMTP Key
 
 DEFAULT_FROM_EMAIL = os.getenv(
     "DEFAULT_FROM_EMAIL",
-    "VulcaIA <yurihoussen@gmail.com>"
+    "Rekapy <manambina316@gmail.com>"
 )
-
-
-# SMTP
-
-'''
-EMAIL_BACKEND = os.getenv("EMAIL_BACKEND")
-
-EMAIL_HOST = os.getenv("EMAIL_HOST")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", 587))
-# EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True") == "True"
-EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() in ["true", "1", "yes"]
-
-
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
-
-DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
-
-'''

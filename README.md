@@ -19,6 +19,7 @@ REKAPY est le moteur de gestion comptable automatisée du projet REKAPY. Il util
 ## ⚙️ Installation
 
 ### Prérequis
+
 - Python 3.11+
 - Tesseract OCR installé et dans le PATH
 - Poppler-utils installé
@@ -26,11 +27,13 @@ REKAPY est le moteur de gestion comptable automatisée du projet REKAPY. Il util
 ### Étapes d'installation
 
 1. **Naviguer vers le module backend** :
+
    ```bash
    cd vulca-backend/src
    ```
 
 2. **Créer et activer un environnement virtuel** :
+
    ```bash
    python -m venv .venv
    # Windows:
@@ -40,12 +43,14 @@ REKAPY est le moteur de gestion comptable automatisée du projet REKAPY. Il util
    ```
 
 3. **Installer les dépendances** :
+
    ```bash
    pip install -r requirements.txt
    ```
 
 4. **Configurer l'environnement** :
    Créer un fichier `.env` dans `vulca-backend/` (ou `vulca-backend/src/` selon votre configuration `settings.py`) :
+
    ```env
    DATABASE_URL=postgresql://user:password@localhost:5432/vulca_db
    OPENAI_API_KEY=votre-cle-openai
@@ -54,6 +59,7 @@ REKAPY est le moteur de gestion comptable automatisée du projet REKAPY. Il util
    ```
 
 5. **Appliquer les migrations** :
+
    ```bash
    python manage.py migrate
    ```
@@ -71,4 +77,5 @@ REKAPY est le moteur de gestion comptable automatisée du projet REKAPY. Il util
 - `GET /api/bilans/` : États du bilan.
 
 ---
-© 2026 VULCA Project
+
+© 2026 Rekapy Project

@@ -209,8 +209,9 @@ INSTRUCTIONS IMPORTANTES POUR L'EXTRACTION:
    - **EXTRAIS TOUTES LES COLONNES NUMÉRIQUES**. Si tu vois des chiffres pour chaque ligne, crée une colonne correspondante.
    - Si une colonne de montants correspond à une année, utilise l'année comme titre (ex: "2024").
 
-5. **EXTRACTION EXHAUSTIVE (CRUCIAL)** :
-   - Extraits TOUTES les lignes du document, du début à la fin.
+5. **EXTRACTION EXHAUSTIVE ET FIDÈLE (CRUCIAL STRICT)** :
+   - Extrais TOUTES les lignes du document, du début à la fin.
+   - **N'INVENTE RIEN**. Si une cellule de montant est vide, contient '-', ou s'il n'y a pas de valeur explicitement écrite sur cette ligne pour cette année, tu DOIS retourner `0` ou `null`. IL EST STRICTEMENT INTERDIT d'inventer un montant ou de le déduire d'une autre ligne.
    - **NE FILTRE PAS PAR ANNÉE** : Même si la feuille s'appelle "{sheet_name}", tu dois extraire TOUTES les dates présentes (1900, 2020, 2024, etc.).
    - Ne saute aucune ligne sous prétexte qu'elle appartient à une ancienne période.
    - Si le document fait 500 lignes, tu dois extraire les 500 lignes.
@@ -245,23 +246,19 @@ RÈGLES DE DÉTECTION DU TYPE:
 NE RETOURNE QUE LE JSON, AUCUN TEXTE SUPPLÉMENTAIRE."""
 
     try:
+        # STRATÉGIE ANTI-HALLUCINATION :
+        # On n'envoie PLUS l'image à l'IA. On a remarqué que le modèle Vision hallucine 
+        # (copie-colle des valeurs de lignes supérieures dans des cases vides) quand il regarde 
+        # l'image d'un tableur dense. Étant donné que le document est un vrai fichier Excel, 
+        # df_text (le Markdown généré par Pandas) est 100% mathématiquement exact.
+        # On force donc l'IA à analyser UNIQUEMENT le texte parfait.
+        
         response = client.chat.completions.create(
             model=model,
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{base64_image}"
-                            }
-                        }
-                    ]
+                    "content": prompt
                 }
             ],
             max_tokens=8000,
@@ -363,6 +360,15 @@ NE RETOURNE QUE LE JSON, AUCUN TEXTE SUPPLÉMENTAIRE."""
                     f"Contenu: {content[:100]}..."
                 ) from json_err
         
+        # DEBUG DUMP: Enregistrer la réponse brute de l'IA pour diagnostic
+        try:
+            with open(r'd:\mahein-co\vision_debug_dump.json', 'a', encoding='utf-8') as f:
+                f.write(f"\n--- SHEET: {sheet_name} ---\n")
+                f.write(content)
+                f.write("\n")
+        except Exception:
+            pass
+
         return result
         
     except Exception as e:
@@ -534,6 +540,21 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
         df_original = df_original.dropna(axis=0, how='all')
         df_original = df_original.reset_index(drop=True)
         
+        # --- FIX EXTRÊME: SUPPRESSION DES COLONNES POUBELLES (HORS ZONE) ---
+        # Si des montants aléatoires sont tapés très loin à droite des années (ex: col G, H)
+        # l'IA les force dans la colonne 2024 pour satisfaire le JSON.
+        # On va donc couper le dataframe Python de façon draconienne après la dernière année.
+        last_year_col_idx = -1
+        for idx, row in df_original.iterrows():
+            years_found = [i for i, val in enumerate(row) if str(val).strip().replace('.0','').isdigit() and 1900 <= int(str(val).strip().replace('.0','')) <= 2100]
+            if len(years_found) >= 2:
+                last_year_col_idx = years_found[-1]
+                break
+        
+        if last_year_col_idx != -1:
+            # On conserve du début jusqu'à la dernière colonne de l'année
+            df_original = df_original.iloc[:, :last_year_col_idx + 1]
+            
         if df_original.empty:
             print(f"   [WARNING] Feuille vide, ignoree")
             continue
@@ -543,8 +564,19 @@ def extract_excel_with_ocr(file, client, model: str) -> Dict:
         image = convert_excel_sheet_to_image(df_original, sheet_name)
         
         print(f"   [INFO] Extraction OCR avec OpenAI Vision (avec fallback texte)...")
-        # Préparer une version texte pour aider l'IA (fallback si l'image est refusée)
-        df_text = df_original.to_csv(index=False, sep=';')
+        # Générateur Markdown natif avec "briques" explicites (-) 
+        # Remplir les cases vides par des tirets "-" force l'engine GPT à compter exactement le nombre de colonnes!
+        def generate_markdown_table(df_to_format):
+            header = "| " + " | ".join(str(c).replace('\n', ' ') for c in df_to_format.columns) + " |"
+            separator = "|" + "|".join("---" for _ in df_to_format.columns) + "|"
+            rows_md = []
+            for _, r in df_to_format.iterrows():
+                # Si la case est vide, on met explicitement " - " pour bloquer le décalage visuel de l'IA
+                row_str = " | ".join(str(v).replace('\n', ' ') if pd.notna(v) and str(v).strip() != "" else "-" for v in r)
+                rows_md.append(f"| {row_str} |")
+            return "\n".join([header, separator] + rows_md)
+            
+        df_text = generate_markdown_table(df_original)
         
         # Extraire avec Vision API
         try:

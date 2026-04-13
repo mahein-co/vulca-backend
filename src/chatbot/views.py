@@ -493,7 +493,7 @@ def generate_response(request):
             is_greeting = any(g == user_input.lower().strip() for g in greetings)
             if is_greeting:
                 greeting_replies = [
-                    "Bonjour ! Je suis votre assistant comptable VULCA. Comment puis-je vous aider aujourd'hui ?",
+                    "Bonjour ! Je suis votre assistant comptable Rekapy. Comment puis-je vous aider aujourd'hui ?",
                     "Bonjour ! Ravi de vous retrouver. Quelle analyse financière souhaitez-vous effectuer ?",
                     "Bonsoir ! Je suis à votre disposition pour toute question comptable ou financière.",
                 ]
@@ -627,7 +627,7 @@ def generate_response(request):
                             export_links.append(f"📄 [Télécharger le Rapport PDF]({backend_url}{settings.MEDIA_URL}{file_path_pdf})")
                             
                         if export_links:
-                            accounting_context += "\n\n### 📥 EXPORTS DISPONIBLES (REKAPY)\n" + "\n".join(export_links)
+                            accounting_context += "\n\n### 📥 EXPORTS DISPONIBLES (Rekapy)\n" + "\n".join(export_links)
                     except Exception as e:
                         print(f"[ERROR] Export failed: {str(e)}")
                         accounting_context += f"\n\n(Note: L'export a échoué: {str(e)})"
@@ -656,7 +656,7 @@ def generate_response(request):
             links = locals().get('export_links', [])
             if links:
                 if "📥 EXPORTS DISPONIBLES" not in ai_response:
-                    ai_response += "\n\n### 📥 EXPORTS DISPONIBLES (REKAPY)\n" + "\n".join(links)
+                    ai_response += "\n\n### 📥 EXPORTS DISPONIBLES (Rekapy)\n" + "\n".join(links)
 
             # ✅ FORMATAGE ET ENREGISTREMENT
             unique_sources = []

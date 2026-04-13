@@ -17,7 +17,7 @@ from datetime import datetime, date
 
 # Import du validateur de compte
 from ocr.account_validator import AccountValidator
-from ocr.pcg_loader import PCG_MAPPING
+from ocr.pcg_loader import PCG_MAPPING, get_pcg_label
 
 class FinancialDataStructurer:
     """
@@ -646,7 +646,7 @@ class FinancialDataStructurer:
                 poste_upper = poste.upper()
                 _SUBTOTAL_KW = [
                     'TOTAL', 'RESULTAT', 'VARIATION', 'VALEUR AJOUTEE', 'EXCEDENT',
-                    "CHIFFRE D'AFFAIRES", 'CHIFFRE D AFFAIRES',
+                    # "CHIFFRE D'AFFAIRES" retiré pour permettre l'import comme compte 70
                     'PRODUCTION DE L', 'CONSOMMATION DE L',
                     'VALEUR AJOUT', 'EXCEDENT BRUT'
                 ]
@@ -707,12 +707,42 @@ class FinancialDataStructurer:
             # Extraire les valeurs
             valeurs = {}
             has_nonzero = False
+            
+            # DEBUG: Log the raw row data for suspected problematic rows
+            poste_debug = str(poste).lower()
+            if 'autres charges' in poste_debug or 'dotation' in poste_debug or (numero_compte and str(numero_compte).startswith('64')):
+                print(f"\n   [DEBUG-ROW] idx={idx} | poste='{poste}' | compte={numero_compte}")
+                print(f"   [DEBUG-ROW] Raw values from DataFrame row:")
+                for year in years:
+                    raw_val = row.get(year, 'COLUMN_MISSING') if year in df.columns else 'NO_COL'
+                    print(f"      year {year}: raw={raw_val!r} (type={type(raw_val).__name__})")
+            
             for year in years:
                 if year in df.columns:
-                    value = row.get(year)
+                    # SAFE SCALAR EXTRACTION: Use column position to avoid the case
+                    # where duplicate column names cause row.get() to return a Series
+                    # instead of a scalar, which causes phantom values on empty rows.
+                    try:
+                        col_loc = df.columns.get_loc(year)
+                        if isinstance(col_loc, int):
+                            value = row.iloc[col_loc]
+                        elif isinstance(col_loc, slice):
+                            # Multiple columns share this year name: take the first one
+                            value = row.iloc[col_loc.start]
+                        else:
+                            # Boolean mask case (also from duplicates)
+                            indices = [i for i, v in enumerate(col_loc) if v]
+                            value = row.iloc[indices[0]] if indices else None
+                    except Exception:
+                        value = row.get(year)
+                    
+                    # If value is still a Series (safety net), take first element
+                    if isinstance(value, pd.Series):
+                        value = value.iloc[0] if not value.empty else None
                     
                     # Nettoyer la valeur
-                    if pd.isna(value):
+                    is_null = (value is None) or (isinstance(value, float) and pd.isna(value))
+                    if is_null:
                         valeurs[str(year)] = 0
                     else:
                         try:
@@ -721,7 +751,11 @@ class FinancialDataStructurer:
                                 val_clean = value.replace(' ', '').replace('\xa0', '').replace(',', '.')
                                 # Supprimer les caractères non numériques excepté le point et le signe moins
                                 val_clean = re.sub(r'[^\d\.-]', '', val_clean)
-                                num_value = float(val_clean)
+                                # Tirer ou vide = zéro
+                                if not val_clean or val_clean in ['-', '.']:
+                                    num_value = 0.0
+                                else:
+                                    num_value = float(val_clean)
                             else:
                                 num_value = float(value)
                                 
@@ -736,9 +770,10 @@ class FinancialDataStructurer:
                         except (ValueError, TypeError):
                             valeurs[str(year)] = 0
             
-            # Ajouter la ligne seulement si elle a une valeur ou un poste significatif
-            # On accepte une ligne à 0 si elle a un compte valide ou si c'est un sous-total important
-            is_significant = has_nonzero or is_valid_account or (poste and len(poste) > 5)
+            # Ajouter la ligne seulement si elle a une valeur significative
+            # On n'accepte PLUS une ligne à 0 même si elle a un compte valide (demande utilisateur)
+            # Une ligne n'est significative que si au moins un montant est non nul
+            is_significant = has_nonzero
             
             if is_significant:
                 ligne = {

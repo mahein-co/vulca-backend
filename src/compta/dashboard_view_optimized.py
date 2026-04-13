@@ -2,7 +2,7 @@
 from decimal import Decimal
 from datetime import datetime, timedelta
 
-from django.db.models import Sum, Q, Max
+from django.db.models import Sum, Q, Max, Case, When, DecimalField
 import traceback
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -30,16 +30,10 @@ def dashboard_indicators_view(request):
     ENDPOINT OPTIMISÉ POUR DASHBOARD (V2)
     Calcule TOUS les indicateurs (16 KPIs) + Variations en un minimum de requêtes.
     """
-    # 1. RÉCUPÉRATION DU PROJET (Priorité: Header > Param > Request)
-    header_project_id = request.headers.get('X-Project-ID')
-    param_project_id = request.query_params.get('project_id')
-    project_id = header_project_id or param_project_id or getattr(request, 'project_id', None)
-    
-    # Secure project_id type
-    try:
-        project_id = int(project_id) if project_id else None
-    except (ValueError, TypeError):
-        project_id = None
+    # 1. RÉCUPÉRATION DU PROJET
+    project_id = getattr(request, 'project_id', None)
+    if not project_id:
+        return Response({"error": "Project non fourni."}, status=400)
 
     date_start_str = request.GET.get("date_start")
     date_end_str = request.GET.get("date_end")
@@ -69,47 +63,85 @@ def dashboard_indicators_view(request):
             return debit
 
         try:
-            # 1. CALCULS DES MASSES (Unifiés via kpi_utils)
-            ca = get_chiffre_affaire(project_id, d_start, d_end)
-            total_produits = get_sum_cr(["7"])
+            # 1. CALCULS DES MASSES UNIFIÉS (CR) - UNE SEULE REQUÊTE
+            cr_agg = CompteResultat.objects.filter(project_id=project_id, date__range=[d_start, d_end]).aggregate(
+                ca=Sum(Case(When(numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
+                v_71_72_74=Sum(Case(When(Q(numero_compte__startswith="71") | Q(numero_compte__startswith="72") | Q(numero_compte__startswith="74"), then="montant_ar"), default=0, output_field=DecimalField())),
+                total_produits=Sum(Case(When(numero_compte__startswith="7", then="montant_ar"), default=0, output_field=DecimalField())),
+                achats=Sum(Case(When(numero_compte__startswith="60", then="montant_ar"), default=0, output_field=DecimalField())),
+                vente_607=Sum(Case(When(numero_compte__startswith="607", then="montant_ar"), default=0, output_field=DecimalField())),
+                charges_externes=Sum(Case(When(Q(numero_compte__startswith="61") | Q(numero_compte__startswith="62"), then="montant_ar"), default=0, output_field=DecimalField())),
+                impots=Sum(Case(When(numero_compte__startswith="63", then="montant_ar"), default=0, output_field=DecimalField())),
+                personnel=Sum(Case(When(numero_compte__startswith="64", then="montant_ar"), default=0, output_field=DecimalField())),
+                charges_fi=Sum(Case(When(numero_compte__startswith="66", then="montant_ar"), default=0, output_field=DecimalField())),
+                dotations=Sum(Case(When(numero_compte__startswith="68", then="montant_ar"), default=0, output_field=DecimalField())),
+                reprises=Sum(Case(When(numero_compte__startswith="78", then="montant_ar"), default=0, output_field=DecimalField())),
+                total_charges=Sum(Case(When(numero_compte__startswith="6", then="montant_ar"), default=0, output_field=DecimalField())),
+            )
             
-            achats = get_sum_cr(["60"])
-            charges_externes = get_sum_cr(["61", "62"])
-            impots = get_sum_cr(["63"])
-            personnel = get_sum_cr(["64"])
-            charges_fi = get_sum_cr(["66"])
-            dotations = get_sum_cr(["68"])
-            total_charges = get_sum_cr(["6"])
-            charges_exploit = achats + charges_externes + impots + personnel + dotations 
+            ca = cr_agg['ca'] or Decimal("0.00")
+            v_71_72_74 = cr_agg['v_71_72_74'] or Decimal("0.00")
+            achats = cr_agg['achats'] or Decimal("0.00")
+            charges_ext_imp_pers = (cr_agg['charges_externes'] or 0) + (cr_agg['impots'] or 0) + (cr_agg['personnel'] or 0)
+            dotations = cr_agg['dotations'] or Decimal("0.00")
+            reprises = cr_agg['reprises'] or Decimal("0.00")
+            charges_fi = cr_agg['charges_fi'] or Decimal("0.00")
+            total_produits = cr_agg['total_produits'] or Decimal("0.00")
+            total_charges = cr_agg['total_charges'] or Decimal("0.00")
             
-            ebe = get_ebe(project_id, d_start, d_end)
-            resultat_net = get_resultat_net(project_id, d_start, d_end)
-            resultat_exploit = ebe - dotations + get_sum_cr(["78"])
-            
-            reprises = get_sum_cr(["78"])
+            ebe = (ca + v_71_72_74) - (achats + charges_ext_imp_pers)
+            resultat_net = total_produits - total_charges
+            resultat_exploit = ebe - dotations + reprises
             caf = resultat_net + dotations - reprises
             
-            # BILAN
-            stocks = get_sum_bilan(["3"], type_bilan="ACTIF")
-            creances_clients = get_sum_bilan(["411"], type_bilan="ACTIF")
-            tresorerie_actif = get_sum_bilan(["5"], type_bilan="ACTIF")
+            # 2. CALCULS BILAN - OPTIMISÉS (Une seule requête pour tout le Bilan de la période)
+            def get_mass_bilan_data(start, end, cumulative=False):
+                q = Q(project_id=project_id, date__lte=end)
+                if not cumulative: q &= Q(date__gte=start)
+                
+                # Fetch only latest per account in the period
+                rows = Bilan.objects.filter(q).order_by('numero_compte', '-date').distinct('numero_compte').values('numero_compte', 'montant_ar', 'type_bilan')
+                data = {}
+                for r in rows:
+                    data[r['numero_compte']] = {'m': r['montant_ar'] or Decimal('0.00'), 't': r['type_bilan']}
+                return data
+
+            bilan_period = get_mass_bilan_data(d_start, d_end, cumulative=False)
+            bilan_cumul = get_mass_bilan_data(d_start, d_end, cumulative=True)
+
+            def sum_p(data, prefixes, t_bilan=None):
+                return sum((v['m'] for k, v in data.items() if any(k.startswith(p) for p in prefixes) and (t_bilan is None or v['t'] == t_bilan)), Decimal('0.00'))
+
+            stocks = sum_p(bilan_period, ["3"], "ACTIF")
+            creances_clients = sum_p(bilan_period, ["411"], "ACTIF")
+            tresorerie_actif = sum_p(bilan_period, ["5"], "ACTIF")
             actifs_courants = stocks + creances_clients + tresorerie_actif 
             
-            # ⚡ [LIVE FIX] : Utiliser Balance pour le total_balance du dashboard (même logique que BalanceModal)
             total_balance_live = get_total_balance_live(d_start, d_end)
-            if total_balance_live > 0:
-                total_actif = total_balance_live
-            else:
-                total_actif = get_sum_bilan([""], type_bilan="ACTIF")
+            total_actif = total_balance_live if total_balance_live > 0 else sum_p(bilan_period, [""], "ACTIF")
             
-            capitaux_propres = get_capitaux_propres(project_id, d_start, d_end)
-            dettes_fi = get_sum_bilan(["16"], type_bilan="PASSIF") + get_sum_bilan(["512"], type_bilan="PASSIF")
-            dettes_fournisseurs = get_sum_bilan(["401"], type_bilan="PASSIF")
-            passifs_courants = dettes_fournisseurs + get_sum_bilan(["42", "43", "44"], type_bilan="PASSIF") + get_sum_bilan(["512"], type_bilan="PASSIF")
+            # Capitaux Propres = CP cumulé + RN période
+            # Capitaux Propres = CP cumulé (sans compte 12) + Résultat Net période
+            # On exclut le compte 12 (Résultat) de la base car on l'ajoute manuellement pour avoir le RN "Live"
+            base_cp = sum_p(bilan_cumul, ["10", "11"], "PASSIF")
+            capitaux_propres = base_cp + resultat_net
             
-            bfr = stocks + creances_clients - dettes_fournisseurs
+            tresorerie_passif = sum_p(bilan_period, ["512", "519"], "PASSIF")
+            dettes_fi = sum_p(bilan_period, ["16"], "PASSIF") + tresorerie_passif
+            dettes_fournisseurs = sum_p(bilan_period, ["401"], "PASSIF")
             
-            # 2. CALCULS DES RATIOS
+            # Autres créances (42, 43, 44, 45, 46, 47)
+            autres_creances = sum_p(bilan_period, ["42", "43", "44", "45", "46", "47"], "ACTIF")
+            # Autres dettes d'exploitation (42, 43, 44, 45, 46, 47)
+            autres_dettes = sum_p(bilan_period, ["42", "43", "44", "45", "46", "47"], "PASSIF")
+            
+            passifs_courants = dettes_fournisseurs + autres_dettes + tresorerie_passif
+            passif_non_courant = sum_p(bilan_period, ["15", "17"], "PASSIF") + sum_p(bilan_period, ["16"], "PASSIF")
+            
+            # BFR élargi : (Stocks + Clients + Autres Créances) - (Fournisseurs + Autres Dettes)
+            bfr = stocks + creances_clients + autres_creances - (dettes_fournisseurs + autres_dettes)
+            
+            # 3. CALCULS DES RATIOS ... (Reste inchangé)
             marge_brute = ca - achats 
             marge_nette = (resultat_net / ca * 100) if ca != 0 else 0
             marge_op = (resultat_exploit / ca * 100) if ca != 0 else 0
@@ -121,28 +153,28 @@ def dashboard_indicators_view(request):
             quick_ratio = ((actifs_courants - stocks) / passifs_courants) if passifs_courants != 0 else 0
             gearing = (dettes_fi / capitaux_propres) if capitaux_propres != 0 else 0
             
-            rotation_stock = (get_sum_cr(["607"]) / stocks) if stocks != 0 else 0
+            cout_607 = cr_agg['vente_607'] or Decimal("0.00")
+            rotation_stock = (cout_607 / stocks) if stocks != 0 else 0
             duree_stock = (360 / rotation_stock) if rotation_stock != 0 else 0
             leverage_brut = (dettes_fi / ebe) if ebe != 0 else 0
-
-            # Ratios exports spécifiques
             annuite_caf = (dotations / caf) if caf != 0 else 0
+            dette_caf = (dettes_fi / caf) if caf != 0 else 0
             fi_ebe = (charges_fi / ebe) if ebe != 0 else 0
             fi_ca = (charges_fi / ca) if ca != 0 else 0
 
             return {
                 "ca": ca, "ebe": ebe, "resultat_net": resultat_net, "caf": caf, "bfr": bfr,
                 "marge_brute": marge_brute, "marge_nette": marge_nette, "marge_operationnelle": marge_op,
-                "tresorerie": get_sum_bilan(["5"], type_bilan="ACTIF") - get_sum_bilan(["512"], type_bilan="PASSIF"),
+                "tresorerie": tresorerie_actif - tresorerie_passif,
                 "roe": roe, "roa": roa, "current_ratio": current_ratio, "quick_ratio": quick_ratio,
                 "gearing": gearing, "rotation_stock": rotation_stock, "duree_stock_jours": duree_stock,
                 "leverage_brut": leverage_brut, 
-                "annuite_caf": annuite_caf, "fi_ebe": fi_ebe, "fi_ca": fi_ca,
+                "annuite_caf": annuite_caf, "dette_caf": dette_caf, "fi_ebe": fi_ebe, "fi_ca": fi_ca,
                 
                 "actifs_courants": actifs_courants, "passifs_courants": passifs_courants, "stocks": stocks,
                 "fonds_propres": capitaux_propres, "total_actif": total_actif, "dettes_financieres": dettes_fi,
-                "cout_ventes": get_sum_cr(["607"]), "chiffre_affaire": ca, "charges_exploitation": charges_exploit,
-                "resultat_operationnel": resultat_exploit
+                "cout_ventes": cout_607, "chiffre_affaire": ca, "charges_exploitation": (achats + charges_ext_imp_pers + dotations),
+                "resultat_operationnel": resultat_exploit, "passif_non_courant": passif_non_courant
             }
         except Exception as e:
             print(f"[ERROR] calculate_all_kpis failed: {e}")
@@ -193,6 +225,7 @@ def dashboard_indicators_view(request):
             "bfr": float(current.get("bfr", 0)),
             "leverage": float(current.get("leverage_brut", 0)),
             "total_balance": float(current.get("total_actif", 0)),
+            "total_passif": float(current.get("passifs_courants", 0) + current.get("passif_non_courant", 0) + current.get("fonds_propres", 0)),
 
             "roe_data": { "roe": float(current.get("roe", 0)), "variation": get_v("roe", True), "resultat_net": float(current.get("resultat_net", 0)), "fonds_propres": float(current.get("fonds_propres", 0)) },
             "roa_data": { "roa": float(current.get("roa", 0)), "variation": get_v("roa", True), "resultat_net": float(current.get("resultat_net", 0)), "total_actif": float(current.get("total_actif", 0)) },
@@ -208,7 +241,7 @@ def dashboard_indicators_view(request):
                 "annuite_caf": { "value": float(current.get("annuite_caf", 0)), "alerte": float(current.get("annuite_caf", 0)) > 0.5 },
                 "leverage": { "value": float(current.get("leverage_brut", 0)), "alerte": float(current.get("leverage_brut", 0)) > 3.5 },
                 "leverage_brut": { "value": float(current.get("leverage_brut", 0)), "alerte": float(current.get("leverage_brut", 0)) > 3.5 },
-                "dette_caf": { "value": float(current.get("leverage_brut", 0)), "alerte": float(current.get("leverage_brut", 0)) > 3.5 },
+                "dette_caf": { "value": float(current.get("dette_caf", 0)), "alerte": float(current.get("dette_caf", 0)) > 3.5 },
                 "marge_nette": { "value": float(current.get("marge_nette", 0)), "alerte": float(current.get("marge_nette", 0)) < 10 },
                 "fi_ebe": { "value": float(current.get("fi_ebe", 0)), "alerte": float(current.get("fi_ebe", 0)) > 0.3 },
                 "fi_ca": { "value": float(current.get("fi_ca", 0)), "alerte": float(current.get("fi_ca", 0)) > 0.05 },

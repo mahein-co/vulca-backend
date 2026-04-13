@@ -4,7 +4,8 @@ from decimal import Decimal
 from datetime import datetime, date
 
 from django.core.exceptions import ValidationError
-from django.db.models import Sum, Max, Min, DecimalField, Case, When, Q
+from django.db.models import Sum, Max, Min, DecimalField, Case, When, Q, Count
+from django.db.models.functions import TruncMonth, TruncYear
 
 from rest_framework import generics, status, serializers
 from rest_framework.decorators import api_view, permission_classes
@@ -88,26 +89,23 @@ def list_journals_view(request):
     totals = queryset.aggregate(
         total_debit=Sum("debit_ar"),
         total_credit=Sum("credit_ar"),
-        total_count=Sum(1)
+        total_count=Count("id")
     )
 
     paginator = PageNumberPagination()
-    paginator.page_size = 10 # Check frontend requirement, maybe param
-    if request.GET.get("page_size"):
-        try:
-            paginator.page_size = int(request.GET.get("page_size"))
-        except:
-            pass
+    # Use a default or from settings
+    paginator.page_size = int(request.GET.get("page_size", 10))
             
     paginated_qs = paginator.paginate_queryset(queryset, request)
     serializer = JournalSerializer(paginated_qs, many=True)
 
     response = paginator.get_paginated_response(serializer.data)
 
+    # Use the count already calculated in aggregate to avoid an extra query
     response.data["totals"] = {
         "debit": totals["total_debit"] or 0,
         "credit": totals["total_credit"] or 0,
-        "count": queryset.count()
+        "count": totals["total_count"] or 0
     }
 
     return response
@@ -481,7 +479,24 @@ def generate_journal_from_pcg(document_json):
             
     if not numero_piece:
         numero_piece = "N/A"
-    date_facture_raw = document_json.get("date") or document_json.get("date_facture") or str(dt_date.today())
+    date_facture_raw = document_json.get("date") or document_json.get("date_facture")
+    
+    # Check nested description_json for date if not found at top level
+    if not date_facture_raw and "description_json" in document_json:
+        desc = document_json["description_json"]
+        if isinstance(desc, dict):
+            date_keys = [
+                "date_facture", "date_emission", "date_document", "date",
+                "date_paie", "date_bon", "date_operation", "date_valeur", "date_transaction"
+            ]
+            for k in date_keys:
+                if desc.get(k):
+                    date_facture_raw = desc.get(k)
+                    break
+    
+    # Final fallback to today
+    if not date_facture_raw:
+        date_facture_raw = str(dt_date.today())
     
     # ✅ CONVERSION DE DATE : "5 septembre 2024" → date(2024, 9, 5)
     try:
@@ -904,8 +919,9 @@ class StandardPagination(PageNumberPagination):
     max_page_size = 100
 
 class BilanListCreateView(generics.ListCreateAPIView):
+    queryset = Bilan.objects.all().order_by("-date")
     serializer_class = BilanSerializer
-    permission_classes = [IsAuthenticated, HasProjectAccess]
+    permission_classes = [AllowAny]
     pagination_class = StandardPagination
 
     def get_queryset(self):
@@ -1317,6 +1333,7 @@ def ebe_view(request):
         """
         Fonction helper pour calculer l'EBE pour une période donnée
         """
+        project_id = getattr(request, "project_id", None)
         return get_ebe(project_id, start_date, end_date)
 
     # Calcul période courante
@@ -1407,16 +1424,17 @@ def marge_brute_view(request):
         # Produits (70, 71, 72)
         produits = (
             CompteResultat.objects
-            .filter(nature="PRODUIT", numero_compte__regex=r"^(70|71|72)", **filters)
+            .filter(numero_compte__regex=r"^(70|71|72)", **filters)
             .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
 
         # Achats et services extérieurs (60, 61, 62)
         charges = (
             CompteResultat.objects
-            .filter(nature="CHARGE", numero_compte__regex=r"^(60|61|62)", **filters)
+            .filter(numero_compte__regex=r"^(60|61|62)", **filters)
             .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
         )
+
 
         return produits, charges
 
@@ -1818,42 +1836,57 @@ def evolution_tresorerie_view(request):
         start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
     
-    # Générer les mois entre start et end
-    evolution_data = []
-    current_date = start_date_obj.replace(day=1)  # Premier jour du mois
+    group_by = request.GET.get("group_by", "month")
     
-    while current_date <= end_date_obj:
-        # Calculer le dernier jour du mois
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
-        
-        last_day_of_month = next_month - timedelta(days=1)
-        
-        # Calculer la trésorerie pour ce mois
-        tresorerie_mois = (
-            Bilan.objects
-            .filter(
-                project_id=project_id,
-                type_bilan="ACTIF",
-                numero_compte__startswith="5",
-                date__range=[current_date, last_day_of_month]
-            )
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        # Formater le mois pour l'affichage
-        mois_label = current_date.strftime("%b %Y")  # Ex: "Jan 2025"
-        
-        evolution_data.append({
-            "mois": mois_label,
-            "montant": float(tresorerie_mois),
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        
-        # Passer au mois suivant
-        current_date = next_month
+    # Optimized implementation using TruncMonth/TruncYear
+    from django.db.models.functions import TruncMonth, TruncYear
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    stats_qs = Bilan.objects.filter(
+        project_id=project_id,
+        type_bilan="ACTIF",
+        numero_compte__startswith="5",
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        total=Sum("montant_ar")
+    )
+    
+    # Dictionnaire de mois pour le formatage manuel
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+    
+    if group_by == "year":
+        stats_map = {entry["period"].year: entry for entry in stats_qs}
+        curr_year = start_date_obj.year
+        end_year = end_date_obj.year
+        evolution_data = []
+        while curr_year <= end_year:
+            entry = stats_map.get(curr_year, {})
+            montant = entry.get("total") or Decimal("0.00")
+            evolution_data.append({
+                "mois": str(curr_year),
+                "montant": float(montant),
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        stats_map = {(entry["period"].year, entry["period"].month): entry for entry in stats_qs}
+        evolution_data = []
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            entry = stats_map.get((curr.year, curr.month), {})
+            montant = entry.get("total") or Decimal("0.00")
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
+            evolution_data.append({
+                "mois": label,
+                "montant": float(montant),
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
     
     return Response({
         "evolution": evolution_data,
@@ -1903,88 +1936,85 @@ def evolution_marges_view(request):
         start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
     
-    # Générer les mois entre start et end
-    evolution_data = []
-    current_date = start_date_obj.replace(day=1)  # Premier jour du mois
+    group_by = request.GET.get("group_by", "month")
     
-    while current_date <= end_date_obj:
-        # Calculer le dernier jour du mois
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
-        
-        last_day_of_month = next_month - timedelta(days=1)
-        
-        # Calculer Produits (70, 71, 72) pour marge brute
-        produits_marge = (
-            CompteResultat.objects
-            .filter(
-                project_id=project_id,
-                nature="PRODUIT",
-                numero_compte__regex=r"^(70|71|72)",
-                date__range=[current_date, last_day_of_month]
-            )
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        # Calculer Charges (60, 61, 62) pour marge brute
-        charges_marge = (
-            CompteResultat.objects
-            .filter(
-                project_id=project_id,
-                nature="CHARGE",
-                numero_compte__regex=r"^(60|61|62)",
-                date__range=[current_date, last_day_of_month]
-            )
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        # Calculer Résultat Net pour marge nette
-        produits = (
-            CompteResultat.objects
-            .filter(
-                project_id=project_id,
-                nature="PRODUIT",
-                numero_compte__startswith="7",
-                date__range=[current_date, last_day_of_month]
-            )
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        charges = (
-            CompteResultat.objects
-            .filter(
-                nature="CHARGE",
-                numero_compte__startswith="6",
-                date__range=[current_date, last_day_of_month]
-            )
-            .aggregate(total=Sum("montant_ar"))["total"] or Decimal("0.00")
-        )
-        
-        resultat_net = produits - charges
-        
-        # Calculer les marges en pourcentage
-        marge_brute = None
-        marge_nette = None
-        
-        if produits_marge != 0 and abs(produits_marge) > 1000:
-            marge_brute_montant = produits_marge - charges_marge
-            marge_brute = float((marge_brute_montant / produits_marge) * 100)
-            marge_nette = float((resultat_net / produits_marge) * 100)
-        
-        # Formater le mois pour l'affichage
-        mois_label = current_date.strftime("%b %Y")  # Ex: "Jan 2025"
-        
-        evolution_data.append({
-            "mois": mois_label,
-            "marge_brute": marge_brute,
-            "marge_nette": marge_nette,
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        
-        # Passer au mois suivant
-        current_date = next_month
+    # Optimized implementation using TruncMonth/TruncYear
+    from django.db.models.functions import TruncMonth, TruncYear
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    # Combined aggregation for products and charges (both for MB and MN)
+    stats_qs = CompteResultat.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        # For Marge Brute: 70, 71, 72 vs 60, 61, 62
+        prod_mb=Sum(Case(When(numero_compte__regex=r"^(70|71|72)", then="montant_ar"), default=0, output_field=DecimalField())),
+        char_mb=Sum(Case(When(numero_compte__regex=r"^(60|61|62)", then="montant_ar"), default=0, output_field=DecimalField())),
+        # For Marge Nette (Total Produits vs Total Charges)
+        prod_total=Sum(Case(When(nature="PRODUIT", numero_compte__startswith="7", then="montant_ar"), default=0, output_field=DecimalField())),
+        char_total=Sum(Case(When(nature="CHARGE", numero_compte__startswith="6", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+
+    # Dictionnaire de mois pour le formatage manuel
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+
+    evolution_data = []
+    
+    if group_by == "year":
+        stats_map = {entry["period"].year: entry for entry in stats_qs}
+        curr_year = start_date_obj.year
+        end_year = end_date_obj.year
+        while curr_year <= end_year:
+            entry = stats_map.get(curr_year, {})
+            prod_mb = entry.get("prod_mb") or Decimal("0")
+            char_mb = entry.get("char_mb") or Decimal("0")
+            prod_total = entry.get("prod_total") or Decimal("0")
+            char_total = entry.get("char_total") or Decimal("0")
+            
+            res_net = prod_total - char_total
+            marge_brute = None
+            marge_nette = None
+            if prod_mb != 0 and abs(prod_mb) > 1000:
+                marge_brute = float(((prod_mb - char_mb) / prod_mb) * 100)
+                marge_nette = float((res_net / prod_mb) * 100)
+                
+            evolution_data.append({
+                "mois": str(curr_year),
+                "marge_brute": marge_brute,
+                "marge_nette": marge_nette,
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        stats_map = {(entry["period"].year, entry["period"].month): entry for entry in stats_qs}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            entry = stats_map.get((curr.year, curr.month), {})
+            prod_mb = entry.get("prod_mb") or Decimal("0")
+            char_mb = entry.get("char_mb") or Decimal("0")
+            prod_total = entry.get("prod_total") or Decimal("0")
+            char_total = entry.get("char_total") or Decimal("0")
+            
+            res_net = prod_total - char_total
+            marge_brute = None
+            marge_nette = None
+            if prod_mb != 0 and abs(prod_mb) > 1000:
+                marge_brute = float(((prod_mb - char_mb) / prod_mb) * 100)
+                marge_nette = float((res_net / prod_mb) * 100)
+            
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
+            evolution_data.append({
+                "mois": label,
+                "marge_brute": marge_brute,
+                "marge_nette": marge_nette,
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
     
     return Response({
         "evolution": evolution_data,
@@ -2033,52 +2063,103 @@ def evolution_caf_view(request):
         start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
-    def get_caf_for_period(start, end):
-        filters = {"project_id": project_id, "date__range": [start, end]}
-        
-        # Helper variables for EBE
-        c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c71 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="71", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c72 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="72", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c74 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="74", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c60 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="60", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c61 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="61", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c62 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="62", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c63 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="63", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c64 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="64", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        
-        ebe = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
-        
-        # CAF specific accounts
-        c75 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="75", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c65 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="65", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c77 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="77", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c67 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="67", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c69 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="69", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        
-        caf = ebe + c75 - c65 + c77 - c67 - c69
-        return caf
+    group_by = request.GET.get("group_by", "month")
+    
+    # Optimized implementation using TruncMonth/TruncYear
+    from django.db.models.functions import TruncMonth, TruncYear
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    # Combined aggregation for all CAF components
+    stats_qs = CompteResultat.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        c70=Sum(Case(When(numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
+        c71=Sum(Case(When(numero_compte__startswith="71", then="montant_ar"), default=0, output_field=DecimalField())),
+        c72=Sum(Case(When(numero_compte__startswith="72", then="montant_ar"), default=0, output_field=DecimalField())),
+        c74=Sum(Case(When(numero_compte__startswith="74", then="montant_ar"), default=0, output_field=DecimalField())),
+        c75=Sum(Case(When(numero_compte__startswith="75", then="montant_ar"), default=0, output_field=DecimalField())),
+        c77=Sum(Case(When(numero_compte__startswith="77", then="montant_ar"), default=0, output_field=DecimalField())),
+        c60=Sum(Case(When(numero_compte__startswith="60", then="montant_ar"), default=0, output_field=DecimalField())),
+        c61=Sum(Case(When(numero_compte__startswith="61", then="montant_ar"), default=0, output_field=DecimalField())),
+        c62=Sum(Case(When(numero_compte__startswith="62", then="montant_ar"), default=0, output_field=DecimalField())),
+        c63=Sum(Case(When(numero_compte__startswith="63", then="montant_ar"), default=0, output_field=DecimalField())),
+        c64=Sum(Case(When(numero_compte__startswith="64", then="montant_ar"), default=0, output_field=DecimalField())),
+        c65=Sum(Case(When(numero_compte__startswith="65", then="montant_ar"), default=0, output_field=DecimalField())),
+        c67=Sum(Case(When(numero_compte__startswith="67", then="montant_ar"), default=0, output_field=DecimalField())),
+        c69=Sum(Case(When(numero_compte__startswith="69", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+    
+    # Dictionnaire de mois pour le formatage manuel
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
 
     evolution_data = []
-    current_date = start_date_obj.replace(day=1)
-
-    while current_date <= end_date_obj:
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
-        
-        last_day = next_month - timedelta(days=1)
-        
-        caf_val = get_caf_for_period(current_date, last_day)
-        
-        evolution_data.append({
-            "mois": current_date.strftime("%b %Y"),
-            "montant": float(caf_val),
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        
-        current_date = next_month
+    
+    if group_by == "year":
+        stats_map = {entry["period"].year: entry for entry in stats_qs}
+        curr_year = start_date_obj.year
+        end_year = end_date_obj.year
+        while curr_year <= end_year:
+            entry = stats_map.get(curr_year, {})
+            c70 = entry.get("c70") or 0
+            c71 = entry.get("c71") or 0
+            c72 = entry.get("c72") or 0
+            c74 = entry.get("c74") or 0
+            c60 = entry.get("c60") or 0
+            c61 = entry.get("c61") or 0
+            c62 = entry.get("c62") or 0
+            c63 = entry.get("c63") or 0
+            c64 = entry.get("c64") or 0
+            ebe = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+            
+            c75 = entry.get("c75") or 0
+            c65 = entry.get("c65") or 0
+            c77 = entry.get("c77") or 0
+            c67 = entry.get("c67") or 0
+            c69 = entry.get("c69") or 0
+            caf = ebe + c75 - c65 + c77 - c67 - c69
+            
+            evolution_data.append({
+                "mois": str(curr_year),
+                "montant": float(caf),
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        stats_map = {(entry["period"].year, entry["period"].month): entry for entry in stats_qs}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            entry = stats_map.get((curr.year, curr.month), {})
+            c70 = entry.get("c70") or 0
+            c71 = entry.get("c71") or 0
+            c72 = entry.get("c72") or 0
+            c74 = entry.get("c74") or 0
+            c60 = entry.get("c60") or 0
+            c61 = entry.get("c61") or 0
+            c62 = entry.get("c62") or 0
+            c63 = entry.get("c63") or 0
+            c64 = entry.get("c64") or 0
+            ebe = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+            
+            c75 = entry.get("c75") or 0
+            c65 = entry.get("c65") or 0
+            c77 = entry.get("c77") or 0
+            c67 = entry.get("c67") or 0
+            c69 = entry.get("c69") or 0
+            caf = ebe + c75 - c65 + c77 - c67 - c69
+            
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
+            evolution_data.append({
+                "mois": label,
+                "montant": float(caf),
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
 
     return Response({
         "evolution": evolution_data,
@@ -2126,56 +2207,87 @@ def evolution_marge_operationnelle_view(request):
     else:
         start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
-
-    def get_marge_op_for_period(start, end):
-        filters = {"project_id": project_id, "date__range": [start, end]}
-        
-        # CA = 70, 71, 72
-        c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c71 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="71", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c72 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="72", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        ca = c70 + c71 + c72
-
-        # Produits Opérationnels = 70, 71, 72, 74, 75
-        c74 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="74", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c75 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="75", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        prod_op = ca + c74 + c75
-
-        # Charges d'exploitation = 60, 61, 62, 63, 64, 65
-        charges_op = Decimal("0")
-        for p in ["60", "61", "62", "63", "64", "65"]:
-            charges_op += CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith=p, **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        
-        res_op = prod_op - charges_op
-        
-        marge_op = None
-        if ca != 0 and abs(ca) >= 1000:
-            marge_op = float((res_op / ca) * 100)
-            if marge_op > 500: marge_op = 500
-            elif marge_op < -500: marge_op = -500
-            
-        return marge_op
+    group_by = request.GET.get("group_by", "month")
+    
+    # Optimized implementation using TruncMonth/TruncYear
+    from django.db.models.functions import TruncMonth, TruncYear
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    # Aggregations for Revenue (CA) and Operating Result
+    cr_stats_qs = CompteResultat.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        ca=Sum(Case(When(numero_compte__startswith="70", then="montant_ar"), 
+                   When(numero_compte__startswith="71", then="montant_ar"),
+                   When(numero_compte__startswith="72", then="montant_ar"),
+                   default=0, output_field=DecimalField())),
+        prod_op=Sum(Case(When(Q(numero_compte__startswith="70") | Q(numero_compte__startswith="71") | Q(numero_compte__startswith="72") | Q(numero_compte__startswith="74") | Q(numero_compte__startswith="75"), then="montant_ar"), 
+                        default=0, output_field=DecimalField())),
+        charges_op=Sum(Case(When(Q(numero_compte__startswith="60") | Q(numero_compte__startswith="61") | Q(numero_compte__startswith="62") | Q(numero_compte__startswith="63") | Q(numero_compte__startswith="64") | Q(numero_compte__startswith="65"), then="montant_ar"), 
+                           default=0, output_field=DecimalField()))
+    )
+    
+    # Dictionnaire de mois pour le formatage manuel
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
 
     evolution_data = []
-    current_date = start_date_obj.replace(day=1)
-
-    while current_date <= end_date_obj:
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
-        
-        last_day = next_month - timedelta(days=1)
-        
-        marge_op_val = get_marge_op_for_period(current_date, last_day)
-        
-        evolution_data.append({
-            "mois": current_date.strftime("%b %Y"),
-            "marge_op": marge_op_val,
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        
-        current_date = next_month
+    
+    if group_by == "year":
+        stats_map = {entry["period"].year: entry for entry in cr_stats_qs}
+        curr_year = start_date_obj.year
+        end_year = end_date_obj.year
+        while curr_year <= end_year:
+            entry = stats_map.get(curr_year, {})
+            ca_val = entry.get("ca") or Decimal("0.00")
+            prod_op = entry.get("prod_op") or Decimal("0.00")
+            charges_op = entry.get("charges_op") or Decimal("0.00")
+            res_op = prod_op - charges_op
+            
+            marge_op = None
+            if ca_val != 0 and abs(ca_val) >= 1000:
+                marge_op = float((res_op / ca_val) * 100)
+                if marge_op > 500: marge_op = 500
+                elif marge_op < -500: marge_op = -500
+            elif ca_val == 0:
+                marge_op = 0.0
+                
+            evolution_data.append({
+                "mois": str(curr_year),
+                "marge_op": marge_op,
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        stats_map = {(entry["period"].year, entry["period"].month): entry for entry in cr_stats_qs}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            entry = stats_map.get((curr.year, curr.month), {})
+            ca_val = entry.get("ca") or Decimal("0.00")
+            prod_op = entry.get("prod_op") or Decimal("0.00")
+            charges_op = entry.get("charges_op") or Decimal("0.00")
+            res_op = prod_op - charges_op
+            
+            marge_op = None
+            if ca_val != 0 and abs(ca_val) >= 1000:
+                marge_op = float((res_op / ca_val) * 100)
+                if marge_op > 500: marge_op = 500
+                elif marge_op < -500: marge_op = -500
+            elif ca_val == 0:
+                marge_op = 0.0
+                
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
+            evolution_data.append({
+                "mois": label,
+                "marge_op": marge_op,
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
 
     return Response({
         "evolution": evolution_data,
@@ -2200,20 +2312,16 @@ def evolution_roe_view(request):
     Supporte le filtrage par date (date_start, date_end)
     GET /api/evolution-roe/?date_start=2024-01-01&date_end=2024-12-31
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, date # Added date here
     from dateutil.relativedelta import relativedelta
-    from django.db.models import Sum, Max, Case, When
+    from django.db.models import Sum, Max, Case, When, DecimalField # Added DecimalField here
     from decimal import Decimal
-
-    date_start = request.GET.get("date_start")
-    from django.db.models import DecimalField # Added this import
-    from decimal import Decimal
-
-    # PROJECT FILTER
-    project_id = getattr(request, "project_id", None)
 
     date_start = request.GET.get("date_start")
     date_end = request.GET.get("date_end")
+
+    # PROJECT FILTER
+    project_id = getattr(request, "project_id", None)
 
     # Si pas de dates fournies, utiliser les 6 derniers mois
     if not date_start or not date_end:
@@ -2227,48 +2335,88 @@ def evolution_roe_view(request):
     else:
         start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
-
-    def get_roe_for_period(start, end):
-        from compta.kpi_utils import get_latest_bilan_sum, get_resultat_net
-        
-        # 1. Résultat Net
-        resultat_net = get_resultat_net(project_id, start, end)
-
-        # 2. Fonds propres
-        fonds_propres = get_latest_bilan_sum(
-            project_id, start, end, categorie="CAPITAUX_PROPRES", type_bilan="PASSIF"
-        )
-
-        # 3. Calcul du ROE
-        roe = None
-        if fonds_propres != 0 and abs(fonds_propres) >= 100000:
-            roe = float((resultat_net / fonds_propres * 100))
-            # Protection contre les extrêmes
-            if roe > 1000: roe = 1000
-            elif roe < -1000: roe = -1000
-        
-        return roe
+    group_by = request.GET.get("group_by", "month")
+    
+    # Optimized implementation using TruncMonth/TruncYear
+    from django.db.models.functions import TruncMonth, TruncYear
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    # 1. Aggregation for Net Result part (CR)
+    cr_stats_qs = CompteResultat.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        total_prod=Sum(Case(When(numero_compte__startswith="7", then="montant_ar"), default=0, output_field=DecimalField())),
+        total_charg=Sum(Case(When(numero_compte__startswith="6", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+    
+    # Dictionnaire de mois pour le formatage manuel
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
 
     evolution_data = []
-    current_date = start_date_obj.replace(day=1)
-
-    while current_date <= end_date_obj:
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
-        
-        last_day = next_month - timedelta(days=1)
-        
-        roe_val = get_roe_for_period(current_date, last_day)
-        
-        evolution_data.append({
-            "mois": current_date.strftime("%b %Y"),
-            "roe": roe_val,
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        
-        current_date = next_month
+    
+    if group_by == "year":
+        cr_stats_map = {entry["period"].year: entry for entry in cr_stats_qs}
+        curr_year = start_date_obj.year
+        end_year = end_date_obj.year
+        while curr_year <= end_year:
+            entry = cr_stats_map.get(curr_year, {})
+            res_net = (entry.get("total_prod") or 0) - (entry.get("total_charg") or 0)
+            
+            # Equity part (helper is fast)
+            from compta.kpi_utils import get_latest_bilan_sum
+            fonds_propres = get_latest_bilan_sum(
+                project_id, date(curr_year, 1, 1), date(curr_year, 12, 31), categorie="CAPITAUX_PROPRES", type_bilan="PASSIF"
+            )
+            
+            roe_val = None
+            if fonds_propres != 0 and abs(fonds_propres) >= 100000:
+                roe_val = float((res_net / fonds_propres * 100))
+                if roe_val > 1000: roe_val = 1000
+                elif roe_val < -1000: roe_val = -1000
+            elif res_net == 0:
+                roe_val = 0.0
+                
+            evolution_data.append({
+                "mois": str(curr_year),
+                "roe": roe_val,
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        cr_stats_map = {(entry["period"].year, entry["period"].month): entry for entry in cr_stats_qs}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            if curr.month == 12:
+                next_month = curr.replace(year=curr.year + 1, month=1)
+            else:
+                next_month = curr.replace(month=curr.month + 1)
+            last_day = next_month - timedelta(days=1)
+            
+            cr_entry = cr_stats_map.get((curr.year, curr.month), {})
+            res_net = (cr_entry.get("total_prod") or 0) - (cr_entry.get("total_charg") or 0)
+            
+            from compta.kpi_utils import get_latest_bilan_sum
+            fonds_propres = get_latest_bilan_sum(
+                project_id, curr, last_day, categorie="CAPITAUX_PROPRES", type_bilan="PASSIF"
+            )
+            
+            roe_val = None
+            if fonds_propres != 0 and abs(fonds_propres) >= 100000:
+                roe_val = float((res_net / fonds_propres * 100))
+                if roe_val > 1000: roe_val = 1000
+                elif roe_val < -1000: roe_val = -1000
+            elif res_net == 0:
+                roe_val = 0.0
+                
+            evolution_data.append({
+                "mois": curr.strftime("%b %Y"),
+                "roe": roe_val,
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            curr = next_month
 
     return Response({
         "evolution": evolution_data,
@@ -2318,47 +2466,89 @@ def evolution_roa_view(request):
         start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
-    def get_roa_for_period(start, end):
-        from compta.kpi_utils import get_latest_bilan_sum, get_resultat_net
-        
-        # 1. Résultat Net
-        resultat_net = get_resultat_net(project_id, start, end)
-
-        # 2. Total Actif
-        total_actif = get_latest_bilan_sum(
-            project_id, start, end, type_bilan="ACTIF"
-        )
-
-        # 3. Calcul du ROA
-        roa = None
-        if total_actif != 0 and abs(total_actif) >= 100000:
-            roa = float((resultat_net / total_actif * 100))
-            # Protection contre les extrêmes
-            if roa > 1000: roa = 1000
-            elif roa < -1000: roa = -1000
-        
-        return roa
+    group_by = request.GET.get("group_by", "month")
+    
+    # Optimized implementation using TruncMonth/TruncYear
+    from django.db.models.functions import TruncMonth, TruncYear
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    # Aggregation for Net Result part (CR)
+    cr_stats_qs = CompteResultat.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        total_prod=Sum(Case(When(numero_compte__startswith="7", then="montant_ar"), default=0, output_field=DecimalField())),
+        total_charg=Sum(Case(When(numero_compte__startswith="6", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+    
+    # Dictionnaire de mois pour le formatage manuel
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
 
     evolution_data = []
-    current_date = start_date_obj.replace(day=1)
-
-    while current_date <= end_date_obj:
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
-        
-        last_day = next_month - timedelta(days=1)
-        
-        roa_val = get_roa_for_period(current_date, last_day)
-        
-        evolution_data.append({
-            "mois": current_date.strftime("%b %Y"),
-            "roa": roa_val,
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        
-        current_date = next_month
+    
+    if group_by == "year":
+        cr_stats_map = {entry["period"].year: entry for entry in cr_stats_qs}
+        curr_year = start_date_obj.year
+        end_year = end_date_obj.year
+        while curr_year <= end_year:
+            entry = cr_stats_map.get(curr_year, {})
+            res_net = (entry.get("total_prod") or 0) - (entry.get("total_charg") or 0)
+            
+            # Asset part
+            from compta.kpi_utils import get_latest_bilan_sum
+            total_actif = get_latest_bilan_sum(
+                project_id, date(curr_year, 1, 1), date(curr_year, 12, 31), type_bilan="ACTIF"
+            )
+            
+            roa_val = None
+            if total_actif != 0 and abs(total_actif) >= 100000:
+                roa_val = float((res_net / total_actif * 100))
+                if roa_val > 1000: roa_val = 1000
+                elif roa_val < -1000: roa_val = -1000
+            elif res_net == 0:
+                roa_val = 0.0
+                
+            evolution_data.append({
+                "mois": str(curr_year),
+                "roa": roa_val,
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        cr_stats_map = {(entry["period"].year, entry["period"].month): entry for entry in cr_stats_qs}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            if curr.month == 12:
+                next_month = curr.replace(year=curr.year + 1, month=1)
+            else:
+                next_month = curr.replace(month=curr.month + 1)
+            last_day = next_month - timedelta(days=1)
+            
+            cr_entry = cr_stats_map.get((curr.year, curr.month), {})
+            res_net = (cr_entry.get("total_prod") or 0) - (cr_entry.get("total_charg") or 0)
+            
+            from compta.kpi_utils import get_latest_bilan_sum
+            total_actif = get_latest_bilan_sum(
+                project_id, curr, last_day, type_bilan="ACTIF"
+            )
+            
+            roa_val = None
+            if total_actif != 0 and abs(total_actif) >= 100000:
+                roa_val = float((res_net / total_actif * 100))
+                if roa_val > 1000: roa_val = 1000
+                elif roa_val < -1000: roa_val = -1000
+            elif res_net == 0:
+                roa_val = 0.0
+                
+            evolution_data.append({
+                "mois": curr.strftime("%b %Y"),
+                "roa": roa_val,
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            curr = next_month
+        curr = next_month
 
     return Response({
         "evolution": evolution_data,
@@ -2406,39 +2596,65 @@ def evolution_bfr_view(request):
         start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
-    def get_bfr_for_period(start, end):
-        filters = {"project_id": project_id, "date__range": [start, end]}
-        stocks = (
-            Bilan.objects.filter(type_bilan="ACTIF", numero_compte__startswith="3", **filters)
-            .aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        )
-        creances = (
-            Bilan.objects.filter(type_bilan="ACTIF", numero_compte__startswith="41", **filters)
-            .aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        )
-        dettes_fourn = (
-            Bilan.objects.filter(type_bilan="PASSIF", numero_compte__startswith="40", **filters)
-            .aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        )
-        return stocks + creances - dettes_fourn
+    group_by = request.GET.get("group_by", "month")
+    
+    # Optimized implementation using TruncMonth/TruncYear
+    from django.db.models.functions import TruncMonth, TruncYear
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    # Aggregation for BFR components
+    stats_qs = Bilan.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        stocks=Sum(Case(When(type_bilan="ACTIF", numero_compte__startswith="3", then="montant_ar"), default=0, output_field=DecimalField())),
+        creances=Sum(Case(When(type_bilan="ACTIF", numero_compte__startswith="41", then="montant_ar"), default=0, output_field=DecimalField())),
+        dettes_fourn=Sum(Case(When(type_bilan="PASSIF", numero_compte__startswith="40", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+
+    # Dictionnaire de mois pour le formatage manuel
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
 
     evolution_data = []
-    current_date = start_date_obj.replace(day=1)
-
-    while current_date <= end_date_obj:
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
-        last_day = next_month - timedelta(days=1)
-
-        bfr_val = get_bfr_for_period(current_date, last_day)
-        evolution_data.append({
-            "mois": current_date.strftime("%b %Y"),
-            "bfr": float(bfr_val),
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        current_date = next_month
+    
+    if group_by == "year":
+        stats_map = {entry["period"].year: entry for entry in stats_qs}
+        curr_year = start_date_obj.year
+        while curr_year <= end_date_obj.year:
+            entry = stats_map.get(curr_year, {})
+            stocks = entry.get("stocks") or Decimal("0")
+            creances = entry.get("creances") or Decimal("0")
+            dettes_fourn = entry.get("dettes_fourn") or Decimal("0")
+            bfr_val = stocks + creances - dettes_fourn
+            
+            evolution_data.append({
+                "mois": str(curr_year),
+                "bfr": float(bfr_val),
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        stats_map = {(entry["period"].year, entry["period"].month): entry for entry in stats_qs}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            entry = stats_map.get((curr.year, curr.month), {})
+            stocks = entry.get("stocks") or Decimal("0")
+            creances = entry.get("creances") or Decimal("0")
+            dettes_fourn = entry.get("dettes_fourn") or Decimal("0")
+            bfr_val = stocks + creances - dettes_fourn
+            
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
+            evolution_data.append({
+                "mois": label,
+                "bfr": float(bfr_val),
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
 
     return Response({
         "evolution": evolution_data,
@@ -2486,36 +2702,83 @@ def evolution_ebe_view(request):
         start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
-    def get_ebe_for_period(start, end):
-        filters = {"project_id": project_id, "date__range": [start, end]}
-        c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c71 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="71", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c72 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="72", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c74 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="74", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c60 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="60", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c61 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="61", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c62 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="62", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c63 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="63", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c64 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="64", **filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        return (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+    group_by = request.GET.get("group_by", "month")
+    
+    # Optimized implementation using TruncMonth/TruncYear
+    from django.db.models.functions import TruncMonth, TruncYear
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    # Combined aggregation for EBE components
+    stats_qs = CompteResultat.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        c70=Sum(Case(When(numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
+        c71=Sum(Case(When(numero_compte__startswith="71", then="montant_ar"), default=0, output_field=DecimalField())),
+        c72=Sum(Case(When(numero_compte__startswith="72", then="montant_ar"), default=0, output_field=DecimalField())),
+        c74=Sum(Case(When(numero_compte__startswith="74", then="montant_ar"), default=0, output_field=DecimalField())),
+        c60=Sum(Case(When(numero_compte__startswith="60", then="montant_ar"), default=0, output_field=DecimalField())),
+        c61=Sum(Case(When(numero_compte__startswith="61", then="montant_ar"), default=0, output_field=DecimalField())),
+        c62=Sum(Case(When(numero_compte__startswith="62", then="montant_ar"), default=0, output_field=DecimalField())),
+        c63=Sum(Case(When(numero_compte__startswith="63", then="montant_ar"), default=0, output_field=DecimalField())),
+        c64=Sum(Case(When(numero_compte__startswith="64", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+
+    # Dictionnaire de mois pour le formatage manuel
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
 
     evolution_data = []
-    current_date = start_date_obj.replace(day=1)
-
-    while current_date <= end_date_obj:
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
-        last_day = next_month - timedelta(days=1)
-
-        ebe_val = get_ebe_for_period(current_date, last_day)
-        evolution_data.append({
-            "mois": current_date.strftime("%b %Y"),
-            "ebe": float(ebe_val),
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        current_date = next_month
+    
+    if group_by == "year":
+        stats_map = {entry["period"].year: entry for entry in stats_qs}
+        curr_year = start_date_obj.year
+        while curr_year <= end_year:
+            entry = stats_map.get(curr_year, {})
+            c70 = entry.get("c70") or Decimal("0")
+            c71 = entry.get("c71") or Decimal("0")
+            c72 = entry.get("c72") or Decimal("0")
+            c74 = entry.get("c74") or Decimal("0")
+            c60 = entry.get("c60") or Decimal("0")
+            c61 = entry.get("c61") or Decimal("0")
+            c62 = entry.get("c62") or Decimal("0")
+            c63 = entry.get("c63") or Decimal("0")
+            c64 = entry.get("c64") or Decimal("0")
+            ebe_val = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+            
+            evolution_data.append({
+                "mois": str(curr_year),
+                "ebe": float(ebe_val),
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        stats_map = {(entry["period"].year, entry["period"].month): entry for entry in stats_qs}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            entry = stats_map.get((curr.year, curr.month), {})
+            c70 = entry.get("c70") or Decimal("0")
+            c71 = entry.get("c71") or Decimal("0")
+            c72 = entry.get("c72") or Decimal("0")
+            c74 = entry.get("c74") or Decimal("0")
+            c60 = entry.get("c60") or Decimal("0")
+            c61 = entry.get("c61") or Decimal("0")
+            c62 = entry.get("c62") or Decimal("0")
+            c63 = entry.get("c63") or Decimal("0")
+            c64 = entry.get("c64") or Decimal("0")
+            ebe_val = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+            
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
+            evolution_data.append({
+                "mois": label,
+                "ebe": float(ebe_val),
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
 
     return Response({
         "evolution": evolution_data,
@@ -2563,54 +2826,114 @@ def evolution_leverage_brut_view(request):
         start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
         end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
 
-    def get_leverage_for_period(start, end):
-        bilan_filters = {"project_id": project_id, "date__range": [start, end]}
-        cr_filters = {"project_id": project_id, "date__range": [start, end]}
+    group_by = request.GET.get("group_by", "month")
+    
+    # Optimized implementation using TruncMonth/TruncYear
+    from django.db.models.functions import TruncMonth, TruncYear
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    # Aggregation for Leverage components
+    stats_qs_cr = CompteResultat.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        c70=Sum(Case(When(numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
+        c71=Sum(Case(When(numero_compte__startswith="71", then="montant_ar"), default=0, output_field=DecimalField())),
+        c72=Sum(Case(When(numero_compte__startswith="72", then="montant_ar"), default=0, output_field=DecimalField())),
+        c74=Sum(Case(When(numero_compte__startswith="74", then="montant_ar"), default=0, output_field=DecimalField())),
+        c60=Sum(Case(When(numero_compte__startswith="60", then="montant_ar"), default=0, output_field=DecimalField())),
+        c61=Sum(Case(When(numero_compte__startswith="61", then="montant_ar"), default=0, output_field=DecimalField())),
+        c62=Sum(Case(When(numero_compte__startswith="62", then="montant_ar"), default=0, output_field=DecimalField())),
+        c63=Sum(Case(When(numero_compte__startswith="63", then="montant_ar"), default=0, output_field=DecimalField())),
+        c64=Sum(Case(When(numero_compte__startswith="64", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+    
+    stats_qs_bilan = Bilan.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        dettes_fin=Sum(Case(When(type_bilan="PASSIF", numero_compte__startswith="16", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
 
-        # Dettes financières (Bilan PASSIF comptes 16)
-        dettes_fin = (
-            Bilan.objects.filter(type_bilan="PASSIF", numero_compte__startswith="16", **bilan_filters)
-            .aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        )
-
-        # EBE = (70+71+72) - (60+61+62) + 74 - 63 - 64
-        c70 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="70", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c71 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="71", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c72 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="72", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c74 = CompteResultat.objects.filter(nature="PRODUIT", numero_compte__startswith="74", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c60 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="60", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c61 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="61", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c62 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="62", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c63 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="63", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        c64 = CompteResultat.objects.filter(nature="CHARGE", numero_compte__startswith="64", **cr_filters).aggregate(t=Sum("montant_ar"))["t"] or Decimal("0")
-        ebe = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
-
-        if ebe != 0 and abs(ebe) >= 1000:
-            leverage = float(dettes_fin / ebe)
-            if leverage > 1000: leverage = 1000
-            elif leverage < -1000: leverage = -1000
-        else:
-            leverage = None
-
-        return leverage
+    # Dictionnaire de mois pour le formatage manuel
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
 
     evolution_data = []
-    current_date = start_date_obj.replace(day=1)
-
-    while current_date <= end_date_obj:
-        if current_date.month == 12:
-            next_month = current_date.replace(year=current_date.year + 1, month=1)
-        else:
-            next_month = current_date.replace(month=current_date.month + 1)
-        last_day = next_month - timedelta(days=1)
-
-        leverage_val = get_leverage_for_period(current_date, last_day)
-        evolution_data.append({
-            "mois": current_date.strftime("%b %Y"),
-            "leverage": leverage_val,
-            "date": current_date.strftime("%Y-%m-%d")
-        })
-        current_date = next_month
+    
+    if group_by == "year":
+        cr_map = {entry["period"].year: entry for entry in stats_qs_cr}
+        bilan_map = {entry["period"].year: entry for entry in stats_qs_bilan}
+        curr_year = start_date_obj.year
+        while curr_year <= end_date_obj.year:
+            cr_entry = cr_map.get(curr_year, {})
+            bilan_entry = bilan_map.get(curr_year, {})
+            
+            c70 = cr_entry.get("c70") or Decimal("0")
+            c71 = cr_entry.get("c71") or Decimal("0")
+            c72 = cr_entry.get("c72") or Decimal("0")
+            c74 = cr_entry.get("c74") or Decimal("0")
+            c60 = cr_entry.get("c60") or Decimal("0")
+            c61 = cr_entry.get("c61") or Decimal("0")
+            c62 = cr_entry.get("c62") or Decimal("0")
+            c63 = cr_entry.get("c63") or Decimal("0")
+            c64 = cr_entry.get("c64") or Decimal("0")
+            ebe = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+            
+            dettes_fin = bilan_entry.get("dettes_fin") or Decimal("0")
+            
+            leverage = None
+            if ebe != 0 and abs(ebe) >= 1000:
+                leverage = float(dettes_fin / ebe)
+                if leverage > 1000: leverage = 1000
+                elif leverage < -1000: leverage = -1000
+                
+            evolution_data.append({
+                "mois": str(curr_year),
+                "leverage": leverage,
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        cr_map = {(entry["period"].year, entry["period"].month): entry for entry in stats_qs_cr}
+        bilan_map = {(entry["period"].year, entry["period"].month): entry for entry in stats_qs_bilan}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            cr_entry = cr_map.get((curr.year, curr.month), {})
+            bilan_entry = bilan_map.get((curr.year, curr.month), {})
+            
+            c70 = cr_entry.get("c70") or Decimal("0")
+            c71 = cr_entry.get("c71") or Decimal("0")
+            c72 = cr_entry.get("c72") or Decimal("0")
+            c74 = cr_entry.get("c74") or Decimal("0")
+            c60 = cr_entry.get("c60") or Decimal("0")
+            c61 = cr_entry.get("c61") or Decimal("0")
+            c62 = cr_entry.get("c62") or Decimal("0")
+            c63 = cr_entry.get("c63") or Decimal("0")
+            c64 = cr_entry.get("c64") or Decimal("0")
+            ebe = (c70 + c71 + c72) - (c60 + c61 + c62) + c74 - c63 - c64
+            
+            dettes_fin = bilan_entry.get("dettes_fin") or Decimal("0")
+            
+            leverage = None
+            if ebe != 0 and abs(ebe) >= 1000:
+                leverage = float(dettes_fin / ebe)
+                if leverage > 1000: leverage = 1000
+                elif leverage < -1000: leverage = -1000
+            
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
+            evolution_data.append({
+                "mois": label,
+                "leverage": leverage,
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
 
     return Response({
         "evolution": evolution_data,
@@ -3045,32 +3368,37 @@ def evolution_ca_resultat_view(request):
     
     evolution_data = []
     
+    # Optimize by using database-level aggregation
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    # Dictionnaire de mois pour le formatage manuel (évite les soucis de locale)
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+    
+    stats_qs = CompteResultat.objects.filter(
+        project_id=project_id,
+        date__range=[start_date_obj, end_date_obj]
+    ).annotate(
+        period=period_expr
+    ).values("period").annotate(
+        ca=Sum(Case(When(numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
+        total_produits=Sum(Case(When(numero_compte__startswith="7", then="montant_ar"), default=0, output_field=DecimalField())),
+        total_charges=Sum(Case(When(numero_compte__startswith="6", then="montant_ar"), default=0, output_field=DecimalField()))
+    ).order_by("period")
+
+    evolution_data = []
+    
     if group_by == "year":
         current_year = start_date_obj.year
         end_year = end_date_obj.year
         
+        # Create a map for easy lookup
+        stats_map = {entry["period"].year: entry for entry in stats_qs}
+        
         while current_year <= end_year:
-            year_start = date(current_year, 1, 1)
-            year_end = date(current_year, 12, 31)
-            
-            # Ajustement si le filtre ne couvre pas toute l'année
-            if current_year == start_date_obj.year:
-                year_start = start_date_obj
-            if current_year == end_date_obj.year:
-                year_end = end_date_obj
-                
-            stats = CompteResultat.objects.filter(
-                project_id=project_id,
-                date__range=[year_start, year_end]
-            ).aggregate(
-                ca=Sum(Case(When(nature="PRODUIT", numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
-                total_produits=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
-                total_charges=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
-            )
-            
-            ca_val = stats['ca'] or Decimal("0.00")
-            total_prod = stats['total_produits'] or Decimal("0.00")
-            total_charg = stats['total_charges'] or Decimal("0.00")
+            entry = stats_map.get(current_year, {})
+            ca_val = entry.get("ca") or Decimal("0.00")
+            total_charg = entry.get("total_charges") or Decimal("0.00")
+            total_prod = entry.get("total_produits") or Decimal("0.00")
             resultat_net = total_prod - total_charg
             
             evolution_data.append({
@@ -3082,43 +3410,33 @@ def evolution_ca_resultat_view(request):
             })
             current_year += 1
     else:
-        # Default: month-by-month
-        current_date = start_date_obj.replace(day=1)
-        while current_date <= end_date_obj:
-            if current_date.month == 12:
-                next_month = current_date.replace(year=current_date.year + 1, month=1)
-            else:
-                next_month = current_date.replace(month=current_date.month + 1)
-            
-            last_day = next_month - timedelta(days=1)
-            
-            stats = CompteResultat.objects.filter(
-                project_id=project_id,
-                date__range=[current_date, last_day]
-            ).aggregate(
-                ca=Sum(Case(When(nature="PRODUIT", numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField())),
-                total_produits=Sum(Case(When(nature="PRODUIT", then="montant_ar"), default=0, output_field=DecimalField())),
-                total_charges=Sum(Case(When(nature="CHARGE", then="montant_ar"), default=0, output_field=DecimalField()))
-            )
-            
-            ca_val = stats['ca'] or Decimal("0.00")
-            total_prod = stats['total_produits'] or Decimal("0.00")
-            total_charg = stats['total_charges'] or Decimal("0.00")
+        # Month-by-month filling
+        # Create a map using (year, month) tuple or date object
+        stats_map = {(entry["period"].year, entry["period"].month): entry for entry in stats_qs}
+        
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            entry = stats_map.get((curr.year, curr.month), {})
+            ca_val = entry.get("ca") or Decimal("0.00")
+            total_charg = entry.get("total_charges") or Decimal("0.00")
+            total_prod = entry.get("total_produits") or Decimal("0.00")
             resultat_net = total_prod - total_charg
             
-            # Dictionnaire de mois pour le formatage manuel (évite les soucis de locale)
-            mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
-            label = f"{mois_fr[current_date.month - 1]} {current_date.year}"
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
             
             evolution_data.append({
                 "name": label,
                 "ca": float(ca_val),
                 "charges": float(total_charg),
                 "resultatNet": float(resultat_net),
-                "date": current_date.strftime("%Y-%m-%d")
+                "date": curr.strftime("%Y-%m-%d")
             })
             
-            current_date = next_month
+            # Move to next month
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
     
     return Response(evolution_data)
 
@@ -4342,6 +4660,7 @@ def gearing_view(request):
 
     def calculate_gearing(start_date, end_date):
         """Fonction helper pour calculer le Gearing pour une période donnée"""
+        project_id = getattr(request, "project_id", None)
         # Dettes financières (classe 16) + Concours bancaires (512 Passif)
         dettes_financieres = get_latest_bilan_sum(
             project_id, start_date, end_date, prefix_list=["16", "512"], type_bilan="PASSIF"
@@ -4769,31 +5088,31 @@ def bilan_kpis_with_variations_view(request):
         data = qs.aggregate(
             # Actif Courant
             actif_courant=Sum(Case(
-                When(Q(categorie__icontains='ACTIF') & Q(categorie__icontains='COURANT'), then='montant_ar'),
+                When(categorie='ACTIF_COURANTS', then='montant_ar'),
                 default=0,
                 output_field=DecimalField()
             )),
             # Actif Non Courant
             actif_non_courant=Sum(Case(
-                When(Q(categorie__icontains='ACTIF') & ~Q(categorie__icontains='COURANT'), then='montant_ar'),
+                When(categorie='ACTIF_NON_COURANTS', then='montant_ar'),
                 default=0,
                 output_field=DecimalField()
             )),
             # Passif Courant
             passif_courant=Sum(Case(
-                When(Q(categorie__icontains='PASSIF') & Q(categorie__icontains='COURANT'), then='montant_ar'),
+                When(categorie='PASSIFS_COURANTS', then='montant_ar'),
                 default=0,
                 output_field=DecimalField()
             )),
             # Passif Non Courant
             passif_non_courant=Sum(Case(
-                When(Q(categorie__icontains='PASSIF') & ~Q(categorie__icontains='COURANT'), then='montant_ar'),
+                When(categorie='PASSIFS_NON_COURANTS', then='montant_ar'),
                 default=0,
                 output_field=DecimalField()
             )),
-            # Capitaux Propres (comptes de la catégorie CAPITAUX_PROPRES)
+            # Capitaux Propres
             capitaux_propres_bilan=Sum(Case(
-                When(categorie__icontains='CAPITAUX', then='montant_ar'),
+                When(categorie='CAPITAUX_PROPRES', then='montant_ar'),
                 default=0,
                 output_field=DecimalField()
             )),
@@ -4814,15 +5133,22 @@ def bilan_kpis_with_variations_view(request):
         total_dettes = (data['passif_courant'] or Decimal('0.00')) + (data['passif_non_courant'] or Decimal('0.00'))
         ratio_endettement = (total_dettes / capitaux_propres_total * 100) if capitaux_propres_total != 0 else Decimal('0.00')
         
+        # Total Actif et Total Passif (Vérification Équilibre)
+        total_actif = (data['actif_courant'] or Decimal('0.00')) + (data['actif_non_courant'] or Decimal('0.00'))
+        total_passif = total_dettes + capitaux_propres_total
+        
         return {
             'actif_courant': data['actif_courant'] or Decimal('0.00'),
             'actif_non_courant': data['actif_non_courant'] or Decimal('0.00'),
+            'total_actif': total_actif,
             'passif_courant': data['passif_courant'] or Decimal('0.00'),
             'passif_non_courant': data['passif_non_courant'] or Decimal('0.00'),
             'capitaux_propres': capitaux_propres_total,
+            'total_passif': total_passif,
             'ratio_endettement': ratio_endettement,
             'produits': cr_data['produits'] or Decimal('0.00'),
             'charges': cr_data['charges'] or Decimal('0.00'),
+            'resultat_net': (cr_data['produits'] or Decimal('0.00')) - (cr_data['charges'] or Decimal('0.00')),
         }
     
     # Calcul période actuelle et précédente
@@ -4836,7 +5162,8 @@ def bilan_kpis_with_variations_view(request):
         'passif_courant': current_kpis['passif_courant'] - previous_kpis['passif_courant'],
         'passif_non_courant': current_kpis['passif_non_courant'] - previous_kpis['passif_non_courant'],
         'capitaux_propres': current_kpis['capitaux_propres'] - previous_kpis['capitaux_propres'],
-        'ratio_endettement': current_kpis['ratio_endettement'] - previous_kpis['ratio_endettement'],  # Variation en points
+        'ratio_endettement': current_kpis['ratio_endettement'] - previous_kpis['ratio_endettement'],
+        'resultat_net': current_kpis['resultat_net'] - previous_kpis['resultat_net'],
     }
     
     # Assemblage de la réponse
@@ -4844,28 +5171,36 @@ def bilan_kpis_with_variations_view(request):
         'current': {
             'actif_courant': float(current_kpis['actif_courant']),
             'actif_non_courant': float(current_kpis['actif_non_courant']),
+            'total_actif': float(current_kpis['total_actif']),
             'passif_courant': float(current_kpis['passif_courant']),
             'passif_non_courant': float(current_kpis['passif_non_courant']),
             'capitaux_propres': float(current_kpis['capitaux_propres']),
+            'total_passif': float(current_kpis['total_passif']),
             'ratio_endettement': float(current_kpis['ratio_endettement']),
             'produits': float(current_kpis['produits']),
             'charges': float(current_kpis['charges']),
+            'resultat_net': float(current_kpis['resultat_net']),
         },
         'previous': {
             'actif_courant': float(previous_kpis['actif_courant']),
             'actif_non_courant': float(previous_kpis['actif_non_courant']),
+            'total_actif': float(previous_kpis['total_actif']),
             'passif_courant': float(previous_kpis['passif_courant']),
             'passif_non_courant': float(previous_kpis['passif_non_courant']),
             'capitaux_propres': float(previous_kpis['capitaux_propres']),
+            'total_passif': float(previous_kpis['total_passif']),
             'ratio_endettement': float(previous_kpis['ratio_endettement']),
         },
         'variations': {
             'actif_courant': float(variations['actif_courant']),
             'actif_non_courant': float(variations['actif_non_courant']),
+            'total_actif': float(current_kpis['total_actif'] - previous_kpis['total_actif']),
             'passif_courant': float(variations['passif_courant']),
             'passif_non_courant': float(variations['passif_non_courant']),
             'capitaux_propres': float(variations['capitaux_propres']),
+            'total_passif': float(current_kpis['total_passif'] - previous_kpis['total_passif']),
             'ratio_endettement': float(variations['ratio_endettement']),
+            'resultat_net': float(variations['resultat_net']),
         }
     }
     
@@ -5311,6 +5646,200 @@ def delais_fournisseurs_view(request):
         "achats": current["achats"],
         "delais_jours": float(current["delais_jours"]) if current["delais_jours"] is not None else None,
         "variation": variation
+    })
+
+
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+        OpenApiParameter("group_by", type=str, description="Grouper par (month/year)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
+def evolution_delais_clients_view(request):
+    """
+    Évolution des délais clients sur plusieurs mois/années
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum, Max, Case, When, DecimalField
+    from decimal import Decimal
+    from django.db.models.functions import TruncMonth, TruncYear
+    import calendar
+
+    project_id = getattr(request, "project_id", None)
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    group_by = request.GET.get("group_by", "month")
+
+    if not date_start or not date_end:
+        max_date = Bilan.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)
+        else:
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    bilan_stats = Bilan.objects.filter(project_id=project_id, date__range=[start_date_obj, end_date_obj]).annotate(period=period_expr).values("period").annotate(
+        ar=Sum(Case(When(type_bilan="ACTIF", numero_compte__startswith="411", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+    cr_stats = CompteResultat.objects.filter(project_id=project_id, date__range=[start_date_obj, end_date_obj]).annotate(period=period_expr).values("period").annotate(
+        ca=Sum(Case(When(numero_compte__startswith="70", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+    evolution_data = []
+
+    if group_by == "year":
+        bilan_map = {entry["period"].year: entry for entry in bilan_stats}
+        cr_map = {entry["period"].year: entry for entry in cr_stats}
+        curr_year = start_date_obj.year
+        while curr_year <= end_date_obj.year:
+            ar = bilan_map.get(curr_year, {}).get("ar") or Decimal("0")
+            ca = cr_map.get(curr_year, {}).get("ca") or Decimal("0")
+            nb_jours = 365
+            delais = 0.0
+            if ca != 0:
+                delais = float((ar / ca) * nb_jours)
+            evolution_data.append({
+                "mois": str(curr_year),
+                "delais_jours": delais,
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        bilan_map = {(entry["period"].year, entry["period"].month): entry for entry in bilan_stats}
+        cr_map = {(entry["period"].year, entry["period"].month): entry for entry in cr_stats}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            ar = bilan_map.get((curr.year, curr.month), {}).get("ar") or Decimal("0")
+            ca = cr_map.get((curr.year, curr.month), {}).get("ca") or Decimal("0")
+            _, nb_jours = calendar.monthrange(curr.year, curr.month)
+            delais = 0.0
+            if ca != 0:
+                delais = float((ar / ca) * nb_jours)
+            
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
+            evolution_data.append({
+                "mois": label,
+                "delais_jours": delais,
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
+
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
+    })
+
+
+@extend_schema(
+    parameters=[
+        OpenApiParameter("date_start", type=str, description="Date de début (YYYY-MM-DD)"),
+        OpenApiParameter("date_end", type=str, description="Date de fin (YYYY-MM-DD)"),
+        OpenApiParameter("group_by", type=str, description="Grouper par (month/year)"),
+    ],
+    responses={200: EvolutionResponseSerializer}
+)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated, HasProjectAccess])
+def evolution_delais_fournisseurs_view(request):
+    """
+    Évolution des délais fournisseurs sur plusieurs mois/années
+    """
+    from datetime import datetime, timedelta
+    from dateutil.relativedelta import relativedelta
+    from django.db.models import Sum, Max, Case, When, DecimalField
+    from decimal import Decimal
+    from django.db.models.functions import TruncMonth, TruncYear
+    import calendar
+
+    project_id = getattr(request, "project_id", None)
+    date_start = request.GET.get("date_start")
+    date_end = request.GET.get("date_end")
+    group_by = request.GET.get("group_by", "month")
+
+    if not date_start or not date_end:
+        max_date = Bilan.objects.filter(project_id=project_id).aggregate(max_date=Max("date"))["max_date"]
+        if max_date:
+            end_date_obj = max_date
+            start_date_obj = end_date_obj - relativedelta(months=5)
+        else:
+            end_date_obj = datetime.now().date()
+            start_date_obj = end_date_obj - relativedelta(months=5)
+    else:
+        start_date_obj = datetime.strptime(date_start, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(date_end, '%Y-%m-%d').date()
+
+    period_expr = TruncMonth("date") if group_by == "month" else TruncYear("date")
+    
+    bilan_stats = Bilan.objects.filter(project_id=project_id, date__range=[start_date_obj, end_date_obj]).annotate(period=period_expr).values("period").annotate(
+        ap=Sum(Case(When(type_bilan="PASSIF", numero_compte__startswith="401", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+    cr_stats = CompteResultat.objects.filter(project_id=project_id, date__range=[start_date_obj, end_date_obj]).annotate(period=period_expr).values("period").annotate(
+        achats=Sum(Case(When(numero_compte__startswith="60", then="montant_ar"), default=0, output_field=DecimalField()))
+    )
+
+    mois_fr = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+    evolution_data = []
+
+    if group_by == "year":
+        bilan_map = {entry["period"].year: entry for entry in bilan_stats}
+        cr_map = {entry["period"].year: entry for entry in cr_stats}
+        curr_year = start_date_obj.year
+        while curr_year <= end_date_obj.year:
+            ap = bilan_map.get(curr_year, {}).get("ap") or Decimal("0")
+            achats = cr_map.get(curr_year, {}).get("achats") or Decimal("0")
+            nb_jours = 365
+            delais = 0.0
+            if achats != 0:
+                delais = float((ap / achats) * nb_jours)
+            evolution_data.append({
+                "mois": str(curr_year),
+                "delais_jours": delais,
+                "date": f"{curr_year}-01-01"
+            })
+            curr_year += 1
+    else:
+        bilan_map = {(entry["period"].year, entry["period"].month): entry for entry in bilan_stats}
+        cr_map = {(entry["period"].year, entry["period"].month): entry for entry in cr_stats}
+        curr = start_date_obj.replace(day=1)
+        while curr <= end_date_obj:
+            ap = bilan_map.get((curr.year, curr.month), {}).get("ap") or Decimal("0")
+            achats = cr_map.get((curr.year, curr.month), {}).get("achats") or Decimal("0")
+            _, nb_jours = calendar.monthrange(curr.year, curr.month)
+            delais = 0.0
+            if achats != 0:
+                delais = float((ap / achats) * nb_jours)
+            
+            label = f"{mois_fr[curr.month - 1]} {curr.year}"
+            evolution_data.append({
+                "mois": label,
+                "delais_jours": delais,
+                "date": curr.strftime("%Y-%m-%d")
+            })
+            if curr.month == 12:
+                curr = curr.replace(year=curr.year + 1, month=1)
+            else:
+                curr = curr.replace(month=curr.month + 1)
+
+    return Response({
+        "evolution": evolution_data,
+        "periode_debut": start_date_obj.strftime("%Y-%m-%d"),
+        "periode_fin": end_date_obj.strftime("%Y-%m-%d")
     })
 
 

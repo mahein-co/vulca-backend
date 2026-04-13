@@ -7,7 +7,10 @@ from dotenv import load_dotenv
 
 def main():
     """Run administrative tasks."""
-    load_dotenv()
+    # Load .env from project root (one level up from src/)
+    env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+    load_dotenv(env_path)
+    
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'vulca_backend.settings')
     try:
         from django.core.management import execute_from_command_line

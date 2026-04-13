@@ -9,7 +9,7 @@ from vulca_backend import settings
 
 from rest_framework import generics, serializers, status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from ocr.constants import UNIFIED_EXTRACTION_PROMPT
 from compta.permissions import HasProjectAccess
@@ -18,9 +18,14 @@ from ocr.serializers import (
     FileSourceSerializer, FormSourceSerializer, OcrExtractResponseSerializer,
     ExcelAnalyzeResponseSerializer, ExcelValidateRequestSerializer, PieceListResponseSerializer
 )
+from ocr.models import FileSource, FormSource
+from compta.models import Project, Bilan, CompteResultat, Journal
 
 from openai import OpenAI
 client = OpenAI(api_key=settings.OPENAI_API_KEY) 
+
+from ocr.utils import generate_description, generate_excel_description, detect_file_type, clean_ai_json, safe_openai_call
+from ocr.openai_vision_ocr import extract_content_with_vision
 
 
 def normalize_phone(phone: str) -> str:

@@ -339,9 +339,11 @@ class TopCompteSerializer(serializers.Serializer):
 class BilanKpiGroupSerializer(serializers.Serializer):
     actif_courant = serializers.FloatField()
     actif_non_courant = serializers.FloatField()
+    total_actif = serializers.FloatField(required=False)
     passif_courant = serializers.FloatField()
     passif_non_courant = serializers.FloatField()
     capitaux_propres = serializers.FloatField()
+    total_passif = serializers.FloatField(required=False)
     ratio_endettement = serializers.FloatField()
     produits = serializers.FloatField(required=False)
     charges = serializers.FloatField(required=False)

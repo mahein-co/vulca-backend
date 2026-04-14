@@ -162,6 +162,19 @@ def dashboard_indicators_view(request):
             fi_ebe = (charges_fi / ebe) if ebe != 0 else 0
             fi_ca = (charges_fi / ca) if ca != 0 else 0
 
+            # Check for TVA data presence (any entries for 4456/4457 in the period)
+            has_tva_data = Bilan.objects.filter(
+                project_id=project_id, 
+                date__range=[d_start, d_end],
+                numero_compte__regex=r'^445[67]'
+            ).exists()
+
+            # Check for Balance records presence
+            has_balance_records = Balance.objects.filter(
+                project_id=project_id,
+                date__range=[d_start, d_end]
+            ).exists()
+
             return {
                 "ca": ca, "ebe": ebe, "resultat_net": resultat_net, "caf": caf, "bfr": bfr,
                 "marge_brute": marge_brute, "marge_nette": marge_nette, "marge_operationnelle": marge_op,
@@ -174,7 +187,9 @@ def dashboard_indicators_view(request):
                 "actifs_courants": actifs_courants, "passifs_courants": passifs_courants, "stocks": stocks,
                 "fonds_propres": capitaux_propres, "total_actif": total_actif, "dettes_financieres": dettes_fi,
                 "cout_ventes": cout_607, "chiffre_affaire": ca, "charges_exploitation": (achats + charges_ext_imp_pers + dotations),
-                "resultat_operationnel": resultat_exploit, "passif_non_courant": passif_non_courant
+                "resultat_operationnel": resultat_exploit, "passif_non_courant": passif_non_courant,
+                "has_tva": has_tva_data,
+                "has_balance": has_balance_records
             }
         except Exception as e:
             print(f"[ERROR] calculate_all_kpis failed: {e}")
@@ -226,6 +241,8 @@ def dashboard_indicators_view(request):
             "leverage": float(current.get("leverage_brut", 0)),
             "total_balance": float(current.get("total_actif", 0)),
             "total_passif": float(current.get("passifs_courants", 0) + current.get("passif_non_courant", 0) + current.get("fonds_propres", 0)),
+            "has_tva": current.get("has_tva", False),
+            "has_balance": current.get("has_balance", False),
 
             "roe_data": { "roe": float(current.get("roe", 0)), "variation": get_v("roe", True), "resultat_net": float(current.get("resultat_net", 0)), "fonds_propres": float(current.get("fonds_propres", 0)) },
             "roa_data": { "roa": float(current.get("roa", 0)), "variation": get_v("roa", True), "resultat_net": float(current.get("resultat_net", 0)), "total_actif": float(current.get("total_actif", 0)) },

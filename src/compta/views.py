@@ -4,6 +4,7 @@ from decimal import Decimal
 from datetime import datetime, date
 
 from django.core.exceptions import ValidationError
+from django.core.mail import send_mail
 from django.db.models import Sum, Max, Min, DecimalField, Case, When, Q, Count
 from django.db.models.functions import TruncMonth, TruncYear
 
@@ -6010,10 +6011,25 @@ class ManageAccessRequestsView(generics.ListAPIView):
             access.approved_by = user
             access.approved_at = datetime.now()
             access.save()
+            
+            try:
+                subject = f"Accès au projet {access.project.name} approuvé"
+                message = f"Bonjour,\n\nVotre demande d'accès au projet '{access.project.name}' a été approuvée. Vous pouvez désormais y accéder sur la plateforme.\n\nCordialement,\nL'équipe administrative"
+                send_mail(subject, message, getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@rekapy.com'), [access.user.email])
+            except Exception as e:
+                print(f"Failed to send email: {e}")
+
         elif action == 'reject':
             access.status = 'rejected'
             access.approved_by = user # On note qui a rejeté
             access.save() # Ou delete() ? Gardons trace pour l'instant
+            
+            try:
+                subject = f"Demande d'accès au projet {access.project.name} refusée"
+                message = f"Bonjour,\n\nVotre demande d'accès au projet '{access.project.name}' a été refusée.\n\nVous pouvez à tout moment refaire une demande d'accès depuis votre espace si vous pensez qu'il s'agit d'une erreur.\n\nCordialement,\nL'équipe administrative"
+                send_mail(subject, message, getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@rekapy.com'), [access.user.email])
+            except Exception as e:
+                print(f"Failed to send email: {e}")
         else:
             return Response({"error": "Action invalide"}, status=status.HTTP_400_BAD_REQUEST)
 
